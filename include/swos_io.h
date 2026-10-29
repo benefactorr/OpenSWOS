@@ -23,6 +23,7 @@
 #define SWOS_IO_H
 
 #include "swos_types.h"
+#include <sys/stat.h>
 
 #ifdef __cplusplus
 extern "C" {

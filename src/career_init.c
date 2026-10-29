@@ -8,13 +8,19 @@
  * Chunk 61: 3 functions ported from SWOS2.s.
  */
 
+#include "ai_career_pool_capacity.h"
 #include "game_types.h"
 #include "comp_identity.h"
 #include <string.h>   /* memcpy in Rebuild_CupRecordNameSourcePointers */
+#include <stdlib.h>   /* getenv: optional AI swap smoke test */
+#include <stdio.h>    /* optional AI swap test log */
+#include <time.h>     /* vary manual transfer seeds between clicks */
 #include "endian_helpers.h"
 #include "menu_system.h"
 #include "input_text.h"
 #include "save_format_json.h"
+#include "swos_io.h"
+#include "rnc.h"  /* RNC v1/v2 compression used by SWOS TEAM.NNN assets */
 #include "random.h"
 #include "string_utils.h"
 #include "panic.h"
@@ -38,6 +44,7 @@ extern uint16_t _lastOfferPrimaryPlayerOrdinal;
 extern uint16_t _offerNegotiationAttemptCount;
 extern uint16_t _careerSeasonsCompleted;
 #include "career_params.h"
+#include "career_season.h"
 extern uint16_t _currentSeasonShowing;
 extern uint16_t _seasonTransferQuota;
 extern uint16_t _pendingForeignPlayerCount;
@@ -117,19 +124,21 @@ void Career_InitSeasonTransferMarketState(void)
     _lastOfferPrimaryPlayerOrdinal = 0xFFFF;
     _offerNegotiationAttemptCount = 0;
 
-    /* Compute season transfer quota */
-    uint16_t seasonsAdj = (uint16_t)(7 - _careerSeasonsCompleted) * 16;  /* mulu #$10 */
-    uint16_t divisor = _careerParams.num_seasons - _currentSeasonShowing;
-    int16_t numerator = (int16_t)(0x1B0 - _numForeignMarketPlayers2 - seasonsAdj);
-    /* ext.l + divu.w: sign-extend to 32-bit then unsigned divide by word */
-    uint16_t quota = (uint16_t)((uint32_t)(int32_t)numerator / divisor);
-
-    _seasonTransferQuota = quota;
+    /* The original 432-entry career-pool budget is no longer meaningful:
+     * manual AI transfers use a separate expanded (50,000) record pool.
+     * Once the career pool exceeded 432, the old compatibility clamp
+     * set quota=0 and therefore offerSwapSlotLimit=0. This stopped ALL
+     * ordinary transfer bids, even though thousands of records remained.
+     *
+     * Allocate a modest, stable annual budget for normal transfer-market
+     * processing. It resets every season, independently of AI exchanges.
+     * The replacement pool capacity is still checked before appending.
+     */
+    enum { NORMAL_MARKET_SEASON_QUOTA = 256u };
+    _seasonTransferQuota = NORMAL_MARKET_SEASON_QUOTA;
     _pendingForeignPlayerCount = 0;
-
-    uint16_t half = quota >> 1;   /* lsr.w #1 */
-    _offerSwapSlotLimit = half;
-    _transferPoolSlotLimit = quota - half;   /* neg.w of (half - quota) */
+    _offerSwapSlotLimit = NORMAL_MARKET_SEASON_QUOTA / 2;
+    _transferPoolSlotLimit = NORMAL_MARKET_SEASON_QUOTA / 2;
 
     _homeMarketUpdateBacklog = 0;
     _foreignMarketUpdateBacklog = 0;
@@ -275,7 +284,7 @@ void LoadLiverpool(void)
 /* ================================================================
  * Chunk 149: ContinueCareer  (SWOS2.s line 55140)
  *
- * If season == 19, show retirement message + reset career variables.
+ * If the configured final season is reached, show retirement message + reset career variables.
  * Otherwise advance to next season and re-activate contest menu.
  * ================================================================ */
 
@@ -617,6 +626,875 @@ extern void InitializeStartingBalanceForNewSeason(void);
 extern void Career_AdvanceToNextSeason_UpdateCompetitions(void);
 extern uint32_t GetNationalityAndTeamFile(uint16_t teamNo);
 
+/* SWOS AI Transfers Prototype 1: an opt-in, new-career-only smoke test.
+ * Enable via SWOS_AI_SWAP_TEST=1.  It swaps two starting goalkeepers from
+ * two AI clubs and records both changes in the existing JSON-saved career
+ * replacement pool.  It does not modify the original TEAM.* files.
+ * This is deliberately NOT the full-world transfer algorithm.
+ */
+static void SWOS_AISwapSmokeTest(void)
+{
+    const char *enabled = getenv("SWOS_AI_SWAP_TEST");
+    if (!enabled || strcmp(enabled, "1") != 0)
+        return;
+
+    extern TeamFileEx *GetTeamPointer(uint16_t teamId);
+    extern MarketPlayer _careerForeignMarketPlayers[];
+    extern uint16_t _lastLoadedExtNumber;
+    extern uint8_t _viewRandomPhase;
+
+    /* Country 1 first, country 2 if the manager controls one of the
+     * candidate clubs.  Ordinal 0 is goalkeeper at both clubs. */
+    uint16_t clubA = 0x0100, clubB = 0x0101;
+    if (_selTeamNumber == clubA || _selTeamNumber == clubB) {
+        clubA = 0x0200;
+        clubB = 0x0201;
+    }
+    if (_selTeamNumber == clubA || _selTeamNumber == clubB)
+        return;
+    if (_numForeignMarketPlayers2 > SWOS_AI_CAREER_POOL_CAPACITY - 2)
+        return;
+
+    /* GetTeamPointer can reuse a scratch TEAM-file buffer: copy the first
+     * player before asking for the second club. */
+    TeamFileEx *teamA = GetTeamPointer(clubA);
+    if (!teamA || teamA->team.countryNumber != (clubA >> 8) ||
+        teamA->team.teamOrdinal != (clubA & 255))
+        return;
+    PlayerFile playerA = teamA->players[0];
+
+    TeamFileEx *teamB = GetTeamPointer(clubB);
+    if (!teamB || teamB->team.countryNumber != (clubB >> 8) ||
+        teamB->team.teamOrdinal != (clubB & 255))
+        return;
+    PlayerFile playerB = teamB->players[0];
+
+    /* Both must be goalkeepers, otherwise leave the career untouched. */
+    if ((playerA.positionAndFace & 0xE0u) != 0 ||
+        (playerB.positionAndFace & 0xE0u) != 0)
+        return;
+
+    /* Duplicate slot overrides would be ambiguous, so abort if present. */
+    for (uint16_t i = 0; i < _numForeignMarketPlayers2; i++) {
+        const MarketPlayer *e = &_careerForeignMarketPlayers[i];
+        const uint8_t *id = (const uint8_t *)&e->teamId;
+        uint16_t teamId = ((uint16_t)id[0] << 8) | id[1];
+        if ((teamId == clubA || teamId == clubB) && e->playerOrdinal == 0)
+            return;
+    }
+
+    MarketPlayer *a = &_careerForeignMarketPlayers[_numForeignMarketPlayers2];
+    MarketPlayer *b = &_careerForeignMarketPlayers[_numForeignMarketPlayers2 + 1];
+    ((uint8_t *)&a->teamId)[0] = (uint8_t)(clubA >> 8);
+    ((uint8_t *)&a->teamId)[1] = (uint8_t)clubA;
+    a->playerOrdinal = 0;
+    a->padding = (int8_t)_viewRandomPhase;
+    a->player = playerB;
+
+    ((uint8_t *)&b->teamId)[0] = (uint8_t)(clubB >> 8);
+    ((uint8_t *)&b->teamId)[1] = (uint8_t)clubB;
+    b->playerOrdinal = 0;
+    b->padding = (int8_t)_viewRandomPhase;
+    b->player = playerA;
+
+    _numForeignMarketPlayers2 += 2;
+    _pendingForeignPlayerCount += 2;
+    _lastLoadedExtNumber = 255;
+
+    /* Update any live cached club as well as the serialized overrides.
+     * For scratch-loaded clubs the usual patch routine may already apply. */
+    teamA = GetTeamPointer(clubA);
+    if (teamA) teamA->players[0] = playerB;
+    teamB = GetTeamPointer(clubB);
+    if (teamB) teamB->players[0] = playerA;
+
+    fprintf(stderr, "[SWOS AI P1] Swapped goalkeepers: %04X/%s <-> %04X/%s; overrides=%u\n",
+            clubA, (char *)playerA.playerName, clubB, (char *)playerB.playerName,
+            (unsigned)_numForeignMarketPlayers2);
+}
+
+/* Prototype 2.2: log directly to a file, because Windows GUI builds may
+ * not inherit a visible stderr console even when launched from MSYS2. */
+#define SWOS_AI_LOG(...) do { \
+    FILE *swos_ai_file = fopen("swos_ai_debug.log", "a"); \
+    if (swos_ai_file) { \
+        fprintf(swos_ai_file, __VA_ARGS__); \
+        fclose(swos_ai_file); \
+    } \
+} while (0)
+
+/* Prototype 2.5: goalkeeper exchanges to exercise expanded replacement storage.
+ * Enabled only for NEW careers with SWOS_AI_STRESS_TEST=1. Unlike P1,
+ * this is a pool-capacity stress test, not an AI transfer policy.
+ * Clubs are selected deterministically from existing TEAM records.
+ * This is one goalkeeper per club, so the maximum record count is bounded
+ * by the number of eligible clubs, regardless of the requested target.
+ */
+static void SWOS_AIStressTest(void)
+{
+    const char *enabled = getenv("SWOS_AI_STRESS_TEST");
+    SWOS_AI_LOG("[SWOS AI P2.5] stress function called; flag=%s\n",
+                enabled ? enabled : "(not set)");
+    if (!enabled || strcmp(enabled, "1") != 0)
+        return;
+
+    extern int16_t LoadTeamFile(uint16_t extNumber);
+    extern uint8_t _teamFileBuffer[];
+    extern MarketPlayer _careerForeignMarketPlayers[];
+    extern uint16_t _lastLoadedExtNumber;
+    extern uint8_t _viewRandomPhase;
+
+    /* Diagnostic target is limited by storage capacity and actual available clubs. */
+    uint16_t target = 20;
+    const char *sizeEnv = getenv("SWOS_AI_STRESS_RECORDS");
+    if (sizeEnv && *sizeEnv) {
+        char *endptr = NULL;
+        long requested = strtol(sizeEnv, &endptr, 10);
+        if (endptr != sizeEnv && *endptr == '\0' && requested >= 2 && requested <= SWOS_AI_CAREER_POOL_CAPACITY)
+            target = (uint16_t)(requested & ~1L);
+    }
+
+    uint16_t added = 0;
+    uint16_t heldId = 0;
+    PlayerFile heldPlayer;
+    int held = 0;
+
+    SWOS_AI_LOG("[SWOS AI P2.5] starting bounded test, target=%u\n", (unsigned)target);
+    fprintf(stderr, "[SWOS AI P2.1] starting bounded test, target=%u\n", (unsigned)target);
+    fflush(stderr);
+
+    for (uint16_t country = 1; country <= 73 && added < target; country++) {
+        /* TEAM numbers are not contiguous. The original supplied SWOS 96/97
+         * database has gaps at these country codes. Calling LoadTeamFile on a
+         * missing entry invokes PanicHaltLoop; do NOT use fopen relative to
+         * the process working directory because the assets can be JSON-backed. */
+        if (country == 9 || (country >= 52 && country <= 54) ||
+            country == 56 || country == 58 || country == 61 || country == 63) {
+            SWOS_AI_LOG("[SWOS AI P2.5] skip known missing country=%u\n", (unsigned)country);
+            continue;
+        }
+        SWOS_AI_LOG("[SWOS AI P2.5] about to load country=%u\n", (unsigned)country);
+        if (LoadTeamFile(country) != 0) {
+            fprintf(stderr, "[SWOS AI P2.1] load country %u failed\n", (unsigned)country);
+            continue;
+        }
+        uint16_t count;
+        memcpy(&count, _teamFileBuffer, sizeof(count));
+        SWOS_AI_LOG("[SWOS AI P2.5] country=%u team-count=%u inserted=%u\n",
+                    (unsigned)country, (unsigned)count, (unsigned)added);
+        if (count == 0 || count > 93) {
+            fprintf(stderr, "[SWOS AI P2.1] suspicious team count=%u for country=%u\n",
+                    (unsigned)count, (unsigned)country);
+            continue;
+        }
+        fprintf(stderr, "[SWOS AI P2.1] country=%u clubs=%u, inserted=%u\n",
+                (unsigned)country, (unsigned)count, (unsigned)added);
+        fflush(stderr);
+        const TeamFileEx *teams = (const TeamFileEx *)(_teamFileBuffer + 2);
+        for (uint16_t i = 0; i < count && added < target; i++) {
+            SWOS_AI_LOG("[SWOS AI P2.5] club BEGIN country=%u index=%u inserted=%u\n",
+                        (unsigned)country, (unsigned)i, (unsigned)added);
+            const TeamFileEx *team = &teams[i];
+            uint8_t actualCountry = team->team.countryNumber;
+            uint8_t ordinal = team->team.teamOrdinal;
+            SWOS_AI_LOG("[SWOS AI P2.5] club header country=%u index=%u actualCountry=%u ordinal=%u\n",
+                        (unsigned)country, (unsigned)i,
+                        (unsigned)actualCountry, (unsigned)ordinal);
+            if (actualCountry != country) continue;
+            uint16_t teamId = (uint16_t)((country << 8) | ordinal);
+            if (teamId == _selTeamNumber ||
+                _numForeignMarketPlayers2 > SWOS_AI_CAREER_POOL_CAPACITY - 2)
+                continue;
+            PlayerFile goalkeeper = team->players[0];
+            if ((goalkeeper.positionAndFace & 0xE0u) != 0)
+                continue;
+            int used = 0;
+            for (uint16_t k = 0; k < _numForeignMarketPlayers2; k++) {
+                const MarketPlayer *entry = &_careerForeignMarketPlayers[k];
+                const uint8_t *bytes = (const uint8_t *)&entry->teamId;
+                if (bytes[0] == actualCountry && bytes[1] == ordinal &&
+                    entry->playerOrdinal == 0) { used = 1; break; }
+            }
+            if (used) continue;
+            if (!held) {
+                heldId = teamId;
+                heldPlayer = goalkeeper;
+                held = 1;
+                continue;
+            }
+            MarketPlayer *a = &_careerForeignMarketPlayers[_numForeignMarketPlayers2];
+            MarketPlayer *b = a + 1;
+            ((uint8_t *)&a->teamId)[0] = (uint8_t)(heldId >> 8);
+            ((uint8_t *)&a->teamId)[1] = (uint8_t)heldId;
+            a->playerOrdinal = 0;
+            a->padding = (int8_t)_viewRandomPhase;
+            a->player = goalkeeper;
+            ((uint8_t *)&b->teamId)[0] = actualCountry;
+            ((uint8_t *)&b->teamId)[1] = ordinal;
+            b->playerOrdinal = 0;
+            b->padding = (int8_t)_viewRandomPhase;
+            b->player = heldPlayer;
+            SWOS_AI_LOG("[SWOS AI P2.5] append pair country=%u index=%u oldCount=%u\n",
+                        (unsigned)country, (unsigned)i,
+                        (unsigned)_numForeignMarketPlayers2);
+            _numForeignMarketPlayers2 += 2;
+            _pendingForeignPlayerCount += 2;
+            _lastLoadedExtNumber = 255;
+            added += 2;
+            held = 0;
+        }
+    }
+    SWOS_AI_LOG("[SWOS AI P2.5] complete inserted=%u total=%u capacity=%u\n",
+                (unsigned)added, (unsigned)_numForeignMarketPlayers2,
+                (unsigned)SWOS_AI_CAREER_POOL_CAPACITY);
+    fprintf(stderr, "[SWOS AI P2.1] complete inserted=%u total=%u capacity=%u\n",
+            (unsigned)added, (unsigned)_numForeignMarketPlayers2,
+            (unsigned)SWOS_AI_CAREER_POOL_CAPACITY);
+    fflush(stderr);
+}
+
+
+/* SWOS AI P3.2: manual world-wide AI exchange simulation.
+ * No call from new-career or season startup. The Transfers menu is the only trigger.
+ * Original TEAM data are read only. Career overrides are replayed before matching.
+ */
+#define SWOS_AI_P3_MAX_CLUBS 2048
+#define SWOS_AI_P3_MAX_EXCHANGES 12000
+
+typedef struct SWOS_AI_P3Club {
+    uint16_t id;
+    uint8_t country;
+    uint8_t league;
+    char name[18];
+    PlayerFile players[16];
+    uint8_t usedSlots[16];
+    uint8_t requested;
+    uint8_t completed;
+} SWOS_AI_P3Club;
+
+static int SWOS_AI_P3Cmp(const void *aa, const void *bb)
+{
+    const SWOS_AI_P3Club *a = (const SWOS_AI_P3Club *)aa;
+    const SWOS_AI_P3Club *b = (const SWOS_AI_P3Club *)bb;
+    if (a->country != b->country) return (int)a->country - (int)b->country;
+    if (a->league != b->league) return (int)a->league - (int)b->league;
+    return strcmp(a->name, b->name);
+}
+
+/* Remember players moved in the preceding two button clicks.  This is a
+ * session-local safeguard, not persisted in save games.  The player's full
+ * record is fingerprinted, so moving clubs does not change their identity. */
+#define SWOS_AI_P3_RECENT_SIZE 65536u
+static uint64_t SWOS_AI_P3RecentKeys[SWOS_AI_P3_RECENT_SIZE];
+static uint32_t SWOS_AI_P3RecentClicks[SWOS_AI_P3_RECENT_SIZE];
+static uint32_t SWOS_AI_P3ClickNumber;
+
+/* JSON career save hooks. Older saves without these keys reset only the
+ * cooldown, never the actual transfer records. */
+void SWOS_AI_P3ResetHistory(void)
+{
+    memset(SWOS_AI_P3RecentKeys, 0, sizeof(SWOS_AI_P3RecentKeys));
+    memset(SWOS_AI_P3RecentClicks, 0, sizeof(SWOS_AI_P3RecentClicks));
+    SWOS_AI_P3ClickNumber = 0;
+}
+
+uint32_t SWOS_AI_P3GetClickNumber(void) { return SWOS_AI_P3ClickNumber; }
+
+unsigned SWOS_AI_P3GetRecent(unsigned start, uint32_t *hi, uint32_t *lo,
+                              uint32_t *last)
+{
+    for (unsigned i = start; i < SWOS_AI_P3_RECENT_SIZE; ++i) {
+        uint32_t n = SWOS_AI_P3RecentClicks[i];
+        if (!n || (uint32_t)(SWOS_AI_P3ClickNumber - n) > 2u) continue;
+        uint64_t key = SWOS_AI_P3RecentKeys[i];
+        if (!key) continue;
+        *hi = (uint32_t)(key >> 32); *lo = (uint32_t)key;
+        *last = n;
+        return i + 1u;
+    }
+    return 0;
+}
+
+void SWOS_AI_P3LoadRecent(uint32_t hi, uint32_t lo, uint32_t last)
+{
+    uint64_t key = ((uint64_t)hi << 32) | lo;
+    if (!key || !last || last > SWOS_AI_P3ClickNumber ||
+        SWOS_AI_P3ClickNumber - last > 2u) return;
+    unsigned first = (unsigned)((key ^ (key >> 32)) & (SWOS_AI_P3_RECENT_SIZE - 1));
+    for (unsigned probe = 0; probe < SWOS_AI_P3_RECENT_SIZE; ++probe) {
+        unsigned i = (first + probe) & (SWOS_AI_P3_RECENT_SIZE - 1);
+        if (!SWOS_AI_P3RecentClicks[i] || SWOS_AI_P3RecentKeys[i] == key) {
+            SWOS_AI_P3RecentKeys[i] = key;
+            SWOS_AI_P3RecentClicks[i] = last;
+            return;
+        }
+    }
+}
+
+void SWOS_AI_P3SetClickNumber(uint32_t n) { SWOS_AI_P3ClickNumber = n; }
+
+
+static uint64_t SWOS_AI_P3Fingerprint(PlayerFile p)
+{
+    const unsigned char *bytes = (const unsigned char *)&p;
+    uint64_t h = UINT64_C(14695981039346656037);
+    for (unsigned i = 0; i < sizeof(p); i++) {
+        h ^= bytes[i];
+        h *= UINT64_C(1099511628211);
+    }
+    return h ? h : 1;
+}
+
+static unsigned SWOS_AI_P3RecentIndex(uint64_t key, uint32_t click)
+{
+    unsigned first = (unsigned)((key ^ (key >> 32)) & (SWOS_AI_P3_RECENT_SIZE - 1));
+    for (unsigned probe = 0; probe < SWOS_AI_P3_RECENT_SIZE; probe++) {
+        unsigned i = (first + probe) & (SWOS_AI_P3_RECENT_SIZE - 1);
+        uint32_t last = SWOS_AI_P3RecentClicks[i];
+        if (SWOS_AI_P3RecentKeys[i] == key || !last ||
+            (uint32_t)(click - last) > 2u)
+            return i;
+    }
+    return first;
+}
+
+static int SWOS_AI_P3RecentlyMoved(PlayerFile p, uint32_t click)
+{
+    uint64_t key = SWOS_AI_P3Fingerprint(p);
+    unsigned i = SWOS_AI_P3RecentIndex(key, click);
+    uint32_t last = SWOS_AI_P3RecentClicks[i];
+    return SWOS_AI_P3RecentKeys[i] == key && last &&
+           (uint32_t)(click - last) <= 2u;
+}
+
+static void SWOS_AI_P3MarkMoved(PlayerFile p, uint32_t click)
+{
+    uint64_t key = SWOS_AI_P3Fingerprint(p);
+    unsigned i = SWOS_AI_P3RecentIndex(key, click);
+    SWOS_AI_P3RecentKeys[i] = key;
+    SWOS_AI_P3RecentClicks[i] = click;
+}
+
+static uint32_t SWOS_AI_P3Seed = 0x534F5753u;
+static uint32_t SWOS_AI_P3Random(void)
+{
+    SWOS_AI_P3Seed = SWOS_AI_P3Seed * 1664525u + 1013904223u;
+    return SWOS_AI_P3Seed;
+}
+
+/* Use SWOS's own two-step price lookup, in game price units, rather than
+ * comparing the raw price indices as if they were linear currency values. */
+static unsigned SWOS_AI_P3Value(PlayerFile p)
+{
+    extern int8_t _avgTeamValues[];
+    extern uint16_t _avgTeamValueBases[];
+    int price = p.price;
+    if (price < 0 || price > 49 || !p.playerName[0]) return 0;
+    unsigned index = (uint8_t)_avgTeamValues[price];
+    if (!index || index >= 92) return 0;
+    return _avgTeamValueBases[index];
+}
+
+static unsigned SWOS_AI_P3Position(PlayerFile p)
+{
+    return (p.positionAndFace >> 5) & 7u;
+}
+
+static int SWOS_AI_P3IsValid(PlayerFile p)
+{
+    unsigned pos = SWOS_AI_P3Position(p);
+    return pos <= 7 && SWOS_AI_P3Value(p) > 0;
+}
+
+/* The career loader applies replacements in ascending order, so the LAST
+ * record for a team/slot is authoritative.  Older saves can contain multiple
+ * records for the same slot.  Updating the first one would be silently undone
+ * by the later records on the next roster reconstruction, duplicating players
+ * across teams.  Always update the last record instead. */
+static unsigned SWOS_AI_P3OverrideIndex(uint16_t teamId, unsigned slot)
+{
+    extern MarketPlayer _careerForeignMarketPlayers[];
+    unsigned result = _numForeignMarketPlayers2;
+    unsigned matches = 0;
+    for (unsigned k = 0; k < _numForeignMarketPlayers2; k++) {
+        const MarketPlayer *p = &_careerForeignMarketPlayers[k];
+        const uint8_t *bytes = (const uint8_t *)&p->teamId;
+        if (bytes[0] == (uint8_t)(teamId >> 8) &&
+            bytes[1] == (uint8_t)teamId && (uint8_t)p->playerOrdinal == slot) {
+            result = k;
+            ++matches;
+        }
+    }
+    if (matches > 1)
+        SWOS_AI_LOG("[SWOS AI OVERRIDE] club=%04X slot=%u records=%u using-last=%u\n",
+                    teamId, slot, matches, result);
+    return result;
+}
+
+static void SWOS_AI_P3WriteOverrideAt(uint16_t teamId, unsigned slot,
+                                      PlayerFile incoming, unsigned index)
+{
+    extern MarketPlayer _careerForeignMarketPlayers[];
+    extern uint16_t _lastLoadedExtNumber;
+    extern uint8_t _viewRandomPhase;
+    MarketPlayer *p = &_careerForeignMarketPlayers[index];
+    ((uint8_t *)&p->teamId)[0] = (uint8_t)(teamId >> 8);
+    ((uint8_t *)&p->teamId)[1] = (uint8_t)teamId;
+    p->playerOrdinal = (int8_t)slot;
+    p->padding = (int8_t)_viewRandomPhase;
+    p->player = incoming;
+    if (index == _numForeignMarketPlayers2) {
+        ++_numForeignMarketPlayers2;
+        ++_pendingForeignPlayerCount;
+    }
+    _lastLoadedExtNumber = 255;
+}
+
+/* Replacements alone do not change clubs already resident in the career's
+ * selected-team and TMD caches. GetTeamPointer() consults both caches before
+ * loading TEAM.NNN, so apply the new value to those live copies immediately.
+ * These copies are also saved as part of the career. */
+static unsigned SWOS_AI_P3SyncLiveSlot(uint16_t id, unsigned slot, PlayerFile p)
+{
+    extern uint16_t _numSelectedTeams;
+    extern uint16_t _careerFileBuffer;
+    extern uint8_t _tmdFileBuffer[];
+    extern uint16_t _currentTeamNumber;
+    extern uint8_t _currentTeam[];
+    unsigned changed = 0;
+    if (slot >= 16 || id == _selTeamNumber) return 0;
+    unsigned n = _numSelectedTeams;
+    if (n > 100) n = 100;
+    for (unsigned i = 0; i < n; ++i) {
+        TeamFileEx *t = &_selectedTeams[i];
+        if (PACK_BE_U16(t->team.countryNumber, t->team.teamOrdinal) == id) {
+            t->players[slot] = p;
+            ++changed;
+        }
+    }
+    n = _careerFileBuffer;
+    if (n > 128) n = 128;
+    TeamFileEx *tmd = (TeamFileEx *)_tmdFileBuffer;
+    for (unsigned i = 0; i < n; ++i) {
+        TeamFileEx *t = &tmd[i];
+        if (PACK_BE_U16(t->team.countryNumber, t->team.teamOrdinal) == id) {
+            t->players[slot] = p;
+            ++changed;
+        }
+    }
+    if (_currentTeamNumber == id) {
+        TeamFileEx *t = (TeamFileEx *)_currentTeam;
+        if (PACK_BE_U16(t->team.countryNumber, t->team.teamOrdinal) == id) {
+            t->players[slot] = p;
+            ++changed;
+        }
+    }
+    return changed;
+}
+
+/* Reserves both override slots before doing anything so a full pool cannot
+ * produce a one-sided exchange. */
+static int SWOS_AI_P3Swap(SWOS_AI_P3Club *a, unsigned sa,
+                          SWOS_AI_P3Club *b, unsigned sb)
+{
+    unsigned ia = SWOS_AI_P3OverrideIndex(a->id, sa);
+    unsigned ib = SWOS_AI_P3OverrideIndex(b->id, sb);
+    unsigned needed = (ia == _numForeignMarketPlayers2) +
+                      (ib == _numForeignMarketPlayers2);
+    if (_numForeignMarketPlayers2 + needed > SWOS_AI_CAREER_POOL_CAPACITY)
+        return 0;
+    PlayerFile pa = a->players[sa];
+    PlayerFile pb = b->players[sb];
+    /* After appending first entry the next new slot is one index later. */
+    if (ia == _numForeignMarketPlayers2 && ib == _numForeignMarketPlayers2)
+        ++ib;
+    SWOS_AI_P3WriteOverrideAt(a->id, sa, pb, ia);
+    SWOS_AI_P3WriteOverrideAt(b->id, sb, pa, ib);
+    a->players[sa] = pb;
+    b->players[sb] = pa;
+    unsigned syncedA = SWOS_AI_P3SyncLiveSlot(a->id, sa, pb);
+    unsigned syncedB = SWOS_AI_P3SyncLiveSlot(b->id, sb, pa);
+    SWOS_AI_LOG("[SWOS AI CACHE] sync %04X:%u cached=%u; %04X:%u cached=%u\n",
+                a->id, sa, syncedA, b->id, sb, syncedB);
+    a->usedSlots[sa] = b->usedSlots[sb] = 1;
+    return 1;
+}
+
+static unsigned SWOS_AI_P3AuditSlot(uint16_t id, unsigned slot,
+                                    const PlayerFile *expected,
+                                    unsigned *cacheChecked)
+{
+    extern MarketPlayer _careerForeignMarketPlayers[];
+    extern uint16_t _numSelectedTeams, _careerFileBuffer, _currentTeamNumber;
+    extern uint8_t _tmdFileBuffer[], _currentTeam[];
+    unsigned fails = 0;
+    unsigned idx = SWOS_AI_P3OverrideIndex(id, slot);
+    if (idx >= _numForeignMarketPlayers2 ||
+        memcmp(&_careerForeignMarketPlayers[idx].player, expected, sizeof(*expected))) {
+        SWOS_AI_LOG("[SWOS AI AUDIT] FAIL override club=%04X slot=%u\n", id, slot);
+        ++fails;
+    }
+    unsigned n = _numSelectedTeams < 100 ? _numSelectedTeams : 100;
+    for (unsigned i=0;i<n;i++) {
+        TeamFileEx *t = &_selectedTeams[i];
+        if (PACK_BE_U16(t->team.countryNumber,t->team.teamOrdinal) != id) continue;
+        ++*cacheChecked;
+        if (memcmp(&t->players[slot],expected,sizeof(*expected))) ++fails;
+    }
+    n = _careerFileBuffer < 128 ? _careerFileBuffer : 128;
+    TeamFileEx *tmd=(TeamFileEx *)_tmdFileBuffer;
+    for(unsigned i=0;i<n;i++) {
+        TeamFileEx *t=&tmd[i];
+        if(PACK_BE_U16(t->team.countryNumber,t->team.teamOrdinal)!=id) continue;
+        ++*cacheChecked;
+        if(memcmp(&t->players[slot],expected,sizeof(*expected))) ++fails;
+    }
+    if(_currentTeamNumber==id) {
+        TeamFileEx *t=(TeamFileEx *)_currentTeam;
+        if(PACK_BE_U16(t->team.countryNumber,t->team.teamOrdinal)==id) {
+            ++*cacheChecked;
+            if(memcmp(&t->players[slot],expected,sizeof(*expected))) ++fails;
+        }
+    }
+    if(fails) SWOS_AI_LOG("[SWOS AI AUDIT] FAIL club=%04X slot=%u problems=%u\n",id,slot,fails);
+    return fails;
+}
+
+static int SWOS_AI_P3MissingCountry(unsigned c)
+{
+    /* TEAM.072 contains custom/joke preset teams, not career clubs.
+     * TEAM.080--085 are national-team continents and are excluded by
+     * the collector's country <= 79 loop bound. Keep both outside AI swaps. */
+    return c == 9 || (c >= 52 && c <= 54) || c == 56 ||
+           c == 58 || c == 61 || c == 63 || c == 74 ||
+           c == 57 || c == 59 || c == 70 || c == 72;
+}
+
+/* Load snapshots without LoadTeamFile(): the game's asset loader can retry
+ * forever when a country is absent/unavailable, and changes global state.
+ * Respect SWOS_DATA_JSON by trying the same JSON data loader first. The
+ * fallback directly reads verified, raw TEAM.NNN bytes from disk. */
+static int SWOS_AI_P3ReadCountry(unsigned country, uint8_t *buf, size_t cap,
+                                  uint16_t *outCount)
+{
+    char filename[80];
+    FILE *f = NULL;
+    size_t size = 0;
+    if (!buf || cap < 2 || !outCount) return 0;
+    *outCount = 0;
+    const char *json = getenv("SWOS_DATA_JSON");
+    if (!(json && strcmp(json, "0") == 0)) {
+        extern int DataJson_LoadTeamFileForCountry(int, uint8_t *, int);
+        int n = DataJson_LoadTeamFileForCountry((int)country, buf, 93);
+        if (n > 0 && n <= 93) {
+            *outCount = (uint16_t)n;
+            return 1;
+        }
+    }
+    /* Resolve the same asset directory and case as OpenSWOS's loader.
+     * The working directory is not necessarily the database directory. */
+    char logical[40];
+    char resolved[1024];
+    snprintf(logical, sizeof logical, "data/team.%03u", country);
+    const char *actual = swos_data_path(logical, resolved, sizeof resolved);
+    f = fopen(actual, "rb");
+    if (!f) {
+        SWOS_AI_LOG("[SWOS AI WORLD D4] SKIP country=%u: cannot open %s\n",
+                    country, actual);
+        return 0;
+    }
+    SWOS_AI_LOG("[SWOS AI WORLD D4] OPEN country=%u path=%s\n", country, actual);
+    /* TEAM.NNN files may be raw (2+684*N) or RNC-compressed. Read into a
+     * separate bounded input buffer and decode to the validated snapshot.
+     * In particular, never put compressed bytes in the output team buffer. */
+    const size_t packedCap = 256u * 1024u;
+    uint8_t *packed = (uint8_t *)malloc(packedCap + 32u);
+    if (!packed) { fclose(f); return 0; }
+    size = fread(packed, 1, packedCap + 1u, f);
+    int io_error = ferror(f);
+    fclose(f);
+    if (io_error || size == 0 || size > packedCap) {
+        SWOS_AI_LOG("[SWOS AI WORLD D5] SKIP country=%u: oversized/unreadable input size=%u\n",
+                    country, (unsigned)size);
+        free(packed);
+        return 0;
+    }
+    if (size >= 18 && packed[0] == 'R' && packed[1] == 'N' && packed[2] == 'C') {
+        unsigned method = packed[3];
+        uint32_t unpacked = BE_READ_U32(packed + 4);
+        uint32_t compressed = BE_READ_U32(packed + 8);
+        if ((method != 1 && method != 2) || unpacked < 2 ||
+            unpacked > cap || compressed > size - 18u || compressed == 0 ||
+            (unpacked - 2u) % sizeof(TeamFileEx) != 0 ||
+            (unpacked - 2u) / sizeof(TeamFileEx) > 93u) {
+            SWOS_AI_LOG("[SWOS AI WORLD D5] SKIP country=%u: invalid RNC header method=%u unpacked=%u packed=%u size=%u\n",
+                        country, method, unpacked, compressed, (unsigned)size);
+            free(packed);
+            return 0;
+        }
+        /* Decoder may read a few bytes past the last compressed word. */
+        memset(packed + size, 0, 32);
+        if (method == 1) RncDecompressV1(packed, buf);
+        else             RncDecompressV2(packed, buf);
+        size = unpacked;
+        SWOS_AI_LOG("[SWOS AI WORLD D5] DECOMPRESSED country=%u method=%u bytes=%u\n",
+                    country, method, (unsigned)size);
+    } else {
+        if (size > cap) {
+            SWOS_AI_LOG("[SWOS AI WORLD D5] SKIP country=%u: raw data too large size=%u\n",
+                        country, (unsigned)size);
+            free(packed);
+            return 0;
+        }
+        memcpy(buf, packed, size);
+        SWOS_AI_LOG("[SWOS AI WORLD D5] RAW country=%u bytes=%u\n",
+                    country, (unsigned)size);
+    }
+    free(packed);
+    if (size < 2) return 0;
+    unsigned count = ((unsigned)buf[0] << 8) | buf[1];
+    if (!count || count > 93 || size != 2u + count * sizeof(TeamFileEx)) {
+        SWOS_AI_LOG("[SWOS AI WORLD D3] SKIP country=%u: count=%u size=%u expected=%u\n",
+                    country, count, (unsigned)size,
+                    (unsigned)(2u + count * sizeof(TeamFileEx)));
+        return 0;
+    }
+    /* Raw TEAM.NNN records use BE for the count and global team number.
+     * JSON gives host-native records; only binary records reach this point. */
+    TeamFileEx *rec = (TeamFileEx *)(buf + 2);
+    for (unsigned i = 0; i < count; ++i)
+        rec[i].team.globalTeamNumber =
+            (int16_t)BE_READ_U16(&rec[i].team.globalTeamNumber);
+    *(uint16_t *)buf = (uint16_t)count;
+    *outCount = (uint16_t)count;
+    return 1;
+}
+
+static unsigned SWOS_AI_P3Collect(SWOS_AI_P3Club *clubs)
+{
+    extern MarketPlayer _careerForeignMarketPlayers[];
+    const size_t bufferSize = 2u + 93u * sizeof(TeamFileEx);
+    uint8_t *snapshot = malloc(bufferSize);
+    if (!snapshot) {
+        SWOS_AI_LOG("[SWOS AI WORLD D3] ERROR: snapshot allocation failed\n");
+        return 0;
+    }
+    unsigned clubCount = 0;
+    for (unsigned country = 0; country <= 79 && clubCount < SWOS_AI_P3_MAX_CLUBS; country++) {
+        if (SWOS_AI_P3MissingCountry(country)) {
+            SWOS_AI_LOG("[SWOS AI WORLD D3] SKIP excluded country=%u\n", country);
+            continue;
+        }
+        const char *skip = getenv("SWOS_AI_WORLD_SKIP_COUNTRY");
+        if (skip && *skip) {
+            char *endptr = NULL;
+            long skipId = strtol(skip, &endptr, 10);
+            if (endptr != skip && *endptr == '\0' && skipId == (long)country) {
+                SWOS_AI_LOG("[SWOS AI WORLD D3] skip requested country=%u\n", country);
+                continue;
+            }
+        }
+        uint16_t count = 0;
+        SWOS_AI_LOG("[SWOS AI WORLD D3] BEFORE read country=%u\n", country);
+        if (!SWOS_AI_P3ReadCountry(country, snapshot, bufferSize, &count)) continue;
+        SWOS_AI_LOG("[SWOS AI WORLD D3] AFTER read country=%u count=%u\n", country, count);
+        const TeamFileEx *teams = (const TeamFileEx *)(snapshot + 2);
+        for (unsigned i = 0; i < count && clubCount < SWOS_AI_P3_MAX_CLUBS; i++) {
+            const TeamFileEx *team = &teams[i];
+            if (team->team.countryNumber != country) continue;
+            uint16_t id = (uint16_t)((country << 8) | team->team.teamOrdinal);
+            if (id == _selTeamNumber) continue;
+            SWOS_AI_P3Club *dst = &clubs[clubCount++];
+            dst->id = id;
+            dst->country = (uint8_t)country;
+            dst->league = team->team.league;
+            memcpy(dst->name, team->team.teamName, 17);
+            dst->name[17] = 0;
+            memcpy(dst->players, team->players, sizeof(dst->players));
+            for (unsigned k = 0; k < _numForeignMarketPlayers2; k++) {
+                const MarketPlayer *p = &_careerForeignMarketPlayers[k];
+                const uint8_t *bytes = (const uint8_t *)&p->teamId;
+                if (bytes[0] == (uint8_t)(id >> 8) &&
+                    bytes[1] == (uint8_t)id &&
+                    p->playerOrdinal >= 0 && p->playerOrdinal < 16)
+                    dst->players[(unsigned)p->playerOrdinal] = p->player;
+            }
+        }
+        SWOS_AI_LOG("[SWOS AI WORLD D3] FINISHED country=%u accumulated-clubs=%u\n", country, clubCount);
+    }
+    free(snapshot);
+    SWOS_AI_LOG("[SWOS AI WORLD D3] BEFORE sorting clubs=%u\n", clubCount);
+    qsort(clubs, clubCount, sizeof(*clubs), SWOS_AI_P3Cmp);
+    SWOS_AI_LOG("[SWOS AI WORLD D3] AFTER sorting clubs=%u\n", clubCount);
+    return clubCount;
+}
+
+/* An exact position and currency-value match must always hold. Requested
+ * direction applies to the initiating club; the counterparty necessarily
+ * receives the opposite value effect in a two-player swap. */
+static int SWOS_AI_P3Candidate(PlayerFile outgoing, PlayerFile incoming,
+                               int wantHigher)
+{
+    if (!SWOS_AI_P3IsValid(outgoing) || !SWOS_AI_P3IsValid(incoming)) return 0;
+    if (SWOS_AI_P3Position(outgoing) != SWOS_AI_P3Position(incoming)) return 0;
+    unsigned a = SWOS_AI_P3Value(outgoing), b = SWOS_AI_P3Value(incoming);
+    if (b * 100u < a * 70u || b * 100u > a * 130u) return 0;
+    return wantHigher ? b > a : b < a;
+}
+
+static void SWOS_AI_RealTransferTest(void)
+{
+    extern MarketPlayer _careerForeignMarketPlayers[];
+    const uint32_t run = ++SWOS_AI_P3ClickNumber;
+    SWOS_AI_LOG("[SWOS AI WORLD] CLICK=%u starting current pool=%u capacity=%u\n",
+                run, (unsigned)_numForeignMarketPlayers2,
+                (unsigned)SWOS_AI_CAREER_POOL_CAPACITY);
+    SWOS_AI_P3Club *clubs = calloc(SWOS_AI_P3_MAX_CLUBS, sizeof(*clubs));
+    if (!clubs) {
+        SWOS_AI_LOG("[SWOS AI WORLD] ERROR: club snapshot allocation failed\n");
+        return;
+    }
+    /* Each button click normally gets a fresh seed.  SWOS_AI_SEED provides
+     * an explicit reproducible seed for debugging the SAME starting career. */
+    const char *seedText = getenv("SWOS_AI_SEED");
+    char *seedEnd = NULL;
+    unsigned long fixedSeed = seedText ? strtoul(seedText, &seedEnd, 0) : 0;
+    if (seedText && *seedText && seedEnd != seedText && !*seedEnd)
+        SWOS_AI_P3Seed = (uint32_t)fixedSeed;
+    else
+        SWOS_AI_P3Seed = (uint32_t)time(NULL) ^
+            (uint32_t)clock() * 2654435761u ^
+            (uint32_t)_numForeignMarketPlayers2 * 2246822519u ^
+            run * 3266489917u;
+    if (!SWOS_AI_P3Seed) SWOS_AI_P3Seed = 0x534F5753u;
+    SWOS_AI_LOG("[SWOS AI WORLD] CLICK=%u SEED=%u cooldown=2 clicks\n",
+                (unsigned)run, (unsigned)SWOS_AI_P3Seed);
+    unsigned clubCount = SWOS_AI_P3Collect(clubs);
+    /* Optional test-only limit; without the variable the full world runs. */
+    const char *clubLimit = getenv("SWOS_AI_WORLD_MAX_CLUBS");
+    if (clubLimit && *clubLimit) {
+        char *end = NULL;
+        long n = strtol(clubLimit, &end, 10);
+        if (end != clubLimit && !*end && n >= 2 && (unsigned long)n < clubCount)
+            clubCount = (unsigned)n;
+    }
+    unsigned completed = 0, domestic = 0, international = 0;
+    unsigned higher = 0, lower = 0, shortfall = 0;
+    SWOS_AI_LOG("[SWOS AI WORLD] eligible AI clubs=%u\n", clubCount);
+    if (clubCount < 2) { free(clubs); return; }
+    unsigned countryFirst[256], countryLast[256];
+    for (unsigned c = 0; c < 256; c++)
+        countryFirst[c] = countryLast[c] = 0;
+    for (unsigned i = 0; i < clubCount; i++) {
+        unsigned c = clubs[i].country;
+        if (countryFirst[c] == countryLast[c]) countryFirst[c] = i;
+        countryLast[c] = i + 1;
+        clubs[i].requested = (uint8_t)(4u + SWOS_AI_P3Random() % 3u);
+    }
+
+    /* Shuffle the order of initiating clubs each click.  The inventory stays
+     * sorted so countryFirst/countryLast still describe valid partner ranges. */
+    unsigned *order = malloc(clubCount * sizeof(*order));
+    if (!order) { SWOS_AI_LOG("[SWOS AI WORLD] ERROR: order allocation failed\n"); free(clubs); return; }
+    for (unsigned i = 0; i < clubCount; i++) order[i] = i;
+    for (unsigned i = clubCount - 1; i > 0; i--) {
+        unsigned j = SWOS_AI_P3Random() % (i + 1u);
+        unsigned temp = order[i]; order[i] = order[j]; order[j] = temp;
+    }
+    unsigned cooldownRejected = 0;
+    for (unsigned oi = 0; oi < clubCount; oi++) {
+        unsigned i = order[oi];
+        SWOS_AI_P3Club *a = &clubs[i];
+        unsigned tries = 0;
+        while (a->completed < a->requested && tries++ < 1100u) {
+            int wantInternational = (SWOS_AI_P3Random() % 100u) < 15u;
+            int wantHigher = (SWOS_AI_P3Random() % 100u) < 80u;
+            unsigned sa = SWOS_AI_P3Random() % 16u;
+            if (a->usedSlots[sa] || !SWOS_AI_P3IsValid(a->players[sa])) continue;
+            if (SWOS_AI_P3RecentlyMoved(a->players[sa], run)) {
+                ++cooldownRejected;
+                continue;
+            }
+            /* Rotate possible partners randomly. All candidate clubs are real
+             * loaded club records. No national squads, missing team IDs, or
+             * human club can be selected as a partner. */
+            unsigned j;
+            if (wantInternational) {
+                j = SWOS_AI_P3Random() % clubCount;
+            } else {
+                unsigned first = countryFirst[a->country];
+                unsigned n = countryLast[a->country] - first;
+                if (n < 2) continue;
+                j = first + SWOS_AI_P3Random() % n;
+            }
+            if (j == i) continue;
+            SWOS_AI_P3Club *b = &clubs[j];
+            if (!!(b->country != a->country) != !!wantInternational ||
+                b->completed >= b->requested) continue;
+            unsigned startSlot = SWOS_AI_P3Random() % 16u;
+            for (unsigned s = 0; s < 16; s++) {
+                    unsigned sb = (startSlot + s) % 16u;
+                    if (b->usedSlots[sb] ||
+                        !SWOS_AI_P3Candidate(a->players[sa], b->players[sb], wantHigher))
+                        continue;
+                    if (SWOS_AI_P3RecentlyMoved(b->players[sb], run)) {
+                        ++cooldownRejected;
+                        continue;
+                    }
+                    PlayerFile outgoing = a->players[sa];
+                    PlayerFile incoming = b->players[sb];
+                    unsigned av = SWOS_AI_P3Value(outgoing);
+                    unsigned bv = SWOS_AI_P3Value(incoming);
+                    if (!SWOS_AI_P3Swap(a, sa, b, sb)) {
+                        SWOS_AI_LOG("[SWOS AI WORLD] STOP: replacement pool capacity reached at %u\n",
+                                    (unsigned)_numForeignMarketPlayers2);
+                        goto finished;
+                    }
+                    char nameA[24], nameB[24];
+                    memcpy(nameA, outgoing.playerName, 23); nameA[23] = 0;
+                    memcpy(nameB, incoming.playerName, 23); nameB[23] = 0;
+                    SWOS_AI_P3MarkMoved(outgoing, run);
+                    SWOS_AI_P3MarkMoved(incoming, run);
+                    ++a->completed;
+                    ++b->completed;
+                    ++completed;
+                    if (wantInternational) ++international; else ++domestic;
+                    if (wantHigher) ++higher; else ++lower;
+                    SWOS_AI_LOG("[SWOS AI WORLD] EXCHANGE %u %s [%04X:%u] %s value=%u -> %s [%04X:%u]; %s value=%u -> %s; %s; %s\n",
+                        completed, a->name, a->id, sa, nameA, av, b->name, b->id, sb,
+                        nameB, bv, a->name, wantInternational ? "INTERNATIONAL" : "DOMESTIC",
+                        wantHigher ? "HIGHER-INCOMING" : "LOWER-INCOMING");
+                    break;
+                }
+        }
+        if (a->completed < a->requested) {
+            shortfall += a->requested - a->completed;
+            SWOS_AI_LOG("[SWOS AI WORLD] SHORTFALL club=%s [%04X] requested=%u completed=%u\n",
+                        a->name, a->id, a->requested, a->completed);
+        }
+    }
+finished:
+    unsigned auditSlots=0, auditCache=0, auditFailures=0;
+    for(unsigned i=0;i<clubCount;i++) {
+        for(unsigned s=0;s<16;s++) {
+            if(!clubs[i].usedSlots[s]) continue;
+            ++auditSlots;
+            auditFailures += SWOS_AI_P3AuditSlot(clubs[i].id,s,
+                                                 &clubs[i].players[s],&auditCache);
+        }
+    }
+    SWOS_AI_LOG("[SWOS AI AUDIT] SUMMARY slots=%u cache-copies=%u failures=%u %s\n",
+                auditSlots,auditCache,auditFailures,auditFailures?"FAIL":"PASS");
+    SWOS_AI_LOG("[SWOS AI WORLD] SUMMARY clicks=%u exchanges=%u domestic=%u international=%u higher=%u lower=%u shortfall=%u cooldown-rejections=%u audit-failures=%u\n",
+                run,completed,domestic,international,higher,lower,shortfall,cooldownRejected,auditFailures);
+    SWOS_AI_LOG("[SWOS AI WORLD] COOLDOWN rejected-candidates=%u\n", cooldownRejected);
+    SWOS_AI_LOG("[SWOS AI WORLD] DONE exchanges=%u domestic=%u international=%u higher=%u lower=%u unfilled-initiations=%u records=%u\n",
+                completed, domestic, international, higher, lower, shortfall,
+                (unsigned)_numForeignMarketPlayers2);
+    free(order);
+    free(clubs);
+}
+
 /* ================================================================
  * InitCareer  (SWOS2.s line 31722)
  *
@@ -627,6 +1505,8 @@ extern uint32_t GetNationalityAndTeamFile(uint16_t teamNo);
 __attribute__((used, externally_visible))
 void InitCareer(uint16_t teamNo)
 {
+    /* The cooldown belongs to this career session, not the previous one. */
+    SWOS_AI_P3ResetHistory();
     _worldCupHostTeam = 20994;
 
     /* Clear 2000 bytes of diyLeagueSeasonStateTable (volatile to prevent memset optimization) */
@@ -717,9 +1597,12 @@ void InitCareer(uint16_t teamNo)
     _euroCupsCompetitionContextBuf.tourn.header.slotStateA = 3;
     _euroCupsCompetitionContextBuf.tourn.header.slotStateB = 2;
     _euroCupsCompetitionContextBuf.tourn.header.slotStateC = 8;
+    CareerWinners_Clear(); /* new career, not a loaded save */
     _currentSeasonShowing = 0xFFFF;
     _seasonPlaying--;
     InitializeNewSeason();
+    /* AI transfers are strictly manual. No P1/P2 smoke or stress tests
+     * may run during career creation, regardless of environment variables. */
     _careerLoadedFlag = 0;
 }
 
@@ -1204,9 +2087,7 @@ void InitializeNewSeason(void)
          * World-Cup / Euro-Championship qualifier ids into the group fill.
          * cycle is <= 8 (CAREER_MAX_SEASONS caps season at 34), so a single
          * conditional subtract does the wrap — no `% 5` divide (slow on 68k). */
-        uint16_t cycle = _currentSeasonShowing >> 2;   /* 4-year cycle number, 0..8 */
-        if (cycle >= 5)
-            cycle -= 5;                                 /* wrap into the 5-cycle period */
+        uint16_t cycle = (_currentSeasonShowing >> 2) % 5u; /* 70-season safe tournament rotation */
         _worldCupQualifyingTeam = _seasonCycleNationalFlagsA[cycle];
         _euroChampionshipQualTeam = _seasonCycleNationalFlagsB[cycle];
 
@@ -1379,13 +2260,13 @@ void InitializeNewSeason(void)
 
     /* Show appropriate chairman message */
     if (_stayingInOldClub != 0) {
-        if (_currentSeasonShowing == 0x13) {
+        if (_currentSeasonShowing == _careerParams.num_seasons - 1) {
             ShowEnjoyLastSeasonMessage();
         } else {
             ShowWishYouSuccessMessage();
         }
     } else {
-        if (_currentSeasonShowing == 0x13) {
+        if (_currentSeasonShowing == _careerParams.num_seasons - 1) {
             ShowLastSeasonMessage();
         } else {
             ShowGreetingMessage();
@@ -1398,6 +2279,22 @@ void InitializeNewSeason(void)
         if (_isNationalSelector != 0) {
             Career_InitInternationalSquadAndLookupTablesForNewSeason((TeamFileEx *)0);
         }
+    }
+
+    /* Run the identical AI-to-AI world transfer routine used by the manual
+     * AI TRANSFER MARKET button once when a later career season begins.
+     * _currentSeasonShowing is zero-based: 0 is the initial season and must
+     * not receive automatic transfers.  Loading a save does not call this
+     * new-season initialiser, so there is no load-time repeat. */
+    if (_currentSeasonShowing > 0 &&
+        _currentSeasonShowing < _careerParams.num_seasons) {
+        SWOS_AI_LOG("[SWOS AI Auto] BEGIN season=%u records=%u\n",
+                    (unsigned)(_currentSeasonShowing + 1),
+                    (unsigned)_numForeignMarketPlayers2);
+        SWOS_AI_RealTransferTest();
+        SWOS_AI_LOG("[SWOS AI Auto] END season=%u records=%u\n",
+                    (unsigned)(_currentSeasonShowing + 1),
+                    (unsigned)_numForeignMarketPlayers2);
     }
 
 }
@@ -1605,7 +2502,12 @@ static void Rebuild_CompetitionSlotPointers(void)
     void **compTablePtr;
 
     if (_isNationalSelector != 0) {
-        Career_SetCupPickList_ForSelectedRegion(0);
+        /* Rebuild the pointer list, not the tournament draw. The save loader
+         * already restored the original national competition team lists;
+         * calling the season-start function here used to regenerate opponents
+         * and desynchronise the match schedule and tournament results. */
+        extern void Career_RebuildNationalCupPointersAfterLoad(void);
+        Career_RebuildNationalCupPointersAfterLoad();
         compTablePtr = (void **)&_careerCupPickList;
     } else {
         uint16_t tableIdx = (_selTeamNumber == 0xFFFF)
@@ -1938,4 +2840,18 @@ found_slot:
             ShowDiyLeaguesTournamentMenu(1, 1, 0);
         }
     }
+}
+
+/* Manual AI transfer action. Available in all seasons, including season one.
+ * Never called automatically by career creation or season transitions.
+ * Every explicit menu click requests a new test batch.
+ */
+__attribute__((used, externally_visible))
+void SWOS_AI_RunTransfersMenu(void)
+{
+    SWOS_AI_LOG("[SWOS AI Button] CLICK: season=%u, before records=%u\n",
+                (unsigned)_careerSeasonsCompleted, (unsigned)_numForeignMarketPlayers2);
+    SWOS_AI_RealTransferTest();
+    SWOS_AI_LOG("[SWOS AI Button] DONE: season=%u, after records=%u\n",
+                (unsigned)_careerSeasonsCompleted, (unsigned)_numForeignMarketPlayers2);
 }

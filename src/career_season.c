@@ -25,6 +25,72 @@
 #include "statistics.h"
 #include "transfer_market.h"
 
+/* Career winners history is stored separately from the existing per-manager
+ * season summaries and serialised into the .CAR JSON by save_format_json.c. */
+CareerWinnerRecord _careerWinners[CAREER_WINNER_SEASONS][CAREER_WINNERS_PER_SEASON];
+uint16_t _careerWinnerCounts[CAREER_WINNER_SEASONS];
+
+void CareerWinners_Clear(void)
+{
+    for (unsigned season = 0; season < CAREER_WINNER_SEASONS; ++season)
+        _careerWinnerCounts[season] = 0;
+}
+
+void CareerWinners_Record(uint16_t season, uint8_t competitionId,
+                          uint8_t kind, uint8_t division, uint16_t teamId)
+{
+    if (season >= CAREER_WINNER_SEASONS || competitionId == 0xFF ||
+        teamId == 0xFFFF || kind > 3)
+        return;
+    uint16_t count = _careerWinnerCounts[season];
+    if (count > CAREER_WINNERS_PER_SEASON) count = CAREER_WINNERS_PER_SEASON;
+    for (uint16_t i = 0; i < count; ++i) {
+        CareerWinnerRecord *r = &_careerWinners[season][i];
+        if (r->competitionId == competitionId && r->kind == kind &&
+            r->division == division) {
+            r->teamId = teamId;
+            return;
+        }
+    }
+    if (count >= CAREER_WINNERS_PER_SEASON) return;
+    _careerWinners[season][count] = (CareerWinnerRecord){ teamId, competitionId, division, kind };
+    _careerWinnerCounts[season] = count + 1;
+}
+
+extern uint16_t _currentSeasonShowing;
+extern uint16_t _euroCupTitleHolderTeamId;
+extern uint16_t _cupWinnersCupTitleHolderTeamId;
+extern uint16_t _uefaCupTitleHolderTeamId;
+extern DIYCompetitionEx _diyCompetitionStart;
+extern uint8_t _currentCompetitionIndex;
+
+extern DIYTournamentState _diyFileBufferCopy;
+
+/* Read the winner after the season-update routine has completed.  Cup
+ * results can be copied back into the tournament buffer when leaving the
+ * cup menu; looking only at the active slot loses these results. */
+static void recordFinishedWinner(const uint8_t *record, uint8_t kind, uint8_t division)
+{
+    if (!record)
+        return;
+
+    uint16_t winner = (uint16_t)_diyCompetitionStart.base.resultCode;
+    if (kind != 0 && (winner == 0xFFFFu || winner == 0u)) {
+        /* DIY_EditCompetitionSlot copies the last cup result into this
+         * persistent tournament header before returning. */
+        const DIYCompetition *finished = &_diyFileBufferCopy.header;
+        if (finished->competitionFinished != 0)
+            winner = (uint16_t)finished->resultCode;
+    }
+    if (winner == 0xFFFFu || winner == 0u)
+        return;
+
+    /* Cup identity is the competition ID, not primary/secondary slot rank.
+     * The View World selection only knows that this is a cup. */
+    CareerWinners_Record(_currentSeasonShowing, comp_id(record),
+                         kind == 0 ? 0 : 1, division, winner);
+}
+
 /* ---- ASM externs ---- */
 extern uint16_t _selTeamNumber;
 extern uint16_t _isNationalSelector;
@@ -744,10 +810,12 @@ void Career_ProcessSecondaryCompetitionForNextSeason(uint8_t *competition)
         Career_CopyCompetitionContextToOrFromActive();
         ShowDIYCupMenuWithParams(1, 1, 0);
         DIY_CacheSecondaryQualifiedTeamsGrid();
+        recordFinishedWinner(competition, 2, 0);
         SaveSelectedTeams();
     } else {
         Career_AutoAdvanceCupCompetitionFromRecord(competition);
         DIY_CacheSecondaryQualifiedTeamsGrid();
+        recordFinishedWinner(competition, 2, 0);
     }
 }
 
@@ -766,10 +834,12 @@ void Career_ProcessTertiaryCompetitionForNextSeason(uint8_t *competition)
         Career_CopyTertiaryCompetitionContextToOrFromActive();
         ShowDIYCupMenuWithParams(1, 1, 0);
         DIY_CacheTertiaryQualifiedTeamGrid();
+        recordFinishedWinner(competition, 3, 0);
         SaveSelectedTeams();
     } else {
         Career_AutoAdvanceCupCompetitionFromRecord(competition);
         DIY_CacheTertiaryQualifiedTeamGrid();
+        recordFinishedWinner(competition, 3, 0);
     }
 }
 
@@ -1117,6 +1187,12 @@ wc_groups_done:
     fillWorldCupQualifyingGroupTeams(0x55, _oceaniaWorldCupQualificationCopy, teamListPtr);
 }
 
+/* Loading a career must reconstruct the competition pointers without drawing
+ * NEW national opponents. The saved competition-copy team lists and active
+ * tournament brackets already contain the real fixtures. Reseeding them here
+ * changes the opponent shown by the competition and the career match cache. */
+static int _rebuildNationalCupPointersOnly = 0;
+
 /* ---- setCupPickListCommon (helper for 5 simple regional functions) ----
  * Implements the identical cup pick list selection logic used by Oceania,
  * NorthAmerica, Asia, Africa, and SouthAmerica. */
@@ -1151,6 +1227,8 @@ static void setCupPickListCommon(void **worldCupFriendly, void **worldCupInvite,
     _careerCupPickList[3] = src[3];
     _careerCupPickList[4] = src[4];
 
+    if (_rebuildNationalCupPointersOnly)
+        return;  /* preserve the saved national-team draw on load */
     Career_RandomizeInvitationTournamentCup();
     setupWorldCupQualifyingGroups(teamListPtr);
 }
@@ -1188,6 +1266,8 @@ static void setCupPickList_Europe(uint16_t **teamListPtr)
     _careerCupPickList[3] = src[3];
     _careerCupPickList[4] = src[4];
 
+    if (_rebuildNationalCupPointersOnly)
+        return;  /* preserve the saved national-team draw on load */
     Career_RandomizeInvitationTournamentCup();
     setupWorldCupQualifyingGroups(teamListPtr);
 
@@ -1379,9 +1459,21 @@ void Career_SetCupPickList_ForSelectedRegion(uint16_t *teamList)
         return;
     }
 
-    setupFriendlyCupTeams();
-    setupInvitationTournamentTeams();
-    setupTourCupTeams();
+    if (!_rebuildNationalCupPointersOnly) {
+        setupFriendlyCupTeams();
+        setupInvitationTournamentTeams();
+        setupTourCupTeams();
+    }
+}
+
+/* Used ONLY by Rebuild_CompetitionSlotPointers after loading a save.
+ * Do not consume RNG or regenerate the teams of any active competition. */
+__attribute__((used, externally_visible))
+void Career_RebuildNationalCupPointersAfterLoad(void)
+{
+    _rebuildNationalCupPointersOnly = 1;
+    Career_SetCupPickList_ForSelectedRegion(0);
+    _rebuildNationalCupPointersOnly = 0;
 }
 
 /* ====================================================================
@@ -1584,6 +1676,7 @@ static void processPrimaryCompetitionForNextSeason(uint8_t *competition)
              * (asm calls Career_AutoAdvanceLeagueCompetitionFromRecord even for cups) */
             Career_AutoAdvanceLeagueCompetitionFromRecord(competition);
         }
+        recordFinishedWinner(competition, 1, 0);
         return;
     }
 
@@ -1627,6 +1720,7 @@ static void processPrimaryCompetitionForNextSeason(uint8_t *competition)
             if (d7 == 0)
                 DIY_CachePrimaryQualifiedTeamsGrid();
         }
+        recordFinishedWinner(competition, 0, (uint8_t)d7);
         DIY_UpdatePromotionRelegationScratchCounts();
         qualCursor = DIY_CopyCompetitionTeamIndexTable(qualCursor);
     }
@@ -1679,6 +1773,25 @@ void Career_AdvanceToNextSeason_UpdateCompetitions(void)
     Career_UpdateEuroCupCompetitionSlot();
     Career_UpdateCupWinnersCupCompetitionSlot();
     Career_UpdateUefaCupCompetitionSlot();
+
+    /* Record completed European titles before the next-season draw changes
+     * the competition slots. The update functions above populate these
+     * title-holder IDs from the final standings/knockout grids, for both
+     * manager-controlled and automatically simulated competitions.
+     * European IDs 0/1/2 are the actual View World competition IDs.
+     * Use cup kind=1, matching how PastWinnersPopulate filters cups. */
+    if (_euroCupTitleHolderTeamId != 0xFFFFu &&
+        _euroCupTitleHolderTeamId != 0u)
+        CareerWinners_Record(_currentSeasonShowing, COMPID_euroCup, 1, 0,
+                             _euroCupTitleHolderTeamId);
+    if (_cupWinnersCupTitleHolderTeamId != 0xFFFFu &&
+        _cupWinnersCupTitleHolderTeamId != 0u)
+        CareerWinners_Record(_currentSeasonShowing, COMPID_cupWinnersCup, 1, 0,
+                             _cupWinnersCupTitleHolderTeamId);
+    if (_uefaCupTitleHolderTeamId != 0xFFFFu &&
+        _uefaCupTitleHolderTeamId != 0u)
+        CareerWinners_Record(_currentSeasonShowing, COMPID_uefaCup, 1, 0,
+                             _uefaCupTitleHolderTeamId);
     Career_UpdateCopaLibertadoresCompetitionSlot();   /* Inc3b-part-2: auto-advance Copa */
 
     _careerFileBuffer = 0;

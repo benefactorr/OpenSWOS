@@ -28,6 +28,8 @@
  * GetExpectedLeagueRankIndex.
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include "career_status.h"
 #include "test_rules.h"
 #include "comp_identity.h"
@@ -1135,6 +1137,19 @@ void UpdateCareerFinancesAfterMatch(DIYCompetitionEx *comp, TeamFileEx *team) {
      * compType = slot << 8 and dispatched every match to the panic branch. */
     int16_t compType = (int16_t)*(uint16_t *)&comp->base.compSlot;
     uint32_t d7;
+    /* Final league receipt multiplier (not used by cup matches).
+     * Default 100: ten times lower than the former 1000 multiplier.
+     * Override for comparison with SWOS_LEAGUE_GATE_MULTIPLIER=1000.
+     */
+    unsigned leagueGateMultiplier = 100;
+    const char *leagueGateEnv = getenv("SWOS_LEAGUE_GATE_MULTIPLIER");
+    if (leagueGateEnv && *leagueGateEnv) {
+        char *end = NULL;
+        unsigned long requested = strtoul(leagueGateEnv, &end, 10);
+        if (end != leagueGateEnv && *end == '\0' && requested >= 1 && requested <= 1000)
+            leagueGateMultiplier = (unsigned)requested;
+    }
+    uint64_t leagueCreditScaled = 0;
 
     if (compType == 0) {
         goto league_match;
@@ -1217,10 +1232,39 @@ league_match:
         uint32_t product = (uint32_t)(uint16_t)receiptIndex * (uint16_t)(int16_t)crowdFactor;
         uint16_t avgPrice = getTeamValueForGateReceipts(&_careerTeam);
         if (avgPrice == 0) avgPrice = 1; /* safety */
-        uint16_t priceRatio = (uint16_t)(product / (uint32_t)avgPrice);
-        int16_t gateFactorResult = (int16_t)((int16_t)d7 * (int16_t)priceRatio) / 100;
-        _gateReceiptsFactor = gateFactorResult;
-        d7 = (uint32_t)(uint16_t)gateFactorResult;
+        /* The previous port truncated product / avgPrice to an integer
+         * BEFORE applying d7.  For many normal league strengths this
+         * quotient is zero, so home league matches earned nothing.
+         * Keep the fraction until the final division; use 64-bit math
+         * to avoid overflow in the intermediate multiplication. */
+        uint32_t baseReceipts = d7;
+        uint64_t numerator = (uint64_t)baseReceipts * (uint64_t)product;
+        uint64_t denominator = (uint64_t)avgPrice * 100u;
+        uint32_t adjusted = (uint32_t)(numerator / denominator);
+        if (adjusted > 0xffffu)
+            adjusted = 0xffffu;
+        _gateReceiptsFactor = (int16_t)(uint16_t)adjusted;
+        d7 = adjusted;
+        /* Legacy home-match path credits adjusted * 2 * 16. */
+        leagueCreditScaled = (uint64_t)adjusted * 32u * leagueGateMultiplier;
+
+        /* Debug only this branch: the post-match finance display can
+         * otherwise conceal zero gate income behind other movements. */
+        {
+            FILE *log = fopen("swos_finance_debug.log", "a");
+            if (log) {
+                fprintf(log,
+                    "[SWOS FINANCE] LEAGUE home=%d base=%lu rank=%d "
+                    "crowd=%d teamValue=%u amountPreScale=%lu "
+                    "multiplier=%u credit=%lu\n",
+                    team == &_careerTeam,
+                    (unsigned long)baseReceipts, (int)receiptIndex,
+                    (int)crowdFactor, (unsigned)avgPrice,
+                    (unsigned long)adjusted, leagueGateMultiplier,
+                    (unsigned long)(team == &_careerTeam ? leagueCreditScaled : 0u));
+                fclose(log);
+            }
+        }
         goto compute_receipts;
     }
 
@@ -1306,10 +1350,26 @@ increment_count:
 final_update:
     d7 &= 0xFFFF;
     d7 <<= 4;
-    _gateReceipts += (int32_t)d7;
-    _newBalance += (int32_t)d7;
-    _seasonGateReceiptsAccum2 += (int32_t)d7;
-    _seasonGateReceiptsAccum += (int32_t)d7;
+    if (leagueCreditScaled && team == &_careerTeam) {
+        /* Apply the configured multiplier only to league receipts. Keep cups unchanged.
+         * All finance totals are signed 32-bit; saturate rather than wrap. */
+        int64_t credit = (int64_t)leagueCreditScaled;
+        int64_t next;
+        if (credit > INT32_MAX) credit = INT32_MAX;
+        next = (int64_t)_gateReceipts + credit;
+        _gateReceipts = (int32_t)(next > INT32_MAX ? INT32_MAX : next);
+        next = (int64_t)_newBalance + credit;
+        _newBalance = (int32_t)(next > INT32_MAX ? INT32_MAX : next);
+        next = (int64_t)_seasonGateReceiptsAccum2 + credit;
+        _seasonGateReceiptsAccum2 = (int32_t)(next > INT32_MAX ? INT32_MAX : next);
+        next = (int64_t)_seasonGateReceiptsAccum + credit;
+        _seasonGateReceiptsAccum = (int32_t)(next > INT32_MAX ? INT32_MAX : next);
+    } else {
+        _gateReceipts += (int32_t)d7;
+        _newBalance += (int32_t)d7;
+        _seasonGateReceiptsAccum2 += (int32_t)d7;
+        _seasonGateReceiptsAccum += (int32_t)d7;
+    }
     ClampNewBalanceAndUpdateClubStatus();
     ClearOverdraftStateIfRecovered();
 }
@@ -1583,6 +1643,59 @@ void UpdateCareerAfterMatch(void) {
  * Group E: Weekly/season finances
  * ================================================================ */
 
+/* SWOS FINANCE P4: gentle progressive general-expense scaling.
+ * Input is the already-halved P3 weekly running cost. Small teams retain it.
+ * Higher costs are discounted in brackets so costs continue to grow with size.
+ * Use 64-bit intermediate arithmetic to avoid truncation and overflow. */
+static int32_t swos_finance_progressive_running_cost(int32_t weeklyCost)
+{
+    if (weeklyCost <= 20000) return weeklyCost;
+    int64_t result = 20000;
+    int64_t remainder = (int64_t)weeklyCost - 20000;
+    int64_t tier = remainder < 80000 ? remainder : 80000;
+    result += tier * 90 / 100; remainder -= tier;
+    tier = remainder < 200000 ? remainder : 200000;
+    result += tier * 70 / 100; remainder -= tier;
+    tier = remainder < 300000 ? remainder : 300000;
+    result += tier * 55 / 100; remainder -= tier;
+    result += remainder * 45 / 100;
+    return result > INT32_MAX ? INT32_MAX : (int32_t)result;
+}
+
+/* P5: user-adjustable discount applied only to general running costs.
+ * Default 45% of the previous progressive P4 result; wages and income stay
+ * unchanged. Read on season-cost recalculation, so a new setting takes effect
+ * on the next season initialisation. */
+static int swos_finance_running_cost_percent(void)
+{
+    const char *setting = getenv("SWOS_RUNNING_COST_PERCENT");
+    if (!setting || !*setting) return 45;
+    char *end = NULL;
+    long percent = strtol(setting, &end, 10);
+    if (end == setting || *end != '\0' || percent < 10 || percent > 200)
+        return 45;
+    return (int)percent;
+}
+
+/* Guaranteed annual commercial income is weighted towards clubs with a
+ * larger payroll, but deliberately capped. Calculated once per new season.
+ * Sponsorship: 6/10/14/18 weeks' wages by division (3+/2/1/0).
+ * League distribution: 3/5/7/9 weeks' wages by division, respectively.
+ * All amounts are rounded to the nearest lower GBP 1,000. */
+static int32_t swos_finance_annual_payment(int32_t weeklyWages, int weeks, int32_t cap)
+{
+    if (weeklyWages <= 0 || weeks <= 0) return 0;
+    int64_t amount = ((int64_t)weeklyWages * weeks / 1000) * 1000;
+    if (amount > cap) amount = cap;
+    return (int32_t)amount;
+}
+
+static int32_t swos_finance_safe_add(int32_t a, int32_t b)
+{
+    int64_t sum = (int64_t)a + b;
+    return sum > INT32_MAX ? INT32_MAX : sum < INT32_MIN ? INT32_MIN : (int32_t)sum;
+}
+
 /* ApplyWeeklyFinancialDeductions */
 __attribute__((used, externally_visible))
 void ApplyWeeklyFinancialDeductions(void) {
@@ -1707,10 +1820,17 @@ void InitializeCareerSeasonFinancials(void) {
 
     /* Compute total team value: weeklyPlayerWages * wageScalingDivisor */
     int32_t d6 = 0;
+    /* Player salaries are 40% of the original wage calculation. Restore the
+     * pre-discount team-value proxy so running costs and gate receipts do
+     * not fall when wages are reduced. */
     int32_t wages = _weeklyPlayerWages;
+    int32_t undiscountedWages = (int64_t)wages * 5 / 2 > INT32_MAX
+        ? INT32_MAX : (int32_t)((int64_t)wages * 5 / 2);
     uint16_t scalingCount = _wageScalingDivisor;
-    for (uint16_t i = 0; i < scalingCount; i++)
-        d6 += wages;
+    for (uint16_t i = 0; i < scalingCount; i++) {
+        if (undiscountedWages > INT32_MAX - d6) { d6 = INT32_MAX; break; }
+        d6 += undiscountedWages;
+    }
     _totalTeamValue = d6;
 
     /* Compute weekly running costs from total team value */
@@ -1721,7 +1841,15 @@ void InitializeCareerSeasonFinancials(void) {
     d0 = (uint32_t)(uint16_t)d0 * 96;     /* mulu #$60 */
     d0 = (uint16_t)(d0 / _wageScalingDivisor); /* divu wageScalingDivisor */
     d0 = (uint32_t)(uint16_t)d0 * 1000;   /* mulu #$3E8 */
-    _weeklyRunningCosts = (int32_t)d0;
+    /* P3 halves the original cost; P4 progressively discounts large clubs. */
+    int32_t baselineRunning = (int32_t)(d0 / 2u);
+    int32_t progressiveRunning = swos_finance_progressive_running_cost(baselineRunning);
+    int runningPercent = swos_finance_running_cost_percent();
+    int64_t discountedRunning = (int64_t)progressiveRunning * runningPercent / 100;
+    _weeklyRunningCosts = discountedRunning > INT32_MAX ? INT32_MAX : (int32_t)discountedRunning;
+    fprintf(stderr, "[SWOS FINANCE P5] weekly wages=%ld running baseline=%ld progressive=%ld percent=%d final=%ld\n",
+            (long)_weeklyPlayerWages, (long)baselineRunning, (long)progressiveRunning,
+            runningPercent, (long)_weeklyRunningCosts);
 
     /* Clear accumulators */
     _seasonRunningCostsAccum = 0;
@@ -2279,6 +2407,9 @@ void Career_UpdatePlayerWeeklyWageCache(uint16_t playerIndex)
     wage = wage / (uint32_t)_wageScalingDivisor;
     wage &= 0xFFFF;  /* keep 16-bit quotient (68k divu behavior) */
 
+    /* Pay 40% of the original wage (20% below the previous half-wage
+     * patch). The wage cache drives both Club Business and deductions. */
+    wage = wage * 2u / 5u;
     _weeklyWageByPlayerIndex[playerIndex] = (int32_t)wage;
 
     recalcTotalWeeklyWages();
@@ -2747,6 +2878,7 @@ extern uint16_t GetTeamValueBase(uint16_t avgPrice);
 static inline int32_t computeTotalProfitLoss(void) {
     int32_t total = _startingBalanceCopy;
     total += _competitionBonuses;
+    total += _sensisoftPlcSponsorship;
     total += _gateReceipts;
     total += _playerSales;
     total -= _playerPurchases;
@@ -2990,52 +3122,24 @@ void Career_InitializeNewSeasonFinances(void)
     _gateReceipts = 0;
     _sensisoftPlcSponsorship = 0;
 
-    if (_stayingInOldClub) {
+    /* P4: Guaranteed, club-size-sensitive sponsorship in every season.
+     * Calculated from the existing (P3 halved) weekly wages. No random
+     * selection, so large clubs do not face catastrophic no-sponsor years.
+     * The original business screen shows this as Sensisoft sponsorship. */
+    {
+        int sponsorshipWeeks = _currentDivisionIndex == 0 ? 18 :
+                               _currentDivisionIndex == 1 ? 14 :
+                               _currentDivisionIndex == 2 ? 10 : 6;
         _additionalInvestments = 0;
-        uint16_t d7 = _sensisoftPlcSponsorshipFactor;
-
-        if (d7 == 0) {
-            /* 1/8 chance of getting sponsorship */
-            if (Rand2() >= 0x20) {
-                goto skipSponsorship;
-            }
-            d7 = 0x10;
-            _additionalInvestments = 1;
-        }
-
-        /* Random sponsorship level: 1..32, capped at d7 */
-        {
-            uint16_t rnd = Rand2();
-            rnd = (rnd & 0x1F) + 1;
-            _sensisoftPlcSponsorshipFactor = 0;
-            if (rnd > d7) {
-                goto skipSponsorship;
-            }
-            _sensisoftPlcSponsorshipFactor = rnd;
-            d7 = rnd;
-        }
-
-        /* Calculate sponsorship amount based on team value */
-        {
-            VerifyTeamLoaded(_selTeamNumber);
-            uint16_t avgPrice = GetAveragePlayerPrice(&_careerTeam);
-            uint32_t d0 = (uint32_t)GetTeamValueBase(avgPrice);
-            d0 = d0 * d7;
-
-            if (d0 > 10000) {
-                d0 = 10000;
-                uint16_t rnd = Rand2() & 0xF;
-                rnd = rnd * 100;
-                d0 = 10000 - rnd;
-            }
-
-            d0 = d0 * 1000;
-            _sensisoftPlcSponsorship = (int32_t)d0;
-            _newBalance += (int32_t)d0;
-        }
+        _sensisoftPlcSponsorship = swos_finance_annual_payment(
+            _weeklyPlayerWages, sponsorshipWeeks, 10000000);
+        _sensisoftPlcSponsorshipFactor = _sensisoftPlcSponsorship > 0 ? 1 : 0;
+        _newBalance = swos_finance_safe_add(_newBalance, _sensisoftPlcSponsorship);
+        fprintf(stderr, "[SWOS FINANCE P4] annual sponsorship=%ld division=%u wages=%ld\n",
+            (long)_sensisoftPlcSponsorship, (unsigned)_currentDivisionIndex,
+            (long)_weeklyPlayerWages);
     }
 
-skipSponsorship:
     /* Competition bonuses */
     _competitionBonuses = 0;
 
@@ -3075,8 +3179,22 @@ skipSponsorship:
         _competitionBonuses += (int32_t)d0;
     }
 
+    /* P4: Annual league distribution, booked into the existing competition
+     * bonus category so Club Business and saved totals remain consistent.
+     * The other existing competition rewards are retained. */
+    {
+        int leagueWeeks = _currentDivisionIndex == 0 ? 9 :
+                          _currentDivisionIndex == 1 ? 7 :
+                          _currentDivisionIndex == 2 ? 5 : 3;
+        int32_t leaguePayment = swos_finance_annual_payment(
+            _weeklyPlayerWages, leagueWeeks, 12000000);
+        _competitionBonuses = swos_finance_safe_add(_competitionBonuses, leaguePayment);
+        fprintf(stderr, "[SWOS FINANCE P4] annual league distribution=%ld bonuses-total=%ld\n",
+            (long)leaguePayment, (long)_competitionBonuses);
+    }
+
     /* Apply competition bonuses and starting balance */
-    _newBalance += _competitionBonuses;
+    _newBalance = swos_finance_safe_add(_newBalance, _competitionBonuses);
     _startingBalanceCopy = _startingBalance;
     _newBalance += _startingBalanceCopy;
 
@@ -3095,6 +3213,7 @@ extern void Career_FillCurrentSeasonInfo(void);
 extern void Career_AutoAdvanceCompetitionAndPersistSlotState(uint8_t *compPtr);
 extern uint16_t _numJobOffers;
 extern uint16_t _numNewJobOffers;
+extern uint16_t _careerJobOfferMode;
 
 __attribute__((used, externally_visible))
 void Career_HandleRetirement(void)
@@ -3124,8 +3243,20 @@ void Career_PostMatchUpdate(void)
     /* Remove expired job offers */
     JobOffers_RemoveExpiredOffers();
 
-    /* Decide how many job offers to target: 1 or 2 */
-    uint16_t target = (Rand2() & 1) + 1;
+    /* Batch appointments near the end of the season.  The counter is
+     * updated as weekly finances advance and reset for each new season.
+     * Early weeks: no routine offers; then three increasingly large waves.
+     * Retain the established 20-offer queue and all eligibility rules. */
+    uint16_t target = 0;
+    if (_youreSacked != 0 || _careerJobOfferMode != 0) {
+        target = (Rand2() & 1) + 19;  /* urgent/explicit job search */
+    } else if (_seasonWeeksDeducted >= 30) {
+        target = (Rand2() & 1) + 19;
+    } else if (_seasonWeeksDeducted >= 25) {
+        target = 12;
+    } else if (_seasonWeeksDeducted >= 20) {
+        target = 6;
+    }
 
     /* Try up to 100 times to generate enough job offers */
     for (int16_t i = 99; i >= 0; i--) {
@@ -3901,6 +4032,26 @@ skipStats: ;
             (TeamSelectionKeyCacheEntry *)(_teamSelectionKeyCache + _teamSelectionKeyCacheOffset);
         base_entry->remainingElements -= 1;
 
+        /* A national-team career can retain a stale opponent pair in the
+         * season key cache after a hybrid tournament advances.  Its result
+         * is produced by the actual match teams, so keeping the stale IDs
+         * makes the same score appear alongside different opponents in the
+         * career schedule.  Bind the cache result to the real participants
+         * at the moment it is recorded.  Do not touch club careers or
+         * unplayed fixtures, and preserve the score orientation: team1 is
+         * the high goal byte, team2 the low goal byte. */
+        if (_isNationalSelector != 0) {
+            uint16_t cached1 = BE_READ_U16((uint8_t *)slot + 2);
+            uint16_t cached2 = BE_READ_U16((uint8_t *)slot + 4);
+            if (cached1 != t1num || cached2 != t2num) {
+                SWOS_DBG("[national-fixture] correcting result-team association: "
+                         "cache=%04X/%04X played=%04X/%04X\n",
+                         (unsigned)cached1, (unsigned)cached2,
+                         (unsigned)t1num, (unsigned)t2num);
+                BE_WRITE_U16((uint8_t *)slot + 2, t1num);
+                BE_WRITE_U16((uint8_t *)slot + 4, t2num);
+            }
+        }
         slot->matchFlags    = (uint8_t)flags;
         slot->packedGoals   = packedGoals;
         slot->aggregate     = aggregate;

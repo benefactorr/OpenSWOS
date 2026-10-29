@@ -721,6 +721,29 @@ extern uint8_t  _aFriendly_1[];
 extern uint16_t ShouldSetupPlayers(void);
 extern void InitPlayerRemapTableForTeam(TeamFileEx *team, uint8_t *remapTable);
 
+/* Use the selected career club ID as well as pointer identity: some cup
+ * fixtures use a COPY of _careerTeam, which must never be auto-substituted. */
+static int aiInjurySubsIsManagedCareerTeam(const TeamFileEx *team)
+{
+    extern uint16_t _selTeamNumber;
+    return _gameType == GAME_TYPE_CAREER &&
+           (team == &_careerTeam ||
+            PACK_BE_U16(team->team.countryNumber, team->team.teamOrdinal) == _selTeamNumber);
+}
+
+static void aiInjurySubsSetEligibility(const TeamFileEx *team1, const TeamFileEx *team2)
+{
+    extern uint8_t _aiInjurySubsTeam1Allowed, _aiInjurySubsTeam2Allowed;
+    _aiInjurySubsTeam1Allowed =
+        team1->team.teamControls == TEAM_COMPUTER &&
+        !aiInjurySubsIsManagedCareerTeam(team1) &&
+        _topTeamPlayerNo == 0 && _topTeamCoachNo == 0;
+    _aiInjurySubsTeam2Allowed =
+        team2->team.teamControls == TEAM_COMPUTER &&
+        !aiInjurySubsIsManagedCareerTeam(team2) &&
+        _bottomTeamPlayerNo == 0 && _bottomTeamCoachNo == 0;
+}
+
 /* SetupPlayers
  *
  * Shows play match menu for one or both human players before a match.
@@ -737,6 +760,13 @@ __attribute__((used, externally_visible))
 void SetupPlayers(TeamFileEx *team1, TeamFileEx *team2, int16_t maxSubs,
                    int16_t excludeFlags, int16_t allowSquadChanges, int16_t mode) {
     uint16_t d0 = 0;
+
+    /* Reset eligibility at the beginning of every match.  Team selection and
+     * coach controls are finalised later in SetupPlayers. */
+    extern uint8_t _aiInjurySubsTeam1Allowed;
+    extern uint8_t _aiInjurySubsTeam2Allowed;
+    _aiInjurySubsTeam1Allowed = 0;
+    _aiInjurySubsTeam2Allowed = 0;
 
     _careerTeamCoachOnly = 0;
 
@@ -783,6 +813,7 @@ void SetupPlayers(TeamFileEx *team1, TeamFileEx *team2, int16_t maxSubs,
             _bottomTeamCoachNo  = 0;
             _pl1Tactics = (int16_t)(int8_t)team1->team.tactics;
             _pl2Tactics = (int16_t)(int8_t)team2->team.tactics;
+            aiInjurySubsSetEligibility(team1, team2);
             (void)maxSubs; (void)excludeFlags; (void)allowSquadChanges; (void)mode; (void)d0;
             return;
         }
@@ -907,12 +938,14 @@ skip_second_menu:
 set_tactics:
     _pl1Tactics = (int16_t)(int8_t)team1->team.tactics;
     _pl2Tactics = (int16_t)(int8_t)team2->team.tactics;
+    aiInjurySubsSetEligibility(team1, team2);
     return;
 
 set_tactics_swapped:
     /* When mode != 0, teams stay swapped (exg a1,a2 not undone) */
     _pl1Tactics = (int16_t)(int8_t)team2->team.tactics;
     _pl2Tactics = (int16_t)(int8_t)team1->team.tactics;
+    aiInjurySubsSetEligibility(team1, team2);
     return;
 
 cancelled:

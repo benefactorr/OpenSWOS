@@ -685,6 +685,18 @@ int MenuJson_InstallAll(void)
     int installed = 0, changed = 0, toobig = 0, err = 0;
     for (int i = 0; i < NUM_STATIC_MENUS; i++) {
         const char *name = s_staticMenus[i].name;
+        /* Preserve customised menus whose compiled entries are not present
+         * in their original JSON definitions. In particular, overwriting
+         * competitionStatsMenu would remove the PAST WINNERS option added
+         * in menu_data.c, while retaining the old three-option menu. */
+        if (strcmp(name, "buyPlayerMenu") == 0 ||
+            strcmp(name, "nationalTeamAddPlayerMenu") == 0 ||
+            strcmp(name, "jobOffersMenu") == 0 ||
+            strcmp(name, "transferMarketMenu") == 0 ||
+            strcmp(name, "competitionStatsMenu") == 0) {
+            fprintf(stderr, "[menu-json] %s: keeping customised compiled menu\n", name);
+            continue;
+        }
         uint8_t *dst = s_staticMenus[i].menu;
         char path[160];
         snprintf(path, sizeof path, "data_json/menus/%s.json", name);

@@ -4,6 +4,9 @@
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
 #include "menus.h"
+#include "career_params.h"
+#include "career_season.h"
+#include <stdio.h>
 #ifdef SWOS_SDL_BUILD
 /* PlatformInitOptions + Settings_Save, for the OPTIONS -> GAMEPLAY row. Guarded
  * because this header reaches platform_sdl.h and therefore SDL.h, which the
@@ -1523,6 +1526,32 @@ static void setColorPair46_48(uint16_t colorIdx) {
     setBgColorIndex(&_menuEntries[48], colorIdx);
 }
 
+/* Full seven-attribute display for the ordinary SQUAD tab.
+ * Packed SWOS ratings have a 0..7 effective scale; the top nibble's
+ * extra bit is not a separate skill level. Goalkeepers have no ratings. */
+static const uint8_t squadAttributeHeadings[] = "H F S C T P V";
+static uint8_t SquadFormatSevenAttributes(uint8_t *dst, const PlayerFile *pf)
+{
+    const uint8_t isGK = ((pf->positionAndFace & PF_POSITION_MASK) == 0);
+    const uint8_t ratings[7] = {
+        (uint8_t)pf->velocityHeading & 7,          /* H */
+        (uint8_t)pf->speedFinishing & 7,           /* F */
+        ((uint8_t)pf->speedFinishing >> 4) & 7,    /* S */
+        (uint8_t)pf->tacklingControl & 7,          /* C */
+        ((uint8_t)pf->tacklingControl >> 4) & 7,   /* T */
+        (uint8_t)pf->passing & 7,                  /* P */
+        ((uint8_t)pf->velocityHeading >> 4) & 7   /* V */
+    };
+    uint8_t total = 0;
+    for (unsigned i=0; i<7; ++i) {
+        *dst++ = isGK ? '-' : (uint8_t)('0' + ratings[i]);
+        if (!isGK) total = (uint8_t)(total + ratings[i]);
+        if (i != 6) *dst++ = ' ';
+    }
+    *dst = 0;
+    return isGK ? 0xFF : total;
+}
+
 /* SquadAfterDrawCommon (SWOS2.s line 48777)
  * AfterDraw callback for squad menu player rows. Sets row colors,
  * fills in player data for entries 46-63, then draws them. */
@@ -1631,7 +1660,14 @@ void SquadAfterDrawCommon(void *entryPtr)
 
     /* Entry 50: top skills string */
     e = &_menuEntries[50];
-    FormTopSkillsString((uint8_t *)e->fg, (PlayerFile *)player);
+    if (_isSquadViewMode == 0) {
+        /* Entry 50 has writable menu text storage. Exactly 13 chars plus NUL. */
+        SquadFormatSevenAttributes((uint8_t *)e->fg, pf);
+        e->x = 205; /* move attribute digits right, matching heading */
+        e->stringFlags = (uint16_t)((e->stringFlags & ~0x4000u) | 0x8000u);
+    } else {
+        FormTopSkillsString((uint8_t *)e->fg, (PlayerFile *)player);
+    }
     e->y = yPos;
 
     /* Entries 51-54: invisible */
@@ -1659,6 +1695,29 @@ void SquadAfterDrawCommon(void *entryPtr)
         }
     }
     _menuEntries[54].y = yPos;
+    if (_isSquadViewMode == 0) {
+        /* Entry 54 normally holds the 5-character nationality string.
+         * In attributes view nationality is not shown, so safely reuse
+         * its allocated text storage for the 2-4-character skill total.
+         * Never write to entry 56: its fg pointer is not a text buffer. */
+        uint8_t total = SquadFormatSevenAttributes((uint8_t *)_menuEntries[50].fg, pf);
+        uint8_t *dst = (uint8_t *)_menuEntries[54].fg;
+        if (total == 0xFF) {
+            dst[0] = '-'; dst[1] = 0;
+        } else {
+            dst[0] = '(';
+            if (total >= 10) {
+                dst[1] = (uint8_t)('0' + total / 10);
+                dst[2] = (uint8_t)('0' + total % 10);
+                dst[3] = ')'; dst[4] = 0;
+            } else {
+                dst[1] = (uint8_t)('0' + total);
+                dst[2] = ')'; dst[3] = 0;
+            }
+        }
+        _menuEntries[54].x = 265; /* position bracketed total nearer player value */
+        _menuEntries[54].isInvisible = 0;
+    }
 
     /* Entry 55: goals/stats */
     e = &_menuEntries[55];
@@ -1681,8 +1740,9 @@ void SquadAfterDrawCommon(void *entryPtr)
         }
     }
     e->y = yPos;
+    if (_isSquadViewMode == 0) e->isInvisible = 1;
 
-    /* Entry 56: invisible */
+    /* Entry 56 is not a writable text entry. Keep it hidden. */
     _menuEntries[56].isInvisible = 1;
     _menuEntries[56].y = yPos;
 
@@ -1737,7 +1797,8 @@ void SquadAfterDrawCommon(void *entryPtr)
 
     /* Entries 59-63: show competition goals when exactly one of
      * isNationalSquad/isSquadViewMode is set (XOR logic) */
-    if ((_isNationalSquad != 0) == (_isSquadViewMode != 0)) {
+    if (_isSquadViewMode == 0 ||
+        ((_isNationalSquad != 0) == (_isSquadViewMode != 0))) {
         /* Both set or both clear: hide entries 59-63 */
         _menuEntries[59].isInvisible = 1; _menuEntries[59].y = yPos;
         _menuEntries[60].isInvisible = 1; _menuEntries[60].y = yPos;
@@ -1910,7 +1971,24 @@ void SquadFinish(void)
         }
     }
 
+    /* Replace GOALS column heading with attribute letters in the squad
+     * editing screen. The GOALS button still switches to the original
+     * detailed statistics view, with its original headers and numbers. */
+    if (_isSquadViewMode == 0) {
+        _menuEntries[13].fg = (uintptr_t)squadAttributeHeadings;
+        _menuEntries[13].x = 205;
+        _menuEntries[13].stringFlags = (uint16_t)((_menuEntries[13].stringFlags & ~0x4000u) | 0x8000u);
+        _menuEntries[13].isInvisible = 0;
+        _menuEntries[14].isInvisible = 1;  /* NAT header */
+    }
     SquadUpdateGoalsMenuText();
+    /* The national squad also has a bank of competition-goal headings.
+     * Keep them for the CLUBS/GOALS view, but do not draw them behind
+     * H F S C T P V in the ordinary attribute/squad view. */
+    if (_isSquadViewMode == 0) {
+        for (unsigned idx = 17; idx <= 22; ++idx)
+            _menuEntries[idx].isInvisible = 1;
+    }
     SquadCommitPositionsAndUpdateSkill();
     SquadMenuSavePlayerPositions();
 }
@@ -2323,7 +2401,7 @@ extern void CareerOverFinish(void);
 __attribute__((used, externally_visible))
 void CareerOverInit(void)
 {
-    if (_currentSeasonShowing == 0x13) {
+    if (_currentSeasonShowing == _careerParams.num_seasons - 1) {
         SetCurrentEntry(6);
     } else if (_numNewJobOffers != 0 || _numJobOffers != 0) {
         SetCurrentEntry(5);
@@ -3638,6 +3716,92 @@ void TransfersMenu(void)
     ShowMenu(_transferMarketMenu);
 }
 
+extern uint8_t _pastWinnersMenu[];
+extern TeamFileEx *GetTeamPointer(uint16_t teamId);
+extern void DrawMenu(void);
+
+/* Capture the exact View World selection before the competition is opened;
+ * its currently active competition is not necessarily the manager's country. */
+static uint8_t s_worldHistoryCompId = 0xFF;
+static uint8_t s_worldHistoryKind = 0;
+static uint8_t s_worldHistoryDivision = 0;
+static uint16_t s_winnersPage = 0;
+char _pastWinnersLabel[] = "PAST WINNERS";
+char _pastWinnerHeading[64] = "PAST WINNERS";
+char _pastWinnerRows[10][64];
+char _pastWinnerPrevLabel[] = "PREVIOUS";
+char _pastWinnerNextLabel[] = "NEXT";
+char _pastWinnerExitLabel[] = "EXIT";
+
+static void PastWinnersPopulate(void)
+{
+    unsigned found = 0;
+    unsigned skip = (unsigned)s_winnersPage * 10u;
+    snprintf(_pastWinnerHeading, sizeof(_pastWinnerHeading),
+             "PAST WINNERS  -  PAGE %u", (unsigned)s_winnersPage + 1u);
+    for (unsigned i = 0; i < 10; ++i)
+        _pastWinnerRows[i][0] = 0;
+    for (int season = CAREER_WINNER_SEASONS - 1; season >= 0; --season) {
+        unsigned count = _careerWinnerCounts[season];
+        if (count > CAREER_WINNERS_PER_SEASON) count = CAREER_WINNERS_PER_SEASON;
+        for (unsigned i = 0; i < count; ++i) {
+            const CareerWinnerRecord *r = &_careerWinners[season][i];
+            if (r->competitionId != s_worldHistoryCompId ||
+                (s_worldHistoryKind == 0 ? r->kind != 0 : r->kind == 0) ||
+                (r->kind == 0 && r->division != s_worldHistoryDivision))
+                continue;
+            if (skip) { --skip; continue; }
+            if (found >= 10) return;
+            /* Team identifiers are persisted rather than display names. Resolving
+             * through the current database avoids duplicating the whole name. */
+            TeamFileEx *team = GetTeamPointer(r->teamId);
+            const char *name = team ? (const char *)team->team.teamName : "UNKNOWN";
+            snprintf(_pastWinnerRows[found], sizeof(_pastWinnerRows[found]),
+                     "SEASON %02u   %.37s", (unsigned)season + 1u, name);
+            ++found;
+        }
+    }
+    if (!found && s_winnersPage == 0)
+        snprintf(_pastWinnerRows[0], sizeof(_pastWinnerRows[0]),
+                 "NO RECORDED WINNERS YET");
+}
+
+void PastWinnersInit(void) { PastWinnersPopulate(); }
+void PastWinnersOpen(void)
+{
+    if (_gameType != GAME_TYPE_CAREER) {
+        ShowErrorMenu((uint8_t *)"AVAILABLE IN CAREER MODE ONLY");
+        return;
+    }
+    if (s_worldHistoryCompId == 0xFF) {
+        ShowErrorMenu((uint8_t *)"SELECT A VIEW WORLD COMPETITION");
+        return;
+    }
+    s_winnersPage = 0;
+    ShowMenu((uint8_t *)&_pastWinnersMenu);
+}
+void PastWinnersPrevious(void)
+{
+    if (s_winnersPage) --s_winnersPage;
+    PastWinnersPopulate();
+    DrawMenu();
+}
+void PastWinnersNext(void)
+{
+    /* Do not allow advancing beyond the last matching record. */
+    unsigned n = 0;
+    for (unsigned y = 0; y < CAREER_WINNER_SEASONS; ++y)
+        for (unsigned i = 0; i < _careerWinnerCounts[y] && i < CAREER_WINNERS_PER_SEASON; ++i) {
+            const CareerWinnerRecord *r = &_careerWinners[y][i];
+            if (r->competitionId == s_worldHistoryCompId &&
+                (s_worldHistoryKind == 0 ? r->kind == 0 : r->kind != 0) &&
+                (r->kind != 0 || r->division == s_worldHistoryDivision)) ++n;
+        }
+    if (((unsigned)s_winnersPage + 1u) * 10u < n) ++s_winnersPage;
+    PastWinnersPopulate();
+    DrawMenu();
+}
+
 /* ViewWorldMenu — view world competitions (SWOS2.s line 59996) */
 __attribute__((used, externally_visible))
 void ViewWorldMenu(void)
@@ -3646,6 +3810,14 @@ void ViewWorldMenu(void)
     if (_chooseTeamsResult == 0)
         return;
 
+    s_worldHistoryCompId = comp_id((uint8_t *)_selectedContest);
+    s_worldHistoryDivision = (uint8_t)_contestLeagueNumber;
+    /* Competition.type: 1=cup, 2=league. The history recorder uses
+     * kind=0 for leagues and kind=1 for primary domestic cups. */
+    /* Competition.type is 0 for a league, 1 for a cup and 2 for a
+     * tournament. The old test treated every league as a cup and caused
+     * country zero to masquerade as the European Cup (compId 0). */
+    s_worldHistoryKind = ((Competition *)_selectedContest)->type == 0 ? 0 : 1;
     Career_ViewOrEditCompetitionSlot((uint8_t *)_selectedContest, _contestLeagueNumber);
     ContestMenuOnReturn();
 }
@@ -4333,8 +4505,8 @@ static void CareerOverUpdateJobOffersEntry(void)
 {
     MenuEntry *e;
 
-    /* If season 19 (max), hide the entry entirely */
-    if (_currentSeasonShowing == 19)
+    /* If final configured season, hide the entry entirely */
+    if (_currentSeasonShowing == _careerParams.num_seasons - 1)
     {
         _menuEntries[0x118 / 56].isInvisible = 1;
         return;
@@ -4451,8 +4623,8 @@ void CareerOverFinish(void)
 
     CareerOverUpdateJobOffersEntry();
 
-    /* Season 19: final season special handling */
-    if (_currentSeasonShowing == 19)
+    /* Final configured season: special handling */
+    if (_currentSeasonShowing == _careerParams.num_seasons - 1)
     {
         _menuEntries[0x188 / 56].isInvisible = 1;
         {
@@ -4908,11 +5080,13 @@ void CareerMenuFinish(void)
     nat = _plNationality;
     table = _nationalityOrdinalsArray;
     idx = 0;
-    while (*table != nat)
+    while (idx < 66 && *table != nat)
     {
         table++;
         idx++;
     }
+    if (idx == 66)
+        idx = 65;  /* OTHER for an unknown or unsupported nationality */
     _nationalityOrdinal = idx;
 
     SetNationalityField();
@@ -4950,7 +5124,7 @@ void ChangeNationality(MenuEntry *entry)
     {
         ord = (int8_t)_nationalityOrdinal;
         ord++;
-        if (ord == 64)
+        if (ord == 66)
             ord = 0;
     }
     /* Left or Up → decrement */
@@ -4959,7 +5133,7 @@ void ChangeNationality(MenuEntry *entry)
         ord = (int8_t)_nationalityOrdinal;
         ord--;
         if (ord < 0)
-            ord = 63;
+            ord = 65;
     }
     else
     {
@@ -6108,6 +6282,10 @@ void Career_ShowAddInternationalPlayerDialog(uint16_t homeOrAbroadFlag)
  * user pick a player, then copies that player into the career team.
  * ========================================================================== */
 
+/* Set only during a national player search result. Otherwise ShowSquad is used. */
+extern int16_t _nationalSearchTargetPlayerIndex;
+extern void NationalPlayerSearch(void);
+
 /* Career_AddInternationalPlayerCommon
  * selectedTeam: pointer to team selection data (first word = team number)
  * title: menu title string ("ADD INTERNATIONAL PLAYER (HOME/ABROAD)") */
@@ -6167,7 +6345,15 @@ void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title)
     _careerAddIntlPlayerResult = 0xFFFF;
     _careerSquadScreenDidSelectPlayerFlag = 0;
     _viewSquadFlags = unavailMask;
-    int16_t selected = ShowSquad((TeamFile *)teamEx, title, natMask, 0, 0, 0xFFFF);
+    int16_t selected;
+    if (_nationalSearchTargetPlayerIndex >= 0) {
+        selected = _nationalSearchTargetPlayerIndex;
+        _nationalSearchTargetPlayerIndex = -1;
+        if (selected >= 16 || (natMask & (1UL << selected)))
+            return; /* existing eligibility masks apply to search results too */
+    } else {
+        selected = ShowSquad((TeamFile *)teamEx, title, natMask, 0, 0, 0xFFFF);
+    }
 
     if (selected < 0)
         return;
@@ -6424,7 +6610,10 @@ void NationalTeamAddPlayer(void)
     int16_t addType = (int16_t)_careerNationalTeamAddPlayerType;
 
     if (addType >= 0) {
-        Career_ShowAddInternationalPlayerDialog((uint16_t)addType);
+        if (addType == 2)
+            NationalPlayerSearch();
+        else
+            Career_ShowAddInternationalPlayerDialog((uint16_t)addType);
 
         if (_careerAddIntlPlayerResult == 1) {
             /* No room right now — store as pending add */

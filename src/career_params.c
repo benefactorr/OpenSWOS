@@ -35,5 +35,5 @@ CareerParams _careerParams = {
     .board_euro_top2_bonus      = 3,
 
     /* career length */
-    .num_seasons = 20,
+    .num_seasons = 35,
 };

@@ -2386,6 +2386,13 @@ void NationalTeamAddPlayerAbroadOnSelect(void)
 }
 
 __attribute__((used, externally_visible))
+void NationalTeamAddPlayerSearchOnSelect(void)
+{
+    _careerNationalTeamAddPlayerType = 2;
+    SetExitMenuFlag();
+}
+
+__attribute__((used, externally_visible))
 void NationalTeamAddPlayerExit(void)
 {
     _careerNationalTeamAddPlayerType = 0xFFFF;

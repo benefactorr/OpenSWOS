@@ -11,6 +11,7 @@
  */
 
 #include "job_offers.h"
+#include "career_params.h"
 #include "translations.h"  /* tr_fmt — localize the offer-letter text */
 #include "endian_helpers.h"
 #include "game_types.h"
@@ -22,10 +23,11 @@
 #pragma GCC optimize("no-tree-loop-distribute-patterns")
 
 /* ---- ASM externs ---- */
+static unsigned s_offerPage;  /* 0..3, five visible rows per page */
 extern uint16_t _numJobOffers;
-extern JobOffer _jobOffers[];         /* 5-entry job offers queue (in SWOS2.s BSS) */
+extern JobOffer _jobOffers[];         /* 20-entry job offers queue (in SWOS2.s BSS) */
 extern uint16_t _numNewJobOffers;
-extern JobOffer _newJobOffers[];      /* 5-entry new job offers queue (in SWOS2.s BSS) */
+extern JobOffer _newJobOffers[];      /* 20-entry new job offers queue (in SWOS2.s BSS) */
 extern uint8_t _fundsBuffer[];        /* temporary buffer for team name during offer conversion */
 extern MenuEntry _menuEntries[];
 extern uint16_t _teamNoOfferAccepted;
@@ -35,6 +37,7 @@ extern uint16_t _highlightedLeagueTeamId;
 
 /* Additional externs for Career_MaybeGenerateJobOffer */
 extern uint16_t _careerSeasonsCompleted;
+extern uint16_t _seasonWeeksDeducted;
 extern uint16_t _currentSeasonShowing;
 extern uint16_t _careerJobOfferMode;
 extern uint8_t  _viewRandomPhase;
@@ -188,7 +191,7 @@ JobOffer *GetJobOfferPtr(uint16_t index)
 __attribute__((used, externally_visible, optimize("no-tree-loop-distribute-patterns")))
 void AddJobOffer(uint16_t teamNumber, uint32_t initialFunds)
 {
-    if (_numNewJobOffers >= 5)
+    if (_numNewJobOffers >= 20)
         return;
 
     uint16_t count = _numNewJobOffers;
@@ -389,7 +392,7 @@ void JobOffers_ConvertNewOfferToOffer(uint16_t teamNumber, uint32_t initialFunds
     RemoveJobOffer(teamNumber);
 
     /* Add to old offers (max 5) */
-    if (_numJobOffers >= 5)
+    if (_numJobOffers >= 20)
         return;
 
     JobOffer *dest = &_jobOffers[_numJobOffers];
@@ -706,15 +709,40 @@ extern uint8_t _gotJobOfferMenu[];
 __attribute__((used, externally_visible))
 void JobOffers_UpdateMenuEntryLayout(void)
 {
+    /* Clamp the page if saved offers shrink or are withdrawn. */
+    unsigned maxCount = _numNewJobOffers > _numJobOffers ? _numNewJobOffers : _numJobOffers;
+    unsigned pageCount = (maxCount + 4u) / 5u;
+    if (pageCount == 0) pageCount = 1;
+    if (pageCount > 4) pageCount = 4;
+    if (s_offerPage >= pageCount) s_offerPage = pageCount - 1u;
     /* Hide entries 13,14 and 15,16 */
     _menuEntries[13].isInvisible = 1;
     _menuEntries[14].isInvisible = 1;
     _menuEntries[15].isInvisible = 1;
     _menuEntries[16].isInvisible = 1;
 
-    /* Hide entry 6 (old offers header) */
-    _menuEntries[6].isInvisible = 1;
+    /* Hide empty NEW-offer rows before drawing. An inactive template row
+     * still has a full-width border/hit area unless isInvisible is set.
+     * The after-draw callback only disables empty rows; it does not hide
+     * them, which left the clickable blank strip above considered offers. */
+    for (int i = 0; i < 5; i++) {
+        MenuEntry *entry = &_menuEntries[1 + i];
+        const unsigned offerIndex = (unsigned)s_offerPage * 5u + (unsigned)i;
+        const int available = offerIndex < (unsigned)_numNewJobOffers;
+        entry->isInvisible = !available;
+        entry->isDisabled = !available;
+    }
 
+    /* Hide entry 6 (old offers header), and reset all old-offer hitboxes.
+     * Their positions are changed each time the page switches, so rows from
+     * the previous page must not remain selectable at stale coordinates. */
+    _menuEntries[6].isInvisible = 1;
+    for (int i = 0; i < 5; i++) {
+        _menuEntries[7 + i].isInvisible = 1;
+        _menuEntries[7 + i].isDisabled = 1;
+    }
+
+    _menuEntries[17].isInvisible = (_numNewJobOffers <= 5 && _numJobOffers <= 5);
     if (_numJobOffers == 0)
         return;
 
@@ -723,17 +751,29 @@ void JobOffers_UpdateMenuEntryLayout(void)
 
     /* Calculate y position: start from entry 1's y, offset by new offers */
     uint16_t yPos = _menuEntries[1].y;
-    yPos += (uint16_t)(_numNewJobOffers * 0xF);
+    uint16_t visibleNew = _numNewJobOffers > s_offerPage * 5 ?
+        _numNewJobOffers - s_offerPage * 5 : 0;
+    if (visibleNew > 5) visibleNew = 5;
+    yPos += (uint16_t)(visibleNew * 0xF);
     yPos += 0x1E;
 
     /* Entry 6: old offers header */
     _menuEntries[6].y = yPos;
     yPos += 0x14;
 
-    /* Entries 7-11: old offer lines (5 entries, each 0xF apart) */
-    int16_t i;
-    for (i = 0; i < 5; i++) {
-        _menuEntries[7 + i].y = yPos;
+    /* Entries 7-11: old offer lines (5 entries, each 0xF apart).
+     * With five new offers, the last rows can extend beyond the 200-pixel
+     * menu viewport. Do not let off-screen rows become invisible hotspots
+     * wrapped into the top of the screen (the P5 ghost-offer bug).
+     * Keep a small lower margin so a row and its full hit area fit. */
+    for (int16_t i = 0; i < 5; i++) {
+        MenuEntry *entry = &_menuEntries[7 + i];
+        const unsigned offerIndex = (unsigned)s_offerPage * 5u + (unsigned)i;
+        entry->y = yPos;
+        if (offerIndex < _numJobOffers && yPos <= 188u - 12u) {
+            entry->isInvisible = 0;
+            entry->isDisabled = 0;
+        }
         yPos += 0xF;
     }
 }
@@ -757,7 +797,7 @@ void JobOffersCommon(MenuEntry *entry)
 {
     uint16_t baseOrdinal = _menuEntries[1].ordinal;
     int16_t d7 = (int16_t)(entry->ordinal - baseOrdinal);
-    _jobOfferOrdinal = d7;
+    _jobOfferOrdinal = d7 + (int16_t)(s_offerPage * 5);
     _oldJobOfferOrdinal = 0xFFFF;
     ShowMenu(_gotJobOfferMenu);
 
@@ -780,7 +820,7 @@ void OldJobOffersCommon(MenuEntry *entry)
     uint16_t baseOrdinal = _menuEntries[7].ordinal;
     int16_t d7 = (int16_t)(entry->ordinal - baseOrdinal);
     _jobOfferOrdinal = 0xFFFF;
-    _oldJobOfferOrdinal = d7;
+    _oldJobOfferOrdinal = d7 + (int16_t)(s_offerPage * 5);
     ShowMenu(_gotJobOfferMenu);
 
     if (_teamNoOfferAccepted != 0xFFFF) {
@@ -823,6 +863,7 @@ extern uint8_t _aJobOfferFromAW[];    /* "JOB OFFER FROM %a WITHDRAWN" */
 __attribute__((used, externally_visible))
 void JobOffersInit(void)
 {
+    s_offerPage = 0;
     /* Anti-piracy check: irqCookieObfuscated XOR 0xCFD1F80D must equal 0x17EA */
     uint32_t d0 = _irqCookieObfuscated ^ 0xCFD1F80Du;
     if (d0 != 0x17EA)
@@ -853,6 +894,7 @@ void JobOffers_DrawOldOfferLine(void *entryPtr)
     /* d7 = a5->ordinal - entries[7].ordinal (entry 7 = 0x188/0x38) */
     int16_t d7 = (int16_t)a5->ordinal - (int16_t)_menuEntries[7].ordinal;
 
+    d7 += (int16_t)(s_offerPage * 5);
     if ((uint16_t)d7 >= _numJobOffers)
         return;
 
@@ -935,6 +977,7 @@ void JobOffersAfterDrawCommon(void *entryPtr)
     /* d7 = a5->ordinal - entries[1].ordinal (entry 1 = 0x38/0x38) */
     int16_t d7 = (int16_t)a5->ordinal - (int16_t)_menuEntries[1].ordinal;
 
+    d7 += (int16_t)(s_offerPage * 5);
     if ((uint16_t)d7 >= _numNewJobOffers)
         return;
 
@@ -1003,15 +1046,21 @@ void Career_MaybeGenerateJobOffer(void)
 
     if (_teamNoOfferAccepted != 0xFFFF)
         return;
-    if (_careerSeasonsCompleted == 7)
+    /* Routine unsolicited offers now start in the final part of the season.
+     * Explicit searches and dismissal offers remain available immediately. */
+    if (_careerJobOfferMode == 0 && _youreSacked == 0 &&
+        _seasonWeeksDeducted < 20)
         return;
+    /* Career extension: do not disable all managerial offers after seven
+     * completed seasons. Eligibility, duplicate checks and the 20-offer
+     * queue still apply below. */
 
-    int16_t maxNewOffers = 5 - (int16_t)_numJobOffers;
-    if (maxNewOffers == 0)
+    int16_t maxNewOffers = 20 - (int16_t)_numJobOffers;
+    if (maxNewOffers <= 0)
         return;
     if ((int16_t)_numNewJobOffers >= maxNewOffers)
         return;
-    if (_currentSeasonShowing == 0x13)
+    if (_currentSeasonShowing == _careerParams.num_seasons - 1)
         return;
 
 #ifdef SWOS_INJECT_WC
@@ -1043,19 +1092,17 @@ void Career_MaybeGenerateJobOffer(void)
     if (_youreSacked != 0)
         goto searchDomestic;
 
-    /* Random phase check */
-    {
-        int8_t d0 = (int8_t)_viewRandomPhase - _careerJobOfferPhaseBias;
-        int16_t d0w = (int16_t)d0;
-        int32_t d0l = (int32_t)(d0w << 2);
-        uint16_t divided = (uint16_t)((uint32_t)d0l / (uint32_t)_wageScalingDivisor);
-        if (divided != 3)
-            return;
-    }
+    /* National selectors use the same year-round offer opportunities as
+     * club managers.  The original random-phase gate made a national-team
+     * appointment a near dead end for the manager's next job. */
 
 checkNational:
     /* Try national team offer */
-    if (_sameNationalCallFlag == 0) {
+    /* In a normal club career do not automatically offer the manager's own
+     * national team before attempting the worldwide search. That priority
+     * consumed the national slot and returned early (e.g. ENG -> England).
+     * Keep the legacy own-national path for explicit mode-2 requests. */
+    if (_careerJobOfferMode == 2 && _sameNationalCallFlag == 0) {
         uint16_t natCall = _lastNationalityCall;
         if (natCall != 0xFFFF) {
             if (_careerJobOfferMode != 2) {
@@ -1089,7 +1136,9 @@ noNational:
     /* Random chance to generate offer */
     {
         uint16_t rnd = Rand();
-        if (rnd >= 42)
+        /* P3: ~86% pass rate per attempt, rather than ~39%.
+         * Attempts still need an eligible, non-duplicate club. */
+        if (rnd >= 220)
             return;
     }
 
@@ -1126,8 +1175,10 @@ searchDomestic:
     }
 
     if (_youreSacked == 0) {
-        repHigh = repScore;
-        repLow = (uint16_t)((uint16_t)(repHigh * 0x4B) / 100);
+        /* P3: include somewhat stronger and weaker clubs, especially
+         * useful for foreign searches with sparse compatible teams. */
+        repHigh = (uint16_t)(((uint32_t)repScore * 125u) / 100u);
+        repLow = (uint16_t)(((uint32_t)repScore * 55u) / 100u);
     } else {
         repHigh = repScore;
         repLow = (uint16_t)((uint16_t)(repHigh * 0) / 100);  /* mulu #0 */
@@ -1138,6 +1189,40 @@ searchDomestic:
 
     if (_youreSacked != 0 && _isNationalSelector != 0)
         goto searchSacked;
+
+    /* A manager in charge of a national team should receive both club and
+     * international approaches.  The standard domestic branch below returns
+     * early for national selectors, while its foreign route was previously
+     * enabled only for club managers.  Use the loaded career TMD club pool
+     * for club offers and the existing worldwide national-team list for
+     * international offers.  The reputation, duplicate and 20-offer checks
+     * are still applied by the respective searches. */
+    if (_isNationalSelector != 0 && _careerJobOfferMode == 0) {
+        if ((Rand() & 0xFFu) < 96u)
+            goto searchNational;
+        goto searchForeign;
+    }
+
+    /* National-team appointments are no longer restricted to the manager's
+     * own nationality. Once the manager is established, periodically try
+     * the complete national-team list instead of always searching clubs.
+     * The existing national eligibility, reputation, duplicate and
+     * 20-offer capacity checks remain active. */
+    /* P10: use career experience and current performance rather than the
+     * original international tournament season masks. Those masks only
+     * allow appointments in particular years, and the P9 >=175 confidence
+     * threshold also excluded otherwise successful club managers. */
+    if (_careerJobOfferMode == 0 && _isNationalSelector == 0 &&
+        _youreSacked == 0 && _careerSeasonsCompleted >= 2 &&
+        GetBoardConfidenceScore() >= 0 &&
+        (Rand() & 0xFFu) < 192u)
+        goto searchNational;
+
+    /* Offer diversity: half of club-offer searches start abroad.
+     * Preserve national-team eligibility and special offer modes above.
+     * Foreign candidates still have to pass reputation and duplicate checks. */
+    if (_isNationalSelector == 0 && (Rand() & 0xFF) < 128)
+        goto searchForeign;
 
     /* Try domestic (selected teams) first */
     {
@@ -1225,6 +1310,10 @@ searchForeign:
         uint16_t selTeam = _selTeamNumber;
         uint8_t *base = &_tmdFileBuffer;
 
+        /* Avoid sampling an empty foreign-club cache. */
+        if (_careerFileBuffer == 0)
+            return;
+
         for (int16_t tries = 99; tries >= 0; tries--) {
             uint16_t rnd = Rand();
             uint16_t idx = (uint16_t)((uint16_t)(rnd * _careerFileBuffer) >> 8);
@@ -1238,7 +1327,10 @@ searchForeign:
              * byte-read pre-fix used the ordinal, so the skip rarely
              * fired and same-country teams accidentally counted as
              * foreign candidates. */
-            if ((uint8_t)(_selTeamNumber >> 8) == a0tf->countryNumber)
+            /* Club managers skip their current country's clubs, but a
+             * national selector has no current club-country restriction. */
+            if (_isNationalSelector == 0 &&
+                (uint8_t)(_selTeamNumber >> 8) == a0tf->countryNumber)
                 continue;
 
             /* Asm: move.w (a0),d3 — reads packed team number at offset 0 */
@@ -1267,23 +1359,56 @@ searchNational:
         for (;;) {
             for (int16_t tries = 99; tries >= 0; tries--) {
                 uint16_t rnd = Rand();
-                uint32_t idx32 = (uint32_t)rnd * (uint32_t)_nat_teams_rand_limit1;
-                uint16_t idx = (uint16_t)(idx32 >> 8);
+                /* Use the engine's active national-team record count rather
+                 * than reading all 144 six-byte table slots. The base
+                 * database declares 63 eligible entries; later entries in
+                 * the backing table are not necessarily offer candidates. */
+                const uint16_t nationalTeamCount = 63;
+                uint16_t idx = (uint16_t)(((uint32_t)(rnd & 0xFFu) * nationalTeamCount) >> 8);
+                /* Preserve the original 63-record random pool while also
+                 * allowing two verified national teams to be considered.
+                 * Yugoslavia is table entry 20 (50:29); Canada is entry 70
+                 * (53:01), verified against the CANADA record in TEAM.083.
+                 * Both still pass all normal reputation, eligibility, and
+                 * duplicate-offer checks below. */
+                if ((rnd & 15u) == 0u)
+                    idx = 20;  /* Yugoslavia: 50:29 (80:41 decimal) */
+                else if ((rnd & 15u) == 1u)
+                    idx = 70;  /* Canada: 53:01 (83:1 decimal) */
                 NationalTeamRecord *rec = (NationalTeamRecord *)_nationalTeams + (uint32_t)idx;
+                if (rec->countryNumber == 0 || rec->countryNumber > 0x55)
+                    continue;
 
                 /* teamId is compared against selTeamNumber (BE-packed)
                  * below — compose the same form via PACK_BE_U16. */
                 uint16_t teamId = PACK_BE_U16(rec->countryNumber, rec->teamOrdinal);
-                uint16_t skill = rec->skillOrPrice;
+                /* NationalTeamRecord.skillOrPrice is serialized in big-
+                 * endian order (e.g. 00 13 = 19). Directly dereferencing
+                 * its uint16_t field on Windows reads 0x1300 = 4864,
+                 * excluding virtually every national team from the
+                 * club-reputation window. Decode from raw bytes. */
+                const uint8_t *recordBytes = (const uint8_t *)rec;
+                uint16_t skill = (uint16_t)(((uint16_t)recordBytes[4] << 8) |
+                                            (uint16_t)recordBytes[5]);
 
-                if (skill < repLow || skill > repHigh)
+                /* Yugoslavia has a low database rating (19), so the
+                 * ordinary lower reputation bound can permanently exclude
+                 * it for experienced managers.  A qualified manager may
+                 * accept a lower-rated national side; keep the upper bound
+                 * and all other national offer eligibility checks. */
+                if (skill > repHigh ||
+                    (skill < repLow && teamId != PACK_BE_U16(0x50, 0x29)))
                     continue;
                 if (teamId == _selTeamNumber)
                     continue;
-                if (teamId == _lastNationalityCall)
-                    continue;
-
-                if (IsTeamCodeOkForNationalSelector(rec->countryNumber) == 0)
+                /* Own national team is eligible too, provided it has not
+                 * already been offered. */
+                /* Tournament-year masks remain applicable to the
+                 * explicit national-selector modes, but do not prevent a
+                 * successful club manager from receiving an appointment
+                 * in an otherwise ordinary career season. */
+                if (_careerJobOfferMode != 0 &&
+                    IsTeamCodeOkForNationalSelector(rec->countryNumber) == 0)
                     continue;
                 if (IsNewJobOffer(teamId) == 0)
                     continue;
@@ -1350,4 +1475,21 @@ foundWithBalance:
         uint32_t funds = CalculateStartingBalance(foundTeamId);
         AddJobOffer(foundTeamId, funds);
     }
+}
+
+/* P9: four pages, five entries each; Escape / EXIT remains unchanged. */
+__attribute__((used, externally_visible))
+extern void DrawMenu(void);
+void JobOffers_TogglePage(void)
+{
+    unsigned maxCount = _numNewJobOffers > _numJobOffers ? _numNewJobOffers : _numJobOffers;
+    unsigned pageCount = (maxCount + 4u) / 5u;
+    if (pageCount > 4u) pageCount = 4u;
+    if (pageCount > 1u) s_offerPage = (s_offerPage + 1u) % pageCount;
+    else s_offerPage = 0;
+    JobOffers_UpdateMenuEntryLayout();
+    /* Switching pages changes the text behind five existing row entries.
+     * Merely selecting the first row does not repaint those entries. */
+    DrawMenu();
+    SetCurrentEntry(1);
 }

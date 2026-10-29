@@ -17,7 +17,10 @@
  * See SAVE_FORMAT_JSON.md for the migration history.
  */
 
+#include "ai_career_pool_capacity.h"
 #include "save_format_json.h"
+#include "career_season.h"
+#include <stdlib.h> /* atoi used by byte-array loader */
 #include "mjson.h"
 #include "game_types.h"
 #include "endian_helpers.h"
@@ -448,6 +451,58 @@ static void load_string_field(const char *buf, int buflen, const char *path,
  * (row size 122). The on-disk JSON keys are semantic and identical on
  * both targets — a save written on one target loads cleanly on the
  * other. */
+/* A compact, pointer-free champions history. Existing saves have no such
+ * field; the loader treats that as an empty history. Team ids stay in the
+ * game's packed (country<<8 | ordinal) identity convention. */
+static void emit_career_winners(mjson_print_fn_t fn, void *fnd)
+{
+    mjson_printf(fn, fnd, "%Q:[", "competition_winners_history");
+    int first = 1;
+    for (unsigned season = 0; season < CAREER_WINNER_SEASONS; ++season) {
+        uint16_t n = _careerWinnerCounts[season];
+        if (n > CAREER_WINNERS_PER_SEASON) n = CAREER_WINNERS_PER_SEASON;
+        for (uint16_t i = 0; i < n; ++i) {
+            const CareerWinnerRecord *r = &_careerWinners[season][i];
+            mjson_printf(fn, fnd,
+                "%s{%Q:%u,%Q:%u,%Q:%u,%Q:%u,%Q:%u}",
+                first ? "" : ",", "season", season,
+                "competition_id", (unsigned)r->competitionId,
+                "kind", (unsigned)r->kind,
+                "division", (unsigned)r->division,
+                "team_id", (unsigned)r->teamId);
+            first = 0;
+        }
+    }
+    mjson_printf(fn, fnd, "%s", "]");
+}
+
+static void load_career_winners(const char *buf, int buflen)
+{
+    CareerWinners_Clear();
+    const char *arr = NULL;
+    int arr_len = 0;
+    if (mjson_find(buf, buflen, "$.competition_winners_history", &arr,
+                   &arr_len) != MJSON_TOK_ARRAY) return;
+    int pos = 0, koff, klen, voff, vlen, vt;
+    while ((pos = mjson_next(arr, arr_len, pos,
+                            &koff, &klen, &voff, &vlen, &vt)) != 0) {
+        if (vt != MJSON_TOK_OBJECT) continue;
+        const char *obj = arr + voff;
+        long season, competition, kind, division, team;
+        if (mjson_get_long(obj, vlen, "$.season", &season) <= 0 ||
+            mjson_get_long(obj, vlen, "$.competition_id", &competition) <= 0 ||
+            mjson_get_long(obj, vlen, "$.kind", &kind) <= 0 ||
+            mjson_get_long(obj, vlen, "$.division", &division) <= 0 ||
+            mjson_get_long(obj, vlen, "$.team_id", &team) <= 0) continue;
+        if (season < 0 || season >= CAREER_WINNER_SEASONS ||
+            competition < 0 || competition >= 255 ||
+            kind < 0 || kind > 3 || division < 0 || division > 255 ||
+            team <= 0 || team > 65534) continue;
+        CareerWinners_Record((uint16_t)season, (uint8_t)competition,
+                             (uint8_t)kind, (uint8_t)division, (uint16_t)team);
+    }
+}
+
 static void emit_season_informations(mjson_print_fn_t fn, void *fnd)
 {
     const SeasonInformations *arr =
@@ -1310,12 +1365,12 @@ static const FieldDesc s_career_scalars[] = {
     FA("career_last_match_index_by_competition_slot",
                                           _careerLastMatchIndexByCompetitionSlot, 162, FLD_BYTES),
     FA("team_budget_rank_table",          _teamBudgetRankTable, 128,    FLD_BYTES),
-    FA("players_on_transfer_market",      _playersOnTransferMarket, 10, FLD_BYTES),
+    FA("players_on_transfer_market",      _playersOnTransferMarket, 20, FLD_BYTES),
 
     /* Market player slot tables — byte arrays of compact records. The
      * team-id fields are explicit BE byte pairs (id>>8 / id), so they are
      * endian-stable as raw bytes — safe as FLD_BYTES. */
-    FA("foreign_market_players",          _foreignMarketPlayers, 60,    FLD_BYTES),
+    FA("foreign_market_players",          _foreignMarketPlayers, 180,   FLD_BYTES),
     FA("home_market_players",             _homeMarketPlayers, 100,      FLD_BYTES),
     /* transfer_offer_table / job_offers / new_job_offers were FLD_BYTES but
      * hold host-native multi-byte fields (uint16/uint32) that byte-swap on a
@@ -2573,7 +2628,7 @@ static const StructFieldDesc s_transfer_offer_fields[] = {
     { NULL, 0, 0, FLD_END }
 };
 
-/* JobOffer field table (jobOffers[5] / newJobOffers[5]). Promoted from raw
+/* JobOffer field table (jobOffers[10] / newJobOffers[10]). Promoted from raw
  * 130-byte FLD_BYTES blobs — teamNo (u16), amountOffered (u32) and unkn (u16)
  * are host-native and byte-swapped cross-target as raw bytes. */
 static const StructFieldDesc s_job_offer_fields[] = {
@@ -5670,6 +5725,8 @@ int16_t SaveJson_WriteCareer(uint8_t *filename)
 
     emit_season_informations(json_out_emit, &out);
     mjson_printf(json_out_emit, &out, "%s", ",\n  ");
+    emit_career_winners(json_out_emit, &out);
+    mjson_printf(json_out_emit, &out, "%s", ",\n  ");
     /* careerCompetitionSlotPtrTable / *CompetitionPtr / *CompStringOffset /
      * careerCupPickList are all re-derivable from non-pointer state on
      * load — RebuildPointersAfterLoad() handles them. Not saved.
@@ -5853,12 +5910,18 @@ int16_t SaveJson_WriteCareer(uint8_t *filename)
         mjson_printf(json_out_emit, &out, "%s", "]");
     }
 
-    /* Foreign-market player pool — fixed-size MarketPlayer[432]. Emit
-     * all 432 slots so unpopulated entries (teamId == 0) round-trip
-     * faithfully; the array is dense in practice for active careers. */
+    /* Expanded replacement pool: emit active records plus the original
+     * 432 legacy slots for backward-friendly JSON layout. */
     {
         mjson_printf(json_out_emit, &out, ",\n  %Q:[", "career_foreign_market_players");
-        for (uint32_t i = 0; i < 432; i++) {
+        /* Avoid serializing thousands of unused entries. Preserve the
+         * original 432-slot JSON shape for small careers. */
+        uint32_t entries = _numForeignMarketPlayers2;
+        if (entries < SWOS_AI_CAREER_POOL_LEGACY_COUNT)
+            entries = SWOS_AI_CAREER_POOL_LEGACY_COUNT;
+        if (entries > SWOS_AI_CAREER_POOL_CAPACITY)
+            entries = SWOS_AI_CAREER_POOL_CAPACITY;
+        for (uint32_t i = 0; i < entries; i++) {
             if (i > 0) mjson_printf(json_out_emit, &out, "%s", ",");
             emit_market_player_body(json_out_emit, &out,
                                     _careerForeignMarketPlayers + i * sizeof(MarketPlayer));
@@ -5883,7 +5946,7 @@ int16_t SaveJson_WriteCareer(uint8_t *filename)
         };
         for (int t = 0; t < 2; t++) {
             mjson_printf(json_out_emit, &out, ",\n  %Q:[", jobTabs[t].key);
-            for (uint32_t i = 0; i < 5; i++) {
+            for (uint32_t i = 0; i < 20; i++) {
                 if (i > 0) mjson_printf(json_out_emit, &out, "%s", ",");
                 emit_struct_object(json_out_emit, &out,
                                    jobTabs[t].base + i * sizeof(JobOffer),
@@ -5909,6 +5972,25 @@ int16_t SaveJson_WriteCareer(uint8_t *filename)
             }
             mjson_printf(json_out_emit, &out, "%s", "]");
         }
+    }
+
+    /* Versioned AI transfer cooldown. A compact string stores two 32-bit
+     * fingerprint halves and last-click number without JSON numeric precision
+     * or signed-long portability issues. Only active two-click entries saved. */
+    {
+        extern uint32_t SWOS_AI_P3GetClickNumber(void);
+        extern unsigned SWOS_AI_P3GetRecent(unsigned, uint32_t *,uint32_t *,uint32_t *);
+        mjson_printf(json_out_emit, &out, ",\n  %Q:%u,\n  %Q:[",
+                     "ai_transfer_clicks",(unsigned)SWOS_AI_P3GetClickNumber(),
+                     "ai_transfer_recent");
+        unsigned pos=0,count=0; uint32_t hi,lo,last;
+        while ((pos=SWOS_AI_P3GetRecent(pos,&hi,&lo,&last))!=0) {
+            char key[32];
+            snprintf(key,sizeof(key),"%08X%08X%08X",(unsigned)hi,(unsigned)lo,(unsigned)last);
+            if(count++) mjson_printf(json_out_emit,&out,",");
+            mjson_printf(json_out_emit,&out,"%Q",key);
+        }
+        mjson_printf(json_out_emit,&out,"]");
     }
 
     mjson_printf(json_out_emit, &out, "%s", "\n}\n");
@@ -5984,6 +6066,7 @@ static void apply_semantic_load(const char *src, int src_size)
 
     PROF_START(season_info);
     load_season_informations(src, src_size);
+    load_career_winners(src, src_size);
     PROF_END(season_info, "career-load");
     /* Top-level pointer fields were removed from the save format —
      * RebuildPointersAfterLoad() re-derives them after this returns.
@@ -6223,7 +6306,7 @@ static void apply_semantic_load(const char *src, int src_size)
     }
     PROF_END(tmd_teams, "career-load");
 
-    /* Foreign-market player pool — fixed-size MarketPlayer[432]. */
+    /* Expanded replacement pool (reads old 432-record saves, too). */
     PROF_START(market_players);
     {
         const char *mp_arr = NULL;
@@ -6232,7 +6315,7 @@ static void apply_semantic_load(const char *src, int src_size)
                        &mp_arr, &mp_arr_len) == MJSON_TOK_ARRAY) {
             int pos = 0, voff, vlen, vt;
             uint32_t i = 0;
-            while (i < 432 &&
+            while (i < SWOS_AI_CAREER_POOL_CAPACITY &&
                    (pos = fast_array_next(mp_arr, mp_arr_len, pos,
                                           &voff, &vlen, &vt)) != 0) {
                 if (vt != MJSON_TOK_OBJECT) { i++; continue; }
@@ -6245,7 +6328,7 @@ static void apply_semantic_load(const char *src, int src_size)
     PROF_END(market_players, "career-load");
 
     /* Transfer-offer + job-offer tables — typed arrays-of-objects (mirror of
-     * the write side). Each table is a fixed 5 records. */
+     * the write side). Transfer offers: 5 records; job offer tables: 10 records. */
     {
         const struct { const char *path; uint8_t *base; size_t stride;
                        const StructFieldDesc *table; } offerTabs[3] = {
@@ -6259,7 +6342,7 @@ static void apply_semantic_load(const char *src, int src_size)
                 continue;
             int pos = 0, voff, vlen, vt;
             uint32_t i = 0;
-            while (i < 5 && (pos = fast_array_next(arr, arr_len, pos, &voff, &vlen, &vt)) != 0) {
+            while (i < (t == 0 ? 5u : 20u) && (pos = fast_array_next(arr, arr_len, pos, &voff, &vlen, &vt)) != 0) {
                 if (vt != MJSON_TOK_OBJECT) { i++; continue; }
                 load_struct_object(arr + voff, vlen,
                                    offerTabs[t].base + i * offerTabs[t].stride,
@@ -6367,6 +6450,29 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
      * applied by apply_semantic_load above), so step 2 of the rebuild
      * dispatches to the correct (league/cup/hybrid) branch when it
      * reads slotPtr[0..1]. */
+    /* Optional fields: an older career can be loaded without any cooldown. */
+    {
+        extern void SWOS_AI_P3ResetHistory(void);
+        extern void SWOS_AI_P3SetClickNumber(uint32_t);
+        extern void SWOS_AI_P3LoadRecent(uint32_t,uint32_t,uint32_t);
+        SWOS_AI_P3ResetHistory();
+        long clicks=0;
+        if(mjson_get_long((const char *)src,(int)src_size,"$.ai_transfer_clicks",&clicks)>0
+           && clicks>0) SWOS_AI_P3SetClickNumber((uint32_t)clicks);
+        const char *arr=NULL; int alen=0;
+        if(mjson_find((const char *)src,(int)src_size,"$.ai_transfer_recent",
+                      &arr,&alen)==MJSON_TOK_ARRAY) {
+            int pos=0,off=0,len=0,vt=0;
+            while((pos=fast_array_next(arr,alen,pos,&off,&len,&vt))!=0) {
+                if(vt!=MJSON_TOK_STRING || len!=26) continue;
+                char item[25]; unsigned hi=0,lo=0,last=0;
+                memcpy(item,arr+off+1,24);item[24]=0;
+                if(sscanf(item,"%8x%8x%8x",&hi,&lo,&last)==3)
+                    SWOS_AI_P3LoadRecent((uint32_t)hi,(uint32_t)lo,(uint32_t)last);
+            }
+        }
+    }
+
     PROF_START(rebuild_ptrs);
     extern void RebuildPointersAfterLoad(void);
     RebuildPointersAfterLoad();

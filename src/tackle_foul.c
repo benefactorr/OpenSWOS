@@ -309,11 +309,8 @@ TryBookingThePlayer(Sprite *player, TeamGeneralInfo *team)
                 return 1; /* not eligible */
         }
     } else {
-        /* Normal mode -- need at least one human controller */
-        if (team->playerNumber == 0 &&
-            team->playerCoachNumber == 0) {
-            return 1; /* not eligible */
-        }
+        /* Normal matches: bookings apply to human and AI teams equally.
+         * Keep the existing disciplinary limits and card rules below. */
     }
 
     /* If player already has a card, check injury quota for second yellow / red */
@@ -393,10 +390,8 @@ TrySendingOffThePlayer(Sprite *player, TeamGeneralInfo *team)
     if (TestRules_NoInjuriesCards())
         return 1;  /* the testers' rule (test_rules.h): never send off — eligibility=no */
 
-    /* Need at least one human controller */
-    if (team->playerNumber == 0 &&
-        team->playerCoachNumber == 0)
-        return 1;
+    /* Allow straight red cards for AI-controlled teams as well.
+     * The existing card and injury-quota safeguards remain active. */
 
     /* Check injury quota */
     if (team->teamNumber == 1) {
@@ -538,8 +533,13 @@ PlayerTacklingTestFoul(Sprite *player, TeamGeneralInfo *team)
 
         /* Check direction difference: within +/-1 means from the side = no foul */
         dirDiff = player->direction - victim->direction;
-        if (dirDiff < -1 || dirDiff > 1)
-            return;
+        if (dirDiff < -1 || dirDiff > 1) {
+            /* Small, symmetric increase in foul calls for borderline contact.
+             * Previously all these directional cases were waved on; now
+             * 1/16 are given as fouls. Clean tackles are still exempt. */
+            if ((Rand() & 0xFF) >= 16)
+                return;
+        }
     }
 
     /* It's a foul! Increment fouls counter */

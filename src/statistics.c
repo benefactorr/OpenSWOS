@@ -4,6 +4,7 @@
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
 #include "statistics.h"
+#include "career_params.h"
 #include "translations.h"
 #include "comp_identity.h"
 #include "game_types.h"
@@ -1716,7 +1717,7 @@ void Career_FillCurrentSeasonInfo(void)
     a5->trophyFlags = d0;
 
     /* --- Manager status for final season / sacked --- */
-    if (_currentSeasonShowing == 0x13 && _seasonFinished != 0)
+    if (_currentSeasonShowing == _careerParams.num_seasons - 1 && _seasonFinished != 0)
         a5->managerStatus = 2;
     if (_youreSacked != 0)
         a5->managerStatus = (int8_t)0xFF;

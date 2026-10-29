@@ -3867,6 +3867,50 @@ void DIY_BuildSeededBracketAndUpdateScores(uint8_t *diy, uint8_t *slot,
                           teamList[12], teamList[13], teamList[14], teamList[15]);
     }
 #endif
+    /* European Championships: promote the top two from each completed
+     * four-team group. The generic points-bonus ranking can mix group
+     * positions when building the eight-team knockout seed list. Build the
+     * list from the actual final group tables instead. Keep this limited to
+     * the 16 -> 8 stage; subsequent cup rounds use the original path. */
+    if ((compNum == COMPID_europeanChampionships ||
+         compNum == COMPID_europeanChampionships2) &&
+        diyS->roundComplete == 0 &&
+        compS->numTeams == 16 &&
+        compS->matchPairsPerRound == 4 &&
+        compS->totalMatchesInRound == 4 &&
+        s->divisionFactor == 8 && s->groups == 4) {
+        uint8_t qualifiers[8];
+        uint16_t *offsets = compEx->matchData.league.teamEntryOffsets;
+        uint16_t seen = 0;
+        int valid = 1;
+
+        DIY_SortLeagueTableByStandings();  /* independently sort each group */
+        for (unsigned g = 0; g < 4 && valid; ++g) {
+            for (unsigned rank = 0; rank < 2; ++rank) {
+                uint16_t off = offsets[g * 4 + rank];
+                if (off % sizeof(DIYTeamStats) != 0 ||
+                    off / sizeof(DIYTeamStats) >= 16) {
+                    valid = 0;
+                    break;
+                }
+                uint8_t idx = (uint8_t)(off / sizeof(DIYTeamStats));
+                if (seen & (uint16_t)(1u << idx)) {
+                    valid = 0;
+                    break;
+                }
+                seen |= (uint16_t)(1u << idx);
+                qualifiers[g * 2 + rank] = idx;
+            }
+        }
+        if (valid) {
+            memcpy(((DIYTournamentState *)diy)->teamIndexOrder,
+                   qualifiers, sizeof(qualifiers));
+            return;
+        }
+        /* Unexpected standings layout: retain the existing behaviour instead
+         * of writing invalid indices into the knockout bracket. */
+    }
+
     if (compNum == COMPID_worldCup) {
         DIY_AdjustWorldCupBracketScores(diy, slot, comp);
         goto copy_back;
