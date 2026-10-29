@@ -1,10 +1,10 @@
+#include "career_params.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
 #include "menus.h"
-#include "career_params.h"
 #include "career_season.h"
 #include <stdio.h>
 #ifdef SWOS_SDL_BUILD
@@ -3747,7 +3747,7 @@ static void PastWinnersPopulate(void)
         for (unsigned i = 0; i < count; ++i) {
             const CareerWinnerRecord *r = &_careerWinners[season][i];
             if (r->competitionId != s_worldHistoryCompId ||
-                (s_worldHistoryKind == 0 ? r->kind != 0 : r->kind == 0) ||
+                r->kind != s_worldHistoryKind ||
                 (r->kind == 0 && r->division != s_worldHistoryDivision))
                 continue;
             if (skip) { --skip; continue; }
@@ -3794,7 +3794,7 @@ void PastWinnersNext(void)
         for (unsigned i = 0; i < _careerWinnerCounts[y] && i < CAREER_WINNERS_PER_SEASON; ++i) {
             const CareerWinnerRecord *r = &_careerWinners[y][i];
             if (r->competitionId == s_worldHistoryCompId &&
-                (s_worldHistoryKind == 0 ? r->kind == 0 : r->kind != 0) &&
+                r->kind == s_worldHistoryKind &&
                 (r->kind != 0 || r->division == s_worldHistoryDivision)) ++n;
         }
     if (((unsigned)s_winnersPage + 1u) * 10u < n) ++s_winnersPage;
@@ -3812,12 +3812,7 @@ void ViewWorldMenu(void)
 
     s_worldHistoryCompId = comp_id((uint8_t *)_selectedContest);
     s_worldHistoryDivision = (uint8_t)_contestLeagueNumber;
-    /* Competition.type: 1=cup, 2=league. The history recorder uses
-     * kind=0 for leagues and kind=1 for primary domestic cups. */
-    /* Competition.type is 0 for a league, 1 for a cup and 2 for a
-     * tournament. The old test treated every league as a cup and caused
-     * country zero to masquerade as the European Cup (compId 0). */
-    s_worldHistoryKind = ((Competition *)_selectedContest)->type == 0 ? 0 : 1;
+    s_worldHistoryKind = ((Competition *)_selectedContest)->type == 2 ? 0 : 1;
     Career_ViewOrEditCompetitionSlot((uint8_t *)_selectedContest, _contestLeagueNumber);
     ContestMenuOnReturn();
 }
@@ -4505,7 +4500,7 @@ static void CareerOverUpdateJobOffersEntry(void)
 {
     MenuEntry *e;
 
-    /* If final configured season, hide the entry entirely */
+    /* If season 19 (max), hide the entry entirely */
     if (_currentSeasonShowing == _careerParams.num_seasons - 1)
     {
         _menuEntries[0x118 / 56].isInvisible = 1;
@@ -4623,7 +4618,7 @@ void CareerOverFinish(void)
 
     CareerOverUpdateJobOffersEntry();
 
-    /* Final configured season: special handling */
+    /* Season 19: final season special handling */
     if (_currentSeasonShowing == _careerParams.num_seasons - 1)
     {
         _menuEntries[0x188 / 56].isInvisible = 1;
@@ -6296,6 +6291,10 @@ void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title)
     _careerAddIntlPlayerSelectedTeamNumber = teamNumber;
 
     TeamFileEx *teamEx = GetTeamPointer(teamNumber);
+    /* Always evaluate Yugoslavia's player eligibility with the actual
+     * player-nationality code, even when a caller bypasses Add Player. */
+    if (_selTeamNumber == 0x5030u)
+        _nationalTeamNationality = 0x25u;
     uint8_t nat = _nationalTeamNationality;
     uint16_t teamNum = teamEx->team.globalTeamNumber;
 
@@ -6605,6 +6604,23 @@ void Career_RebuildInternationalPlayerSelectionMasks(void)
 __attribute__((used, externally_visible))
 void NationalTeamAddPlayer(void)
 {
+    /* Yugoslavia (50:30) was absent from the original selectable national
+     * job-offer records. Its nationality 0x25 is distinct from its TEAM
+     * file ordinal 0x30 and region identifier 0x29. Do not rely on the
+     * legacy record search here: older installs may still have a 63-entry
+     * national record limit, returning a null or wrong nationality. */
+    if (_selTeamNumber == 0x5030u) {
+        _nationalTeamNationality = 0x25u;
+        _nationalTeamFileId = 0x29u;
+    } else {
+        extern uint8_t *GetNationalityRecordPtr(uint16_t teamId);
+        const NationalTeamRecord *record =
+            (const NationalTeamRecord *)GetNationalityRecordPtr(_selTeamNumber);
+        if (record) {
+            _nationalTeamNationality = record->nationalityCode;
+            _nationalTeamFileId = record->teamFileId;
+        }
+    }
     _careerIntlPlayersRemoveMask = 0;
     ShowMenu(_nationalTeamAddPlayerMenu);
     int16_t addType = (int16_t)_careerNationalTeamAddPlayerType;

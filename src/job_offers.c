@@ -17,10 +17,52 @@
 #include "game_types.h"
 #include "menu_system.h"
 #include "random.h"
+#include <stdio.h>  /* diagnostic output for Yugoslavia appointment attempts */
 #include "string_utils.h"
 
 /* Prevent GCC from converting byte loops to memcpy/memset (no libc) */
 #pragma GCC optimize("no-tree-loop-distribute-patterns")
+
+/* Baseline club-player population by nationality, generated from the provided
+ * SWOS DATA/data_json/teams club rosters (TEAM.000..079). The national-team
+ * files TEAM.080..085 and special TEAM.072 are deliberately excluded.
+ * Player transfers preserve nationality, so these counts remain stable across
+ * normal career transfer activity. Recalculate when changing the DATA roster. */
+#define MIN_NATIONAL_JOB_PLAYERS 30u
+static const uint16_t s_nationalClubPlayerCount[256] = {
+    271, 128, 235, 282, 265, 187, 270, 213,
+    1243, 222, 187, 187, 636, 612, 332, 328,
+    210, 228, 751, 159, 196, 210, 215, 575,
+    250, 353, 489, 273, 403, 430, 191, 652,
+    279, 311, 328, 331, 406, 333, 299, 217,
+    648, 4, 57, 3, 12, 204, 296, 16,
+    0, 1, 2, 0, 737, 0, 4, 0,
+    565, 3, 257, 0, 1, 2, 3, 7,
+    11, 1, 2, 0, 754, 205, 618, 260,
+    270, 216, 202, 163, 466, 321, 0, 236,
+    270, 250, 0, 0, 2, 0, 10, 5,
+    146, 4, 5, 3, 4, 0, 19, 1,
+    1, 7, 3, 2, 0, 0, 13, 2,
+    10, 1, 2, 35, 0, 1, 0, 0,
+    3, 7, 2, 22, 1, 0, 355, 192,
+    96, 0, 0, 0, 0, 0, 0, 8,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+};
 
 /* ---- ASM externs ---- */
 static unsigned s_offerPage;  /* 0..3, five visible rows per page */
@@ -1356,27 +1398,90 @@ searchForeign:
 searchNational:
     /* Search among national teams */
     {
+        /* Yugoslavia (TEAM.080, ordinal 0x30) gets an independent, occasional
+         * consideration BEFORE the conventional first-eligible-team search.
+         * The offer queue, manager/team identity, upper reputation limit and
+         * explicit national-team eligibility rules remain in force.
+         * No other national team's selection chances are changed when this
+         * preliminary attempt is rejected. */
+        if (_careerJobOfferMode == 0 && (Rand() & 7u) == 0u) {
+            const uint16_t yugoId = PACK_BE_U16(0x50, 0x30);
+            const NationalTeamRecord *yugo =
+                (const NationalTeamRecord *)_nationalTeams + 144;
+            const uint8_t *raw = (const uint8_t *)yugo;
+            const uint16_t yugoSkill =
+                (uint16_t)(((uint16_t)raw[4] << 8) | raw[5]);
+            const char *reason = NULL;
+
+            if (yugo->countryNumber != 0x50 || yugo->teamOrdinal != 0x30)
+                reason = "national-table-id-mismatch";
+            else if (s_nationalClubPlayerCount[0x25] < MIN_NATIONAL_JOB_PLAYERS)
+                reason = "fewer-than-30-eligible-players";
+            else if (yugoSkill > repHigh)
+                reason = "above-reputation-ceiling";
+            else if (yugoId == _selTeamNumber)
+                reason = "already-managing-Yugoslavia";
+            else if (IsNewJobOffer(yugoId) == 0)
+                reason = "already-in-new-offers";
+            else if (IsOldJobOffer(yugoId) == 0)
+                reason = "already-in-old-offers";
+
+            if (reason != NULL) {
+                fprintf(stderr,
+                        "[SWOS YUGO OFFER] rejected: %s (skill=%u repLow=%u repHigh=%u season=%u)\n",
+                        reason, (unsigned)yugoSkill, (unsigned)repLow,
+                        (unsigned)repHigh, (unsigned)_careerSeasonsCompleted);
+            } else {
+                fprintf(stderr,
+                        "[SWOS YUGO OFFER] accepted: team=5030 skill=%u repHigh=%u season=%u\n",
+                        (unsigned)yugoSkill, (unsigned)repHigh,
+                        (unsigned)_careerSeasonsCompleted);
+                AddJobOffer(yugoId, (uint32_t)-1);
+                return;
+            }
+        }
+
         for (;;) {
             for (int16_t tries = 99; tries >= 0; tries--) {
                 uint16_t rnd = Rand();
-                /* Use the engine's active national-team record count rather
-                 * than reading all 144 six-byte table slots. The base
-                 * database declares 63 eligible entries; later entries in
-                 * the backing table are not necessarily offer candidates. */
-                const uint16_t nationalTeamCount = 63;
+                /* Include every six-byte national-team record, including the
+                 * historical Yugoslavia entry appended at index 144.
+                 * Reject invalid records using the checks below. */
+                const uint16_t nationalTeamCount = 145;
                 uint16_t idx = (uint16_t)(((uint32_t)(rnd & 0xFFu) * nationalTeamCount) >> 8);
-                /* Preserve the original 63-record random pool while also
-                 * allowing two verified national teams to be considered.
-                 * Yugoslavia is table entry 20 (50:29); Canada is entry 70
+                /* Retain the previously added Yugoslavia/Canada sampling
+                 * overrides for this test, while widening the ordinary pool.
+                 * Yugoslavia is appended table entry 144 (50:30); Canada is entry 70
                  * (53:01), verified against the CANADA record in TEAM.083.
-                 * Both still pass all normal reputation, eligibility, and
-                 * duplicate-offer checks below. */
+                 * Candidates with missing nationality/team-file metadata
+                 * are now skipped, including the incomplete Canada entry. */
                 if ((rnd & 15u) == 0u)
-                    idx = 20;  /* Yugoslavia: 50:29 (80:41 decimal) */
+                    idx = 144; /* Yugoslavia: 50:30, historical missing entry */
                 else if ((rnd & 15u) == 1u)
                     idx = 70;  /* Canada: 53:01 (83:1 decimal) */
                 NationalTeamRecord *rec = (NationalTeamRecord *)_nationalTeams + (uint32_t)idx;
-                if (rec->countryNumber == 0 || rec->countryNumber > 0x55)
+                if (rec->countryNumber < 0x50 || rec->countryNumber > 0x55)
+                    continue;
+                /* The expanded 145-record table contains numerous national
+                 * sides with a valid team ID and rating, but no nationality
+                 * or team-file mapping (both bytes are zero). They can be
+                 * offered but cannot initialise a playable national career:
+                 * accepting one leaves nationality=0 (Albania) and can crash
+                 * during the new-season transition. Never offer an unmapped
+                 * team until its metadata is actually supplied. The added
+                 * Yugoslavia record (50:30 / 25 / 29) remains eligible. */
+                if ((rec->nationalityCode == 0 &&
+                     !(rec->countryNumber == 0x50 && rec->teamOrdinal == 0)) ||
+                    (rec->teamFileId == 0 &&
+                     !(rec->countryNumber == 0x50 && rec->teamOrdinal == 0)))
+                    continue;
+                /* Only offer national teams with a usable pool of at least 30
+                 * distinct club-roster players of that nationality. The count
+                 * excludes players copied into national-team squads. */
+                if (s_nationalClubPlayerCount[rec->nationalityCode] < MIN_NATIONAL_JOB_PLAYERS)
+                    continue;
+                /* The duplicate SURINAM table entry is not a separate team. */
+                if (idx == 79)
                     continue;
 
                 /* teamId is compared against selTeamNumber (BE-packed)
@@ -1391,13 +1496,13 @@ searchNational:
                 uint16_t skill = (uint16_t)(((uint16_t)recordBytes[4] << 8) |
                                             (uint16_t)recordBytes[5]);
 
-                /* Yugoslavia has a low database rating (19), so the
+                /* Yugoslavia uses its historically recovered rating (30), so the
                  * ordinary lower reputation bound can permanently exclude
                  * it for experienced managers.  A qualified manager may
                  * accept a lower-rated national side; keep the upper bound
                  * and all other national offer eligibility checks. */
                 if (skill > repHigh ||
-                    (skill < repLow && teamId != PACK_BE_U16(0x50, 0x29)))
+                    (skill < repLow && teamId != PACK_BE_U16(0x50, 0x30)))
                     continue;
                 if (teamId == _selTeamNumber)
                     continue;

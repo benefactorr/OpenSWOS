@@ -44,7 +44,6 @@ extern uint16_t _lastOfferPrimaryPlayerOrdinal;
 extern uint16_t _offerNegotiationAttemptCount;
 extern uint16_t _careerSeasonsCompleted;
 #include "career_params.h"
-#include "career_season.h"
 extern uint16_t _currentSeasonShowing;
 extern uint16_t _seasonTransferQuota;
 extern uint16_t _pendingForeignPlayerCount;
@@ -284,7 +283,7 @@ void LoadLiverpool(void)
 /* ================================================================
  * Chunk 149: ContinueCareer  (SWOS2.s line 55140)
  *
- * If the configured final season is reached, show retirement message + reset career variables.
+ * If season == 19, show retirement message + reset career variables.
  * Otherwise advance to next season and re-activate contest menu.
  * ================================================================ */
 
@@ -1006,29 +1005,19 @@ static int SWOS_AI_P3IsValid(PlayerFile p)
     return pos <= 7 && SWOS_AI_P3Value(p) > 0;
 }
 
-/* The career loader applies replacements in ascending order, so the LAST
- * record for a team/slot is authoritative.  Older saves can contain multiple
- * records for the same slot.  Updating the first one would be silently undone
- * by the later records on the next roster reconstruction, duplicating players
- * across teams.  Always update the last record instead. */
+/* Every 42-byte replacement identifies the target club and squad slot.
+ * Updating its previous record avoids infinite growth over later seasons. */
 static unsigned SWOS_AI_P3OverrideIndex(uint16_t teamId, unsigned slot)
 {
     extern MarketPlayer _careerForeignMarketPlayers[];
-    unsigned result = _numForeignMarketPlayers2;
-    unsigned matches = 0;
     for (unsigned k = 0; k < _numForeignMarketPlayers2; k++) {
         const MarketPlayer *p = &_careerForeignMarketPlayers[k];
         const uint8_t *bytes = (const uint8_t *)&p->teamId;
         if (bytes[0] == (uint8_t)(teamId >> 8) &&
-            bytes[1] == (uint8_t)teamId && (uint8_t)p->playerOrdinal == slot) {
-            result = k;
-            ++matches;
-        }
+            bytes[1] == (uint8_t)teamId && (uint8_t)p->playerOrdinal == slot)
+            return k;
     }
-    if (matches > 1)
-        SWOS_AI_LOG("[SWOS AI OVERRIDE] club=%04X slot=%u records=%u using-last=%u\n",
-                    teamId, slot, matches, result);
-    return result;
+    return _numForeignMarketPlayers2;
 }
 
 static void SWOS_AI_P3WriteOverrideAt(uint16_t teamId, unsigned slot,
@@ -1597,7 +1586,6 @@ void InitCareer(uint16_t teamNo)
     _euroCupsCompetitionContextBuf.tourn.header.slotStateA = 3;
     _euroCupsCompetitionContextBuf.tourn.header.slotStateB = 2;
     _euroCupsCompetitionContextBuf.tourn.header.slotStateC = 8;
-    CareerWinners_Clear(); /* new career, not a loaded save */
     _currentSeasonShowing = 0xFFFF;
     _seasonPlaying--;
     InitializeNewSeason();
@@ -2281,22 +2269,6 @@ void InitializeNewSeason(void)
         }
     }
 
-    /* Run the identical AI-to-AI world transfer routine used by the manual
-     * AI TRANSFER MARKET button once when a later career season begins.
-     * _currentSeasonShowing is zero-based: 0 is the initial season and must
-     * not receive automatic transfers.  Loading a save does not call this
-     * new-season initialiser, so there is no load-time repeat. */
-    if (_currentSeasonShowing > 0 &&
-        _currentSeasonShowing < _careerParams.num_seasons) {
-        SWOS_AI_LOG("[SWOS AI Auto] BEGIN season=%u records=%u\n",
-                    (unsigned)(_currentSeasonShowing + 1),
-                    (unsigned)_numForeignMarketPlayers2);
-        SWOS_AI_RealTransferTest();
-        SWOS_AI_LOG("[SWOS AI Auto] END season=%u records=%u\n",
-                    (unsigned)(_currentSeasonShowing + 1),
-                    (unsigned)_numForeignMarketPlayers2);
-    }
-
 }
 
 /* ================================================================
@@ -2502,12 +2474,7 @@ static void Rebuild_CompetitionSlotPointers(void)
     void **compTablePtr;
 
     if (_isNationalSelector != 0) {
-        /* Rebuild the pointer list, not the tournament draw. The save loader
-         * already restored the original national competition team lists;
-         * calling the season-start function here used to regenerate opponents
-         * and desynchronise the match schedule and tournament results. */
-        extern void Career_RebuildNationalCupPointersAfterLoad(void);
-        Career_RebuildNationalCupPointersAfterLoad();
+        Career_SetCupPickList_ForSelectedRegion(0);
         compTablePtr = (void **)&_careerCupPickList;
     } else {
         uint16_t tableIdx = (_selTeamNumber == 0xFFFF)

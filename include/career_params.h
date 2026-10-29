@@ -51,7 +51,7 @@ typedef struct {
     uint16_t board_euro_top2_bonus;      /* 3    euro-cup top-2 */
 
     /* ---- Career length ---- */
-    uint16_t num_seasons;                /* 35 (default and CAREER_MAX_SEASONS) — the
+    uint16_t num_seasons;                /* 35 (default), capped by CAREER_MAX_SEASONS — the
                                           * career retires after this many seasons */
 } CareerParams;
 

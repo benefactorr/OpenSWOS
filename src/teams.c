@@ -1011,6 +1011,11 @@ uint16_t GetPlayerSlotIndexByPlayerNumber(uint16_t teamNumber, uint16_t playerNu
 __attribute__((used, externally_visible))
 uint8_t *GetNationalityRecordPtr(uint16_t teamFileAndOrdinal)
 {
+    /* Historical SWOS Yugoslavia (50:30) lives in an appended record;
+     * keep the original 63-record scan unchanged for other teams. */
+    if (teamFileAndOrdinal == PACK_BE_U16(0x50, 0x30))
+        return _nationalTeams + 144u * sizeof(NationalTeamRecord);
+
     NationalTeamRecord *rec = (NationalTeamRecord *)_nationalTeams;
     uint16_t count = _numNationalTeams;
     for (uint16_t i = 0; i < count; i++) {
@@ -1037,7 +1042,8 @@ int16_t GetNationalTeamNumber(uint16_t nationality)
     NationalTeamRecord *rec = (NationalTeamRecord *)_nationalTeams;
     uint16_t count = _numNationalTeams;
     for (uint16_t i = 0; i < count; i++) {
-        if (rec->nationalityCode == (uint8_t)nationality)
+        if (rec->countryNumber >= 0x50 && rec->countryNumber <= 0x55 &&
+            rec->nationalityCode == (uint8_t)nationality)
             /* The packed national-team ID is the BE byte pair
              * {countryNumber, teamOrdinal} — recompose via PACK_BE_U16
              * (was: BE_READ_U16(ptr) — same result, this is the
@@ -1061,7 +1067,9 @@ int16_t GetNationalTeamNumberFromTeamFileId(uint16_t teamFileId)
     NationalTeamRecord *rec = (NationalTeamRecord *)_nationalTeams;
     uint16_t count = _numNationalTeams;
     for (uint16_t i = 0; i < count; i++) {
-        if (rec->teamFileId == (uint8_t)teamFileId)
+        if (rec->countryNumber >= 0x50 && rec->countryNumber <= 0x55 &&
+            rec->teamFileId != 0xFF &&
+            rec->teamFileId == (uint8_t)teamFileId)
             /* Asm: `move.w (a0),d0` — on m68k BE this reads the
              * `(country<<8)|ordinal` packed national-team ID stored as
              * two adjacent bytes [country, ordinal]. Use PACK_BE_U16

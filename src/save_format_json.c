@@ -19,8 +19,6 @@
 
 #include "ai_career_pool_capacity.h"
 #include "save_format_json.h"
-#include "career_season.h"
-#include <stdlib.h> /* atoi used by byte-array loader */
 #include "mjson.h"
 #include "game_types.h"
 #include "endian_helpers.h"
@@ -451,58 +449,6 @@ static void load_string_field(const char *buf, int buflen, const char *path,
  * (row size 122). The on-disk JSON keys are semantic and identical on
  * both targets — a save written on one target loads cleanly on the
  * other. */
-/* A compact, pointer-free champions history. Existing saves have no such
- * field; the loader treats that as an empty history. Team ids stay in the
- * game's packed (country<<8 | ordinal) identity convention. */
-static void emit_career_winners(mjson_print_fn_t fn, void *fnd)
-{
-    mjson_printf(fn, fnd, "%Q:[", "competition_winners_history");
-    int first = 1;
-    for (unsigned season = 0; season < CAREER_WINNER_SEASONS; ++season) {
-        uint16_t n = _careerWinnerCounts[season];
-        if (n > CAREER_WINNERS_PER_SEASON) n = CAREER_WINNERS_PER_SEASON;
-        for (uint16_t i = 0; i < n; ++i) {
-            const CareerWinnerRecord *r = &_careerWinners[season][i];
-            mjson_printf(fn, fnd,
-                "%s{%Q:%u,%Q:%u,%Q:%u,%Q:%u,%Q:%u}",
-                first ? "" : ",", "season", season,
-                "competition_id", (unsigned)r->competitionId,
-                "kind", (unsigned)r->kind,
-                "division", (unsigned)r->division,
-                "team_id", (unsigned)r->teamId);
-            first = 0;
-        }
-    }
-    mjson_printf(fn, fnd, "%s", "]");
-}
-
-static void load_career_winners(const char *buf, int buflen)
-{
-    CareerWinners_Clear();
-    const char *arr = NULL;
-    int arr_len = 0;
-    if (mjson_find(buf, buflen, "$.competition_winners_history", &arr,
-                   &arr_len) != MJSON_TOK_ARRAY) return;
-    int pos = 0, koff, klen, voff, vlen, vt;
-    while ((pos = mjson_next(arr, arr_len, pos,
-                            &koff, &klen, &voff, &vlen, &vt)) != 0) {
-        if (vt != MJSON_TOK_OBJECT) continue;
-        const char *obj = arr + voff;
-        long season, competition, kind, division, team;
-        if (mjson_get_long(obj, vlen, "$.season", &season) <= 0 ||
-            mjson_get_long(obj, vlen, "$.competition_id", &competition) <= 0 ||
-            mjson_get_long(obj, vlen, "$.kind", &kind) <= 0 ||
-            mjson_get_long(obj, vlen, "$.division", &division) <= 0 ||
-            mjson_get_long(obj, vlen, "$.team_id", &team) <= 0) continue;
-        if (season < 0 || season >= CAREER_WINNER_SEASONS ||
-            competition < 0 || competition >= 255 ||
-            kind < 0 || kind > 3 || division < 0 || division > 255 ||
-            team <= 0 || team > 65534) continue;
-        CareerWinners_Record((uint16_t)season, (uint8_t)competition,
-                             (uint8_t)kind, (uint8_t)division, (uint16_t)team);
-    }
-}
-
 static void emit_season_informations(mjson_print_fn_t fn, void *fnd)
 {
     const SeasonInformations *arr =
@@ -1365,7 +1311,7 @@ static const FieldDesc s_career_scalars[] = {
     FA("career_last_match_index_by_competition_slot",
                                           _careerLastMatchIndexByCompetitionSlot, 162, FLD_BYTES),
     FA("team_budget_rank_table",          _teamBudgetRankTable, 128,    FLD_BYTES),
-    FA("players_on_transfer_market",      _playersOnTransferMarket, 20, FLD_BYTES),
+    FA("players_on_transfer_market",      _playersOnTransferMarket, 10, FLD_BYTES),
 
     /* Market player slot tables — byte arrays of compact records. The
      * team-id fields are explicit BE byte pairs (id>>8 / id), so they are
@@ -2922,6 +2868,8 @@ void DataJson_LoadCareerParams(void)
     LDU("$.board_tertiary_top2_bonus",  board_tertiary_top2_bonus);
     LDU("$.board_euro_top2_bonus",      board_euro_top2_bonus);
     LDU("$.num_seasons",                num_seasons);
+    /* Upgrade legacy 20-season installations to the new 35-season career. */
+    if (_careerParams.num_seasons == 20) _careerParams.num_seasons = 35;
     #undef LDU
     #undef LDS
     if (_careerParams.num_seasons < 1) _careerParams.num_seasons = 1;
@@ -5725,8 +5673,6 @@ int16_t SaveJson_WriteCareer(uint8_t *filename)
 
     emit_season_informations(json_out_emit, &out);
     mjson_printf(json_out_emit, &out, "%s", ",\n  ");
-    emit_career_winners(json_out_emit, &out);
-    mjson_printf(json_out_emit, &out, "%s", ",\n  ");
     /* careerCompetitionSlotPtrTable / *CompetitionPtr / *CompStringOffset /
      * careerCupPickList are all re-derivable from non-pointer state on
      * load — RebuildPointersAfterLoad() handles them. Not saved.
@@ -6066,7 +6012,6 @@ static void apply_semantic_load(const char *src, int src_size)
 
     PROF_START(season_info);
     load_season_informations(src, src_size);
-    load_career_winners(src, src_size);
     PROF_END(season_info, "career-load");
     /* Top-level pointer fields were removed from the save format —
      * RebuildPointersAfterLoad() re-derives them after this returns.
@@ -6439,6 +6384,32 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
     PROF_START(apply_semantic);
     apply_semantic_load((const char *)src, (int)src_size);
     PROF_END(apply_semantic, "career-load");
+
+    /* The historical Yugoslavia national-team job-offer record (50:30)
+     * became selectable after expanding the national offer pool. Older
+     * careers made immediately after accepting the job can retain the
+     * zero-initialised Albania nationality in the saved career scalars.
+     * Repair the stored selector state BEFORE rebuilding pointers and
+     * other national-team state. Use the authoritative national record,
+     * not the country number (0x29) or team ordinal (0x30): Yugoslav
+     * player nationality is 0x25. */
+    if (_isNationalSelector && _selTeamNumber == 0x5030u) {
+        extern uint8_t *GetNationalityRecordPtr(uint16_t teamId);
+        const NationalTeamRecord *yugo =
+            (const NationalTeamRecord *)GetNationalityRecordPtr(_selTeamNumber);
+        if (yugo && yugo->nationalityCode == 0x25u) {
+            if (_nationalTeamNationality != yugo->nationalityCode ||
+                _nationalTeamFileId != yugo->teamFileId) {
+                SWOS_DBG("[SWOS YUGO LOAD] repairing nationality %u -> %u, file %u -> %u\n",
+                         (unsigned)_nationalTeamNationality,
+                         (unsigned)yugo->nationalityCode,
+                         (unsigned)_nationalTeamFileId,
+                         (unsigned)yugo->teamFileId);
+            }
+            _nationalTeamNationality = yugo->nationalityCode;
+            _nationalTeamFileId = yugo->teamFileId;
+        }
+    }
 
     /* Re-derive all pointer fields and distribute the loaded primary
      * slot's bytes into diyCompetitionStart / diyFileBufferCopy. The

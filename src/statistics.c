@@ -1,10 +1,10 @@
+#include "career_params.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
 #include "statistics.h"
-#include "career_params.h"
 #include "translations.h"
 #include "comp_identity.h"
 #include "game_types.h"
