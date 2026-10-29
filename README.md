@@ -37,14 +37,16 @@ This modified version of OpenSWOS introduces a range of improvements to career m
 
 - **Automatic AI injury substitutions:** AI-controlled teams now attempt to replace injured players during matches, prioritising substitutes who play in the same or a similar position.
 
+
 ## Screenshots
 
 | | |
 |---|---|
-| ![A new world search](docs/images/screenshots/Screenshot 2026-10-28 183716) | ![Previous winners Bundesliga](docs/images/screenshots/Screenshot 2026-10-28 183656) |
-| ![Bayern transfer done by AI](docs/images/screenshots/Screenshot 2026-10-28 183636) | ![More transfer listed players](docs/images/screenshots/Screenshot 2026-10-28 183625) |
-| ![New menus WIP](docs/images/screenshots/Screenshot 2026-10-28 183615) | ![Player can do more AI transfers](docs/images/screenshots/Screenshot 2026-10-28 183605) |
-| ![Past winners Italy](docs/images/screenshots/Screenshot 2026-10-28 084013)
+| ![A new world search](docs/images/screenshots/Screenshot%202026-10-28%20183716.png) | ![Previous winners Bundesliga](docs/images/screenshots/Screenshot%202026-10-28%20183656.png) |
+| ![Bayern transfer done by AI](docs/images/screenshots/Screenshot%202026-10-28%20183636.png) | ![More transfer listed players](docs/images/screenshots/Screenshot%202026-10-28%20183625.png) |
+| ![New menus WIP](docs/images/screenshots/Screenshot%202026-10-28%20183615.png) | ![Player can do more AI transfers](docs/images/screenshots/Screenshot%202026-10-28%20183605.png) |
+| ![Past winners Italy](docs/images/screenshots/Screenshot%202026-10-28%20084013.png) | |
+
 
 ## Development Status
 
