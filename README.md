@@ -45,7 +45,8 @@ This modified version of OpenSWOS introduces a range of improvements to career m
 | ![A new world search](docs/images/screenshots/Screenshot%202026-10-28%20183716.png) | ![Previous winners Bundesliga](docs/images/screenshots/Screenshot%202026-10-28%20183656.png) |
 | ![Bayern transfer done by AI](docs/images/screenshots/Screenshot%202026-10-28%20183636.png) | ![More transfer listed players](docs/images/screenshots/Screenshot%202026-10-28%20183625.png) |
 | ![New menus WIP](docs/images/screenshots/Screenshot%202026-10-28%20183615.png) | ![Player can do more AI transfers](docs/images/screenshots/Screenshot%202026-10-28%20183605.png) |
-| ![Past winners Italy](docs/images/screenshots/Screenshot%202026-10-28%20084013.png) | |
+| ![Past winners Italy](docs/images/screenshots/Screenshot%202026-10-28%20084013.png) | ![Squad screen with player attributes](docs/images/screenshots/Screenshot%202026-10-28%20184645.png) |
+| ![New national team player search interface](docs/images/screenshots/Screenshot%202026-10-28%20185535.png) | ![Searching national team players](docs/images/screenshots/Screenshot%202026-10-28%20185610.png) |
 
 
 ## Development Status
