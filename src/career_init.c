@@ -2780,19 +2780,44 @@ void Career_ViewOrEditCompetitionSlot(uint8_t *comp, uint16_t sel)
     if (comp == (uint8_t *)_quaternaryCompetitionPtr)
         goto found_slot;
 
-    /* Not in any active slot — auto-advance this external competition */
+    /* Not in any active slot. Trace every stage to identify remaining crash. */
+    {
+        FILE *log = fopen("swos_division_debug.log", "a");
+        int compType = comp ? ((Competition *)comp)->type : -1;
+        int divisions = (comp && compType == 0) ? ((CompLeagueHeader *)comp)->divisionsCount : -1;
+        if (log) {
+            fprintf(log, "VIEW enter compId=%u type=%d selected=%u divisions=%d active=%u\n",
+                    comp ? (unsigned)comp_id(comp) : 255u, compType,
+                    (unsigned)sel, divisions, (unsigned)_currentDivisionIndex);
+            fclose(log);
+        }
+        /* Reject invalid division indices before indexing divisions[]. */
+        if (!comp || (compType == 0 && (divisions <= 0 || divisions > 4 || sel >= (unsigned)divisions))) {
+            log = fopen("swos_division_debug.log", "a");
+            if (log) { fprintf(log, "VIEW invalid competition/division, refusing\n"); fclose(log); }
+            return;
+        }
+    }
     SaveSelectedTeams();
     {
         int8_t compType = ((Competition *)comp)->type;
+        FILE *log = fopen("swos_division_debug.log", "a");
+        if (log) { fprintf(log, "VIEW before advance type=%d selected=%u\n", (int)compType, (unsigned)sel); fclose(log); }
         if (compType == 1) {
             Career_AutoAdvanceCupCompetitionFromRecord(comp);
-        } else if (compType == 2) {
-            Career_AutoAdvanceLeagueCompetitionFromRecord(comp);
-        } else {
+        } else if (compType == 0) {
             Career_AutoAdvanceInternationalCompetitionFixtures(comp, sel);
+        } else {
+            Career_AutoAdvanceLeagueCompetitionFromRecord(comp);
         }
+        log = fopen("swos_division_debug.log", "a");
+        if (log) { fprintf(log, "VIEW after advance\n"); fclose(log); }
     }
     RestoreSelectedTeams();
+    {
+        FILE *log = fopen("swos_division_debug.log", "a");
+        if (log) { fprintf(log, "VIEW after restore\n"); fclose(log); }
+    }
     return;
 
 found_slot:

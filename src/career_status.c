@@ -3599,11 +3599,19 @@ void Career_AutoAdvanceInternationalCompetitionFixtures(uint8_t *record, uint16_
     uint16_t seed = ((uint16_t)record[0] << 8) | (uint16_t)_seasonPlaying;
     Randomize2(seed);
     _numSelectedTeams = 0;
+    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV before team selection index=%u\n", (unsigned)index); fclose(f); } }
     Career_InitCompetitionTeamSelectionFromTableEntrySpec(record, index);
+    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV after team selection index=%u\n", (unsigned)index); fclose(f); } }
     Career_ApplyPendingForeignMarketPlayersToSelectedTeams();
+    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV before competition initialisation index=%u\n", (unsigned)index); fclose(f); } }
     InitDIYCompetitionFromTableEntry(index, record);
+    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV after competition initialisation index=%u\n", (unsigned)index); fclose(f); } }
+    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV before team loading index=%u\n", (unsigned)index); fclose(f); } }
     InitTeams();
+    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV after team loading index=%u\n", (unsigned)index); fclose(f); } }
+    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV before fixture advancement index=%u\n", (unsigned)index); fclose(f); } }
     Career_AutoAdvanceLeagueFixtures();
+    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV after fixture advancement index=%u\n", (unsigned)index); fclose(f); } }
 
     _viewRandomPhase = savedViewRandom;
     _seasonPlaying = savedSeasonPlaying;
@@ -4096,6 +4104,11 @@ void Career_AutoAdvanceLeagueFixtures(void)
 {
     uint8_t currentPhase, nextPhase;
 
+    static unsigned long divisionTraceCall = 0;
+    unsigned long traceCall = ++divisionTraceCall;
+    unsigned long traceStep = 0;
+#define DIVTRACE(...) do { FILE *df = fopen("swos_division_debug.log", "a"); if (df) { fprintf(df, "FIX call=%lu step=%lu ", traceCall, ++traceStep); fprintf(df, __VA_ARGS__); fputc('\n', df); fclose(df); } } while (0)
+    DIVTRACE("ENTER cacheIndex=%u cacheCount=%u flags=%u/%u/%u/%u", (unsigned)_teamSelectionKeyCacheIndex, (unsigned)_teamSelectionKeyCacheCount, (unsigned)_careerAutoAdvanceInProgress, (unsigned)_seasonUpdateInProgress, (unsigned)_internationalAutoAdvanceFlag, (unsigned)_seasonFinished);
     /* Guard checks — if any is active, skip with phases = 0xFF */
     if (_careerAutoAdvanceInProgress != 0 || _seasonUpdateInProgress != 0 ||
         _internationalAutoAdvanceFlag != 0 || _seasonFinished != 0) {
@@ -4105,6 +4118,10 @@ void Career_AutoAdvanceLeagueFixtures(void)
         /* Get phase bytes (sortKey) from TeamSelectionKeyCache */
         TeamSelectionKeyCacheEntry *cacheEntry =
             (TeamSelectionKeyCacheEntry *)TeamSelectionKeyCache_GetCurrentListPtr();
+        if (!cacheEntry || _teamSelectionKeyCacheIndex >= _teamSelectionKeyCacheCount) {
+            DIVTRACE("INVALID CACHE pointer=%p index=%u count=%u; skip simulation", (void *)cacheEntry, (unsigned)_teamSelectionKeyCacheIndex, (unsigned)_teamSelectionKeyCacheCount);
+            currentPhase = nextPhase = 0xFF;
+        } else {
         currentPhase = cacheEntry->sortKey;
         uint16_t nextIdx = _teamSelectionKeyCacheIndex + 1;
         if (nextIdx == _teamSelectionKeyCacheCount) {
@@ -4114,13 +4131,16 @@ void Career_AutoAdvanceLeagueFixtures(void)
                 (TeamSelectionKeyCacheEntry *)((uint8_t *)cacheEntry + cacheEntry->entryStride);
             nextPhase = next->sortKey;
         }
+        }
     }
 
     DIYCompetition *base = &_diyCompetitionStart.base;
     uint8_t *lastMatchSlots = _careerLastMatchIndexByCompetitionSlot;
     uint8_t slotIdx = base->field_2E;
     uint8_t *lastMatchPtr = lastMatchSlots + (uint16_t)slotIdx;
+    if (slotIdx >= 162) { DIVTRACE("INVALID COMPETITION SLOT %u; abort", (unsigned)slotIdx); return; }
     uint8_t lastMatch = *lastMatchPtr;
+    DIVTRACE("PHASE current=%u next=%u slot=%u last=%u view=%u leagueCurrent=%u progress=%u", (unsigned)currentPhase, (unsigned)nextPhase, (unsigned)slotIdx, (unsigned)lastMatch, (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot, (unsigned)_diyCompetitionStart.leagueMatchProgress);
 
 #ifdef SWOS_DEBUG_AUTOSKIP
     {
@@ -4146,7 +4166,9 @@ void Career_AutoAdvanceLeagueFixtures(void)
 
     /* Inline DIY_AdvanceLeagueFixtureIndex: advance fixture and set d6 */
     uint8_t viewRP = base->viewRandomPhase;
+    DIVTRACE("BEFORE first advance viewRP=%u", (unsigned)viewRP);
     DIY_AdvanceFixtureIndex(0, (uint16_t)viewRP);
+    DIVTRACE("AFTER first advance view=%u slot=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot);
     /* d6 tracking not needed — sim path (selector=0) ignores allowSquadChanges */
 
     /* Main simulation loop */
@@ -4155,7 +4177,9 @@ main_loop:
         goto check_next_phase;
 
     /* Sim league fixtures until phase catches up */
+    DIVTRACE("BEFORE SIM view=%u slot=%u progress=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot, (unsigned)_diyCompetitionStart.leagueMatchProgress);
     DIY_PlayOrSimulateLeagueFixture(0, 0); /* allowSquadChanges=0, selector=0 (sim) */
+    DIVTRACE("AFTER SIM view=%u slot=%u progress=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot, (unsigned)_diyCompetitionStart.leagueMatchProgress);
 
     if (((DIYCompetitionEx *)base)->leagueCurrentSlot == 0)
         goto main_loop; /* more matches pending in current fixture set */
@@ -4163,7 +4187,9 @@ main_loop:
     if (((DIYCompetitionEx *)base)->minSubstitutes != 0) {
         /* Advance fixture index and continue */
         viewRP = base->viewRandomPhase;
+        DIVTRACE("BEFORE loop advance viewRP=%u", (unsigned)viewRP);
         DIY_AdvanceFixtureIndex((uint16_t)(viewRP + 1), (uint16_t)viewRP);
+        DIVTRACE("AFTER loop advance view=%u slot=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot);
         goto main_loop;
     }
 
@@ -4175,6 +4201,7 @@ main_loop:
     return; /* groups type 1/3 — return silently */
 
 check_next_phase:
+    DIVTRACE("CHECK NEXT PHASE next=%u view=%u", (unsigned)nextPhase, (unsigned)base->viewRandomPhase);
     if (nextPhase > base->viewRandomPhase)
         goto catch_up_phase;
 
@@ -4207,7 +4234,9 @@ show_menu_check:
      * select-entry-42 isn't overridden by the menuState fallback in
      * UpdateMenuEntryVisibilityAndFocus, which would otherwise drop the
      * controlMask=0xFFFF auto-skip the season transition relies on. */
+    DIVTRACE("BEFORE show menu");
     ShowDiyLeaguesTournamentMenu(1, 1, 0);
+    DIVTRACE("AFTER show menu");
     return;
 
 catch_up_phase:
@@ -4222,7 +4251,9 @@ catch_up_phase:
     if (lastMatch == base->viewRandomPhase) {
         /* Catch-up loop: sim until leagueCurrentSlot != 0 */
         do {
+            DIVTRACE("BEFORE catch-up SIM view=%u slot=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot);
             DIY_PlayOrSimulateLeagueFixture(0, 0);
+            DIVTRACE("AFTER catch-up SIM view=%u slot=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot);
         } while (((DIYCompetitionEx *)base)->leagueCurrentSlot == 0);
         goto show_menu_check;
     }
@@ -4235,6 +4266,9 @@ catch_up_phase:
         ShowDiyLeaguesTournamentMenu(1, 0, 0);
     }
 }
+
+
+#undef DIVTRACE
 
 /* Career_AutoAdvanceCupMatches (SWOS2.s line 31708)
  *
