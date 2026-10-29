@@ -37,6 +37,15 @@ This modified version of OpenSWOS introduces a range of improvements to career m
 
 - **Automatic AI injury substitutions:** AI-controlled teams now attempt to replace injured players during matches, prioritising substitutes who play in the same or a similar position.
 
+## Screenshots
+
+| | |
+|---|---|
+| ![A new world search](docs/images/screenshots/Screenshot 2026-10-28 183716) | ![Previous winners Bundesliga](docs/images/screenshots/Screenshot 2026-10-28 183656) |
+| ![Bayern transfer done by AI](docs/images/screenshots/Screenshot 2026-10-28 183636) | ![More transfer listed players](docs/images/screenshots/Screenshot 2026-10-28 183625) |
+| ![New menus WIP](docs/images/screenshots/Screenshot 2026-10-28 183615) | ![Player can do more AI transfers](docs/images/screenshots/Screenshot 2026-10-28 183605) |
+| ![Past winners Italy](docs/images/screenshots/Screenshot 2026-10-28 084013)
+
 ## Development Status
 
 *This is an unofficial, experimental modification of OpenSWOS. Some features are still being tested and refined. Feedback and bug reports are welcome!*
