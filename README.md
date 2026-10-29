@@ -1,7 +1,7 @@
 
 # OpenSWOS Enhanced: New Features and Improvements
 
-This modified version of OpenSWOS introduces a range of improvements to career mode, transfers, finances, player management and match gameplay.
+This modified version of OpenSWOS introduces a range of improvements to career mode, transfers, finances, player management and match gameplay. All credits for making this possible goes to the original OpenSWOS team, not to me. I am just vibe-ing here, making features that I wanted in SWOS since I was a kid.
 
 ## Career Mode Improvements
 
