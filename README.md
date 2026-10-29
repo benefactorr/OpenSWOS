@@ -1,4 +1,46 @@
-<p align="center"><img src="docs/images/openswos-logo.png" alt="OpenSWOS" width="420"></p>
+
+# OpenSWOS Enhanced: New Features and Improvements
+
+This modified version of OpenSWOS introduces a range of improvements to career mode, transfers, finances, player management and match gameplay.
+
+## Career Mode Improvements
+
+- **Automatic AI transfers:** AI-controlled clubs make transfers at the beginning of every new season. Sometimes they strengthen their squads, sometimes they make questionable decisions! The system can process hundreds of thousands of transfers over the course of a career, making the football world more dynamic.
+
+- **Improved national team player search:** A new search interface makes it much easier to find and select players for national teams, without having to browse through individual clubs.
+
+- **Worldwide player search:** Search for players across the entire game database, filtering by position and price range, and make transfer offers directly from the search results.
+
+- **More balanced club finances:** Adjusted income and expenditure make it easier to manage larger clubs without facing unrealistic financial difficulties.
+
+- **Historical competition winners:** The game now records the winners of domestic leagues and cups across multiple seasons, allowing you to revisit the history of your career.
+
+- **Player attributes in the squad screen:** View your players' attributes directly from the SQUAD screen.
+
+- **More transfer-listed players:** An increased number of players can be placed on the transfer list.
+
+- **More transfer offers:** Receive more offers from AI clubs for your players.
+
+- **More job opportunities:** Increased frequency of job offers during your managerial career.
+
+- **Higher job offer limit:** More job offers can be available simultaneously.
+
+- **Improved reserve and trial players:** Emergency players have more realistic attributes, making them useful replacements when squad depth becomes a problem.
+
+- **Extended career length:** Play more seasons before reaching the game's career limit.
+
+## Match Gameplay Improvements
+
+- **Red cards for AI players!** Computer-controlled players can now receive red cards, just like human-controlled players.
+
+- **Slightly more fouls:** Adjusted foul detection increases the frequency of refereeing decisions for both human and AI players.
+
+- **Automatic AI injury substitutions:** AI-controlled teams now attempt to replace injured players during matches, prioritising substitutes who play in the same or a similar position.
+
+## Development Status
+
+*This is an unofficial, experimental modification of OpenSWOS. Some features are still being tested and refined. Feedback and bug reports are welcome!*
+
 
 # OpenSWOS
 
