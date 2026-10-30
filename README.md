@@ -41,6 +41,9 @@ This modified version of OpenSWOS introduces a range of improvements to career m
 ## Yugoslavia
 - **Both divisions + National team** In original SWOS 1996/97 Yugoslav league was not updated. Rosters were old, and there were only 10 teams in the league instead of 12. This mod brings 24 teams, in 1A and 1B leagues, with all real rosters from 1996/97
 
+## Data Editor
+In the future versions I will release a data editor, which will be able to deal with adding new leagues, teams, etc.
+
 ## Screenshots
 
 | | |
@@ -56,6 +59,9 @@ This modified version of OpenSWOS introduces a range of improvements to career m
 
 *This is an unofficial, experimental modification of OpenSWOS. Some features are still being tested and refined. Feedback and bug reports are welcome!*
 
+## Limitations
+
+This version of SWOS works only with the original database. I have not tested it with any other data set.
 
 # OpenSWOS is the main thing! Here are the links
 
