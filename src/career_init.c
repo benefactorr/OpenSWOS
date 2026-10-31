@@ -1630,6 +1630,19 @@ void ContinueCareerNextSeason(void)
         InitializeNewSeason();
         SWOS_AUTOSKIP_LOG("[bug1] back from InitializeNewSeason: youreSacked=%u", (unsigned)_youreSacked);
     }
+    /* Run one automatic worldwide AI transfer batch for each completed
+     * season transition.  This path is not used by InitCareer(), so a new
+     * career does not receive an additional transfer batch on creation.
+     * Run after InitializeNewSeason() in both job-change and stay branches:
+     * the new managed club is then established and excluded by the existing
+     * AI transfer engine.  The manual Transfers-menu button remains active. */
+    SWOS_AI_LOG("[SWOS AI AUTO] BEGIN season=%u records=%u\n",
+                (unsigned)_careerSeasonsCompleted,
+                (unsigned)_numForeignMarketPlayers2);
+    SWOS_AI_RealTransferTest();
+    SWOS_AI_LOG("[SWOS AI AUTO] END season=%u records=%u\n",
+                (unsigned)_careerSeasonsCompleted,
+                (unsigned)_numForeignMarketPlayers2);
     SWOS_AUTOSKIP_LOG("[bug1] ContinueCareerNextSeason EXIT");
 }
 
@@ -2835,8 +2848,8 @@ found_slot:
 }
 
 /* Manual AI transfer action. Available in all seasons, including season one.
- * Never called automatically by career creation or season transitions.
- * Every explicit menu click requests a new test batch.
+ * In addition to the once-per-season automatic pass in
+ * ContinueCareerNextSeason(), each explicit menu click requests a batch.
  */
 __attribute__((used, externally_visible))
 void SWOS_AI_RunTransfersMenu(void)
