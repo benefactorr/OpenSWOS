@@ -1,0 +1,60 @@
+{
+ "uuid": "c75c6023-b207-5111-a372-3482470c9e31",
+ "id": "careerplus",
+ "name": "Career+",
+ "version": "3.0",
+ "author": "benefactorr",
+ "about": "A deeper career: AI clubs trade players, players age and retire, every winner of a 35-season career is kept, world and national player searches, fuller squad screens, Career+'s finances, transfers and job offers, and Yugoslavia's two divisions with 1996/97's squads. A career started with Career+ needs it on to load: its Yugoslavia moves the later countries' team numbers.",
+ "targets": [
+  "sdl"
+ ],
+ "changes": "career",
+ "default": false,
+ "settings": [
+  {
+   "key": "cpu_cards",
+   "label": "Computer players sent off",
+   "choices": [
+    "on",
+    "off"
+   ],
+   "default": "on"
+  },
+  {
+   "key": "more_fouls",
+   "label": "More fouls",
+   "choices": [
+    "on",
+    "off"
+   ],
+   "default": "on"
+  },
+  {
+   "key": "ai_injury_subs",
+   "label": "Computer replaces injured players",
+   "choices": [
+    "on",
+    "off"
+   ],
+   "default": "on"
+  },
+  {
+   "key": "retirements",
+   "label": "Players retire (35 and over)",
+   "choices": [
+    "on",
+    "off"
+   ],
+   "default": "on"
+  },
+  {
+   "key": "ai_transfers",
+   "label": "Computer clubs trade players",
+   "choices": [
+    "on",
+    "off"
+   ],
+   "default": "on"
+  }
+ ]
+}

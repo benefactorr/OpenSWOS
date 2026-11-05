@@ -19,9 +19,8 @@ built on top of it.  The parse produces plain JSON-serialisable dicts and
 (binary -> dict -> binary) — the foundation for the data->JSON migration
 (see docs/DATA_JSON.md).
 
-RNC method (v1/v2) is auto-detected from the header.  Decompression reuses the
-existing port (rnc_propack.py); set RNC_PROPACK_DIR if it is not on a default
-search path.
+RNC method (v1/v2) is auto-detected from the header.  Compression and decompression
+are scripts/rnc_propack.py (beside this file; RNC_PROPACK_DIR picks another copy).
 """
 import os
 import sys
@@ -40,8 +39,6 @@ _POS_REV = {v: k for k, v in POSITIONS.items()}
 
 _RNC_DIRS = [
     os.environ.get("RNC_PROPACK_DIR"),
-    "/mnt/c/Projects/Python/SWOS",
-    r"C:\Projects\Python\SWOS",
     os.path.dirname(os.path.abspath(__file__)),
 ]
 
@@ -257,7 +254,13 @@ def encode_team(t: dict) -> bytearray:
     gtn = h["global_team_number"] & 0xFFFF
     b[2], b[3] = (gtn >> 8) & 0xFF, gtn & 0xFF
     b[4] = h["team_controls"] & 0xFF
-    _put_str(b, TEAM_NAME_OFF, TEAM_NAME_LEN, h["team_name"])
+    name = h["team_name"]
+    if len(name.encode("latin1", "replace")) > TEAM_NAME_LEN - 1:
+        # 16 letters and a NUL: the byte after the field is the team's goal count
+        # (writes_zero_here), so a 17-letter name is out of the format (none of 96/97's is)
+        sys.stderr.write("swos_team_file: team name %r is over %d letters, cut\n" % (name, TEAM_NAME_LEN - 1))
+        name = name.encode("latin1", "replace")[:TEAM_NAME_LEN - 1].decode("latin1")
+    _put_str(b, TEAM_NAME_OFF, TEAM_NAME_LEN, name)
     b[22] = h["writes_zero_here"] & 0xFF
     b[23] = h["and_with_0xfe"] & 0xFF
     b[24] = h["tactics"] & 0xFF

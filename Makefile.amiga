@@ -48,12 +48,19 @@ VPATH     = $(SRC_DIRS) support asm
 SDL_ONLY_SRCS := \
     arcade.c              \
     assets_check.c        \
+    mobile.c              \
+    esc_confirm.c         \
+    phone_fetch.c         \
+    touch_controls.c      \
     contest_log.c         \
     audio_sdl.c           \
     crt_effects.c         \
     ini.c                 \
     input_sdl.c           \
     custom_team.c         \
+    career_autopilot.c    \
+    diy_import_dos.c      \
+    live_cast.c           \
     dos_sound.c           \
     dos_music.c           \
     dos_music_impl.c      \
@@ -65,7 +72,6 @@ SDL_ONLY_SRCS := \
     match_record.c        \
     match_report.c        \
     match_step.c          \
-    menu_load_json.c      \
     menu_symbols.c        \
     miniz_impl.c          \
     pitch_map.c           \
@@ -156,7 +162,7 @@ FP  = -fomit-frame-pointer
 ifdef DBG
 OPT = -O0
 endif
-CCFLAGS   = -g -MP -MMD -m68020 $(OPT) -nostdlib -Wextra -Wno-unused-function -Wno-volatile-register-var -Wno-stringop-overflow $(FP) -fno-tree-loop-distribution -fno-strict-aliasing -fno-exceptions -fno-optimize-sibling-calls -ffunction-sections -fdata-sections -Iinclude $(DATA_FLAGS)
+CCFLAGS   = -g -MP -MMD -m68020 $(OPT) -nostdlib -Wextra -Wno-unused-function -Wno-volatile-register-var -Wno-stringop-overflow $(FP) -fno-tree-loop-distribution -fno-strict-aliasing -fno-exceptions -fno-optimize-sibling-calls -ffunction-sections -fdata-sections -Iinclude -isystem include/amiga_libc $(DATA_FLAGS)
 
 # DUMP_ASM=1 → save preprocessed .i and assembly .s next to each .o.
 # Slight build slowdown; output lands in obj/ alongside .o files.
@@ -164,6 +170,9 @@ DUMP_ASM ?= 1
 ifeq ($(DUMP_ASM),1)
 CCFLAGS   += -save-temps=obj -fverbose-asm
 endif
+# The football worlds beyond 96/97 (include/swos_types.h): `SWOS_WORLDS=0` compiles them out.
+SWOS_WORLDS ?= 1
+CCFLAGS   += -DSWOS_WORLDS=$(SWOS_WORLDS)
 # Escape hatch for one-off defines, e.g. make EXTRA_CFLAGS=-DPITCH_SCROLL_TEST
 CCFLAGS   += $(EXTRA_CFLAGS)
 CPPFLAGS  = $(CCFLAGS) -fno-rtti -fcoroutines -fno-use-cxa-atexit

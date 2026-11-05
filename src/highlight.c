@@ -476,6 +476,16 @@ void SetPitchTypeAndNumber(void)
         d0 = 0x500;
 
     _pitchNumberAndType = (uint16_t)_pitchType + d0;
+#ifdef SWOS_SDL_BUILD
+    {
+        /* A mod's match on an exact pitch (mod_match.c, H7): after both random numbers, so the
+         * generators are where any kick-off leaves them; the pitch's own art (1..6). */
+        extern int16_t ModMatch_PitchNumber(void);
+        const int16_t n = ModMatch_PitchNumber();
+        if (n)
+            _pitchNumberAndType = (uint16_t)((_pitchNumberAndType & 0x00FF) | (uint16_t)((n - 1) << 8));
+    }
+#endif
 
 #ifdef DETERMINISTIC_MODE
     /* Force fixed pitch to ensure ASM and C versions match */
@@ -781,8 +791,14 @@ void DrawReplayFrame(void)
     }
 #endif
 
+#ifdef SWOS_SDL_BUILD
+    static int32_t s_modFirst;                  /* (the mods' replay hooks: a new replay) */
+#endif
     if (_replayState == 1) {
         /* STATE 1 → 2: Initialize replay */
+#ifdef SWOS_SDL_BUILD
+        s_modFirst = 1;
+#endif
         _replayState = 2;
         _savedCameraX = _cameraX.s.i;
         _savedCameraY = _cameraY.s.i;
@@ -822,6 +838,13 @@ void DrawReplayFrame(void)
     a0 = wrapPointerFwd(a0);
 
     DrawAnimatedPatterns();
+#ifdef SWOS_SDL_BUILD
+    {   /* (under the sprites: the weather mod's mud; include/mod_hooks.h) */
+        extern void ModHooks_ReplayFrameBegin(int32_t first, int32_t fresh);
+        ModHooks_ReplayFrameBegin(s_modFirst, 1);
+        s_modFirst = 0;
+    }
+#endif
 
     /* Read next entry after frame marker */
     d0 = BE_READ_U32(a0);
@@ -866,6 +889,10 @@ sprite_decode:
             extern int _menu_draw_x_offset;
             int32_t worldX = sx + (int32_t)s_replayRecCamX;
             int32_t worldY = sy + (int32_t)s_replayRecCamY;
+            {
+                extern void ModHooks_ReplaySprite(uint16_t image, int16_t left, int16_t top);
+                ModHooks_ReplaySprite((uint16_t)sprIdx, (int16_t)worldX, (int16_t)worldY);
+            }
 
             /* ---- Goal-overlay anchor guard ------------------------------------
              * The goal overlay is the one recorded sprite whose world position is
@@ -972,6 +999,21 @@ after_decode:
 
         uint16_t leftGoals  = _hilLeftTeamGoals;
         uint16_t rightGoals = _hilRightTeamGoals;
+#ifdef SWOS_SDL_BUILD
+        /* On the screen-pinned HUD layer, as a match's own score is (sprites.c HUD_LAYER_Z_MIN):
+         * drawn into the frame, it moved with the pitch's sub-pixel scroll, a pixel this way and
+         * that as the camera panned -- a whole-match replay keeps the camera in full 16.16. */
+        extern uint8_t *Platform_HudLayerBuffer(void);
+        extern void     Platform_HudLayerMark(int, int, int, int);
+        extern volatile uintptr_t _frontbufferBasePtr;
+        uint8_t *hudLayer = Platform_HudLayerBuffer();
+        const uintptr_t savedFbBase = _frontbufferBasePtr;
+        if (hudLayer) {
+            _frontbufferBasePtr = (uintptr_t)hudLayer;
+            extern int _menu_draw_x_offset;
+            Platform_HudLayerMark((int)bx + _menu_draw_x_offset, (int)by, 64, 32);
+        }
+#endif
         uint16_t lTens = leftGoals / 10,  lUnits = leftGoals % 10;
         uint16_t rTens = rightGoals / 10, rUnits = rightGoals % 10;
 
@@ -989,6 +1031,10 @@ after_decode:
         /* Right team goals (SPR_BIG_0_ALT digit sprites) */
         if (rTens) { DarkenRectangle(SPR_BIG_0_ALT + rTens, bx, by); bx += 12; }
         DarkenRectangle(SPR_BIG_0_ALT + rUnits, bx, by);
+#ifdef SWOS_SDL_BUILD
+        if (hudLayer)
+            _frontbufferBasePtr = savedFbBase;
+#endif
     }
 
     /* State 3 timing: stretch each replay frame across 2 extra ticks

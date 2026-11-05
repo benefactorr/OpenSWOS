@@ -859,15 +859,9 @@ CompetitionLeague _welshLeague = {
     0,
     {  }
 };
-/* Expanded FR Yugoslavia test database (TEAM.041): two groups of 12 clubs.
- * Division indices in the TEAM file must be 0 (top) and 1 (second).
- * Two round-robin legs yield 22 fixtures per club and avoid the original
- * four-leg schedule, which was intended for the ten-club league.
- * Direct promotion/relegation: two clubs per division boundary.
- * This changes the competition template, NOT existing career saves. */
 CompetitionLeague _yugoslavianLeague = {
-    { { 85, 0, 41, 64, 40, 0, 0, 0, 0 }, 2, 2, 3, 53 },
-    { { 12, 0, 0, 2, 0, 0 }, { 12, 2, 0, 0, 0, 0 } },
+    { { 85, 0, 41, 64, 40, 0, 0, 0, 0 }, 1, 4, 3, 53 },
+    { { 10, 0, 0, 0, 0, 0 } },
     0,
     {  }
 };
@@ -1769,7 +1763,8 @@ Competition *_hungaryTable[4] = { (Competition *)&_hungarianLeague, (Competition
 Competition *_icelandTable[4] = { (Competition *)&_icelandicLeague, (Competition *)-2, (Competition *)&_icelandicCup, (Competition *)-1 };
 Competition *_republicIrelandTable[4] = { (Competition *)&_irishLeague, (Competition *)-2, (Competition *)&_irishCup, (Competition *)-1 };
 Competition *_israelTable[4] = { (Competition *)&_israeliLeague, (Competition *)-2, (Competition *)&_israeliCup, (Competition *)-1 };
-Competition *_italyTable[4] = { (Competition *)&_italianLeague, (Competition *)-2, (Competition *)&_italianCup, (Competition *)-1 };
+/* [5]: room for a world's league cup (world_cups.c) */
+Competition *_italyTable[5] = { (Competition *)&_italianLeague, (Competition *)-2, (Competition *)&_italianCup, (Competition *)-1, (Competition *)-1 };
 Competition *_latviaTable[4] = { (Competition *)&_latvianLeague, (Competition *)-2, (Competition *)&_latvianCup, (Competition *)-1 };
 Competition *_lithuaniaTable[4] = { (Competition *)&_lithuanianLeague, (Competition *)-2, (Competition *)&_lithuanianCup, (Competition *)-1 };
 Competition *_luxembourgTable[4] = { (Competition *)&_luxembourgLeague, (Competition *)-2, (Competition *)&_luxembourgCup, (Competition *)-1 };

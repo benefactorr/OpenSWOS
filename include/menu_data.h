@@ -1136,6 +1136,16 @@ typedef struct Menu_Options
   MenuCmd_Invisible versionText_invisible;
   MenuCmd_TextPtr versionText_text;
   MenuCommand versionText_end;
+  /* WORLD: 96/97 / 2026-27 -- [general] world in SWOS.ini, played from the next start
+   * (ChangeWorld). SDL only -- the Amiga's world is its drawer's (OpenSWOS Setup); appended
+   * last so no entry's number moves (entries 21, 22). */
+  MenuEntry_Byte_Colors_TextPtr labelWorld;
+  MenuEntry_Byte_Nav_Colors_StringTable_OnSelect world;
+  /* MODS: opens the MODS screen (src/mods_menu.c); its value says how many are on. SDL only --
+   * the Amiga's mods are its drawer's (data/MODS, OpenSWOS Setup); appended last so no entry's
+   * number moves (entries 23, 24). */
+  MenuEntry_Byte_Colors_TextPtr labelMods;
+  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect mods;
   MenuMark markEndMenu;
 } Menu_Options;
 #pragma pack(pop)
@@ -1187,40 +1197,11 @@ typedef struct Menu_CompetitionStats
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry2;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry3;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry4;
-  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry5;
+  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry5;    /* WINNERS (a world's; world_winners.c) */
+  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry6;    /* OpenSWOS: a mod's row (MODPOINT; mod_entries.c) */
   MenuMark markEndMenu;
 } Menu_CompetitionStats;
 #pragma pack(pop)
-
-/* End-of-season managed player retirement notification. */
-#pragma pack(push, 1)
-typedef struct Menu_RetirementNews {
-  MenuHeader hdr;
-  MenuMark markByteCoords;
-  MenuEntry_Byte_Colors_TextPtr heading;
-  MenuEntry_Byte_Colors_TextPtr rows[10];
-  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect next;
-  MenuMark markEndMenu;
-} Menu_RetirementNews;
-#pragma pack(pop)
-extern Menu_RetirementNews _retirementNewsMenu;
-
-/* PAST WINNERS: a career history menu, using the standard menu renderer. */
-#pragma pack(push, 1)
-typedef struct Menu_PastWinners {
-  MenuHeader hdr;
-  MenuMark markByteCoords;
-  MenuEntry_Byte_Colors_TextPtr heading;
-  MenuEntry_Byte_Colors_TextPtr rows[10];
-  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect previous;
-  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect next;
-  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect exit;
-  MenuMark markEndMenu;
-} Menu_PastWinners;
-#pragma pack(pop)
-extern Menu_PastWinners _pastWinnersMenu;
-
-
 
 /* 201 - Menu 15: careerOverMenu (0xE4 = 228 bytes) */
 #pragma pack(push, 1)
@@ -1385,6 +1366,7 @@ typedef struct Menu_SWOSMainMenu
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry13;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry14;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry15;   /* CREDITS (SDL only) */
+  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry16;   /* MODES (SDL only, while a mod has an entry) */
   MenuMark_StartMenu menu3Start;
   MenuMark markEndMenu;
 } Menu_SWOSMainMenu;
@@ -1401,11 +1383,12 @@ typedef struct Menu_ChooseTeams
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry2;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry3;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry4;
+  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry5;   /* TEAM PACKS (OpenSWOS: SDL, a mod's packs) */
   MenuMark markWideCoords;
-  MenuCoords16 entry5_rc;
-  MenuCmd_Colors entry5_colors;
-  MenuCmd_TextNoPtr entry5_text;
-  MenuCommand entry5_end;
+  MenuCoords16 entry6_rc;
+  MenuCmd_Colors entry6_colors;
+  MenuCmd_TextNoPtr entry6_text;
+  MenuCommand entry6_end;
   MenuMark markEndMenu;
 } Menu_ChooseTeams;
 #pragma pack(pop)
@@ -1453,7 +1436,7 @@ typedef struct Menu_BuyPlayer
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry5;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry6;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry7;
-  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect worldSearch;
+  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry8;    /* OpenSWOS: a mod's row (MODPOINT; mod_entries.c) */
   MenuMark markEndMenu;
 } Menu_BuyPlayer;
 #pragma pack(pop)
@@ -1468,7 +1451,7 @@ typedef struct Menu_NationalTeamAddPlayer
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry1;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry2;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry3;
-  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry4;
+  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry4;    /* OpenSWOS: a mod's row (MODPOINT; mod_entries.c) */
   MenuMark markEndMenu;
 } Menu_NationalTeamAddPlayer;
 #pragma pack(pop)
@@ -1652,7 +1635,7 @@ typedef struct Menu_JobOffers
   MenuMark markWideCoords4;
   MenuEntry_Wide_TextNoPtrOnly entry16;
   MenuMark markByteCoords5;
-  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry17;
+  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry17;   /* NEXT PAGE (OpenSWOS: job_offers_capacity > 5) */
   MenuMark markEndMenu;
 } Menu_JobOffers;
 #pragma pack(pop)
@@ -1717,7 +1700,6 @@ typedef struct Menu_TransferMarket
   MenuEntry_Byte_Colors_TextPtr entry0;
   MenuEntry_Byte_TextNoPtrOnly entry1;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry2;
-  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entryAi;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry3;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry4;
   MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry5;
@@ -1732,7 +1714,7 @@ typedef struct Menu_TransferMarket
   MenuCmd_OnSelect template1_onSelect;
   MenuCommand template1_end;
   MenuMark markWideCoords;
-  MenuEntry_Wide_NavOnly entries9_18[10];
+  MenuEntry_Wide_NavOnly entries9_13[5];
   MenuMark markInitEntry;
   MenuMark_StartMenu menu2Start;
   MenuCoords16 entry14_rc;
@@ -1751,6 +1733,22 @@ typedef struct Menu_TransferMarket
   MenuCoords16 entry25_rc;
   MenuCmd_TextPtr entry25_text;
   MenuCommand entry25_end;
+  /* OpenSWOS: transfer list rows 6-10 (entries 26-30), shown when transfer_list_capacity > 5 */
+  MenuMark_StartMenu menu3Start;
+  MenuMark template2_markStart;
+  MenuMark markByteCoords3;   /* (after the template's mark: the unpacker reads a coords mark
+                               * only where an entry's position starts) */
+  MenuCoords8 template2_rc;
+  MenuCmd_Colors template2_colors;
+  MenuCmd_BeforeDraw template2_afterDraw;
+  MenuCmd_OnSelect template2_onSelect;
+  MenuCommand template2_end;
+  MenuMark markWideCoords3;
+  MenuEntry_Wide_NavOnly entries26_30[5];
+  MenuMark markInitEntry2;
+  MenuMark_StartMenu menu4Start;
+  MenuMark markByteCoords4;
+  MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect entry31;   /* OpenSWOS: a mod's row (MODPOINT; mod_entries.c) */
   MenuMark markEndMenu;
 } Menu_TransferMarket;
 #pragma pack(pop)

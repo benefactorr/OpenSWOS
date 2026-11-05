@@ -1,14 +1,15 @@
-#include "swos_fixed_team_name.h"
-#include "career_params.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
+#include "swos_fixed_team_name.h"   /* SWOS_TeamNameCopy: a 17-byte name may have no NUL */
+#include "career_params.h"   /* num_seasons: the career's last season */
 #include "statistics.h"
 #include "translations.h"
 #include "comp_identity.h"
 #include "game_types.h"
+#include "world.h"
 #include "menu_system.h"
 #include "play_match_menu.h"
 #include "input_text.h"
@@ -1097,9 +1098,7 @@ void CompetitionTopGoalScorersInit(void)
             {
                 uint8_t *d = dest;
                 d = StringCopy(_aLparen, d);
-                uint8_t safeTeamName[18];
-                SWOS_CopyTeamName18(safeTeamName, teamName);
-                d = StringCopy(safeTeamName, d);
+                d = SWOS_TeamNameCopy(teamName, d);
                 d = StringCopy(_aRparen, d);
                 *d = 0;
             }
@@ -1251,9 +1250,7 @@ void TopGoalScorersBeforeDrawCommon(MenuEntry *entry)
         {
             uint8_t *d = dest;
             d = StringCopy(_aLparen, d);
-            uint8_t safeTeamName[18];
-                SWOS_CopyTeamName18(safeTeamName, teamName);
-                d = StringCopy(safeTeamName, d);
+            d = SWOS_TeamNameCopy(teamName, d);
             d = StringCopy(_aRparen, d);
             *d = 0;
         }
@@ -2168,8 +2165,8 @@ void FillManagementRecordInfo(void)
     {
         uint16_t seasonNum = _currentSeasonNumber;
         uint16_t d0 = seasonNum + 1;
-        uint16_t d1 = seasonNum + 1996;
-        uint16_t d2 = seasonNum + 97;
+        uint16_t d1 = seasonNum + World_FirstYear();     /* (the world's years: world.h) */
+        uint16_t d2 = (uint16_t)((d1 + 1) % 100);
         const uint8_t *fmt;
 
         if (d2 >= 100)

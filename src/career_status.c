@@ -28,9 +28,11 @@
  * GetExpectedLeagueRankIndex.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
 #include "career_status.h"
+#include "teams.h"
+#include "league_phase.h"
+#include "uefa_coef.h"
+#include "conti_season.h"
 #include "test_rules.h"
 #include "comp_identity.h"
 #include "diy_competition.h"
@@ -41,11 +43,6 @@
 #include "auto_skip_debug.h"
 #include "string_utils.h"
 #include "job_offers.h"
-#include "swos_identity_runtime.h"
-#include "swos_age_identity_log.h"
-
-extern int SWOS_AgesSet(const char *name, unsigned age);
-extern int SWOS_AgesGet(size_t index, const char **name, unsigned *age);
 
 /* ---- Assembly externs (functions still in asm) ---- */
 extern uint16_t Rand(void);
@@ -136,10 +133,7 @@ extern uint16_t   _removedOfferPlayersFromSelectedTeamCount;
 
 /* Board confidence */
 extern int16_t    _boardConfidenceScore;
-extern int16_t    _boardConfidenceHistory0;
-extern int16_t    _boardConfidenceHistory1;
-extern int16_t    _boardConfidenceHistory2;
-extern int16_t    _boardConfidenceHistory3;
+extern uint16_t   _boardConfidenceHistory[4];     /* (newest first; read signed) */
 
 /* Trophy/win flags */
 extern uint16_t   _wonWorldCup;
@@ -707,111 +701,125 @@ static uint16_t isPlayerDisabled(PlayerFile *pf, int16_t excludeCardsFlag) {
  * GetNumberOfAvailablePlayers
  * Returns (disabled << 16) | (available & 0xFFFF).
  * ================================================================ */
-/* The two live career-team buffers have 32 physical player slots (16 main
- * players and 16 reserves); ordinary TEAM records have only 16.  Availability
- * queries must not index past either allocation, even if a caller requests a
- * full match selection when the roster is temporarily shorter than that. */
-static uint16_t availabilityRosterCount(TeamFileEx *team)
-{
-    uint16_t count = team == &_careerTeam ? _careerNumPlayers :
-                     team == &_currentTeam ? _numPlayers : 16;
-    const uint16_t capacity = team == &_careerTeam || team == &_currentTeam ? 32 : 16;
-    return count < capacity ? count : capacity;
-}
-
-static uint8_t *availabilityPlayerList(TeamFileEx *team)
-{
-    return team == &_careerTeam ? _currentMatchPlayers :
-           team == &_currentTeam ? _playerPositions : team->team.playerNumbers;
-}
-
-static uint16_t availabilityPhysicalCapacity(TeamFileEx *team)
-{
-    return team == &_careerTeam || team == &_currentTeam ? 32 : 16;
-}
-
-/* ================================================================
- * GetNumberOfAvailablePlayers
- * Returns (disabled << 16) | (available & 0xFFFF).
- * Missing selection entries are disabled rather than read out of bounds.
- * ================================================================ */
 __attribute__((used, externally_visible))
 uint32_t GetNumberOfAvailablePlayers(TeamFileEx *team, int16_t excludeCardsFlag, uint16_t numPl) {
-    uint8_t *playerList = availabilityPlayerList(team);
-    uint16_t count = availabilityRosterCount(team);
-    uint16_t requested = numPl ? numPl : count;
-    uint16_t physicalCapacity = availabilityPhysicalCapacity(team);
-    uint16_t available = 0;
-    uint16_t disabled = 0;
+    uint8_t *playerList;
+    uint16_t totalCount;
 
-    /* A match-selection request can contain more entries than the roster.
-     * Count the missing entries as disabled, so PLAY is never enabled by
-     * scanning uninitialised list positions. */
-    if (requested > count)
-        disabled = requested - count;
-    if (requested < count)
-        count = requested;
-
-    for (uint16_t i = 0; i < count; ++i) {
-        uint16_t idx = playerList[i];
-        if (idx >= physicalCapacity || isPlayerDisabled(&team->players[idx], excludeCardsFlag))
-            disabled++;
-        else
-            available++;
+    if (team == &_careerTeam) {
+        playerList = _currentMatchPlayers;
+        totalCount = _careerNumPlayers;
+    } else if (team == &_currentTeam) {
+        playerList = _playerPositions;
+        totalCount = _numPlayers;
+    } else {
+        playerList = team->team.playerNumbers;
+        totalCount = 16;
     }
+
+    if (numPl != 0)
+        totalCount = numPl;
+
+    uint16_t disabled = 0;
+    uint16_t available = totalCount;
+    int16_t iter = (int16_t)totalCount - 1;
+
+    for (; iter >= 0; iter--) {
+        int16_t idx = (int8_t)playerList[iter];
+        PlayerFile *pf = &team->players[idx];
+        if (isPlayerDisabled(pf, excludeCardsFlag)) {
+            disabled++;
+            available--;
+        }
+    }
+
     return ((uint32_t)disabled << 16) | (uint32_t)available;
 }
 
 /* ================================================================
  * GetNumberOfAvailableSubstitutes
  * Counts available goalkeeper-position players.
+ * Returns (disabled << 16) | (available & 0xFFFF).
  * ================================================================ */
 __attribute__((used, externally_visible))
 uint32_t GetNumberOfAvailableSubstitutes(TeamFileEx *team, int16_t flag) {
-    uint8_t *playerList = availabilityPlayerList(team);
-    uint16_t count = availabilityRosterCount(team);
-    uint16_t physicalCapacity = availabilityPhysicalCapacity(team);
+    uint8_t *playerList;
+    uint16_t totalCount;
+
+    if (team == &_careerTeam) {
+        playerList = _currentMatchPlayers;
+        totalCount = _careerNumPlayers;
+    } else if (team == &_currentTeam) {
+        playerList = _playerPositions;
+        totalCount = _numPlayers;
+    } else {
+        playerList = team->team.playerNumbers;
+        totalCount = 16;
+    }
+
     uint16_t disabled = 0;
     uint16_t goalkeepers = 0;
-    for (uint16_t i = 0; i < count; ++i) {
-        uint16_t idx = playerList[i];
-        if (idx >= physicalCapacity)
-            continue;
+    int16_t iter = (int16_t)totalCount - 1;
+
+    for (; iter >= 0; iter--) {
+        int16_t idx = (int8_t)playerList[iter];
         PlayerFile *pf = &team->players[idx];
-        if (((uint16_t)pf->positionAndFace & PF_POSITION_MASK) >> PF_POSITION_SHIFT)
+
+        /* Check if goalkeeper (position == 0) */
+        uint16_t position = ((uint16_t)pf->positionAndFace & PF_POSITION_MASK) >> PF_POSITION_SHIFT;
+        if (position != 0)
             continue;
-        if (isPlayerDisabled(pf, flag))
+
+        goalkeepers++;
+        if (isPlayerDisabled(pf, flag)) {
             disabled++;
-        else
-            goalkeepers++;
+            goalkeepers--;
+        }
     }
+
     return ((uint32_t)disabled << 16) | (uint32_t)goalkeepers;
 }
 
 /* ================================================================
  * GetNumberOfAvailableStartingPlayers
- * Counts available outfield players using the appropriate live roster.
+ * Counts available non-goalkeeper players. Uses career path only
+ * (does not check currentTeam).
+ * Returns (disabled << 16) | (available & 0xFFFF).
  * ================================================================ */
 __attribute__((used, externally_visible))
 uint32_t GetNumberOfAvailableStartingPlayers(TeamFileEx *team, int16_t flag) {
-    uint8_t *playerList = availabilityPlayerList(team);
-    uint16_t count = availabilityRosterCount(team);
-    uint16_t physicalCapacity = availabilityPhysicalCapacity(team);
-    uint16_t disabled = 0;
-    uint16_t outfield = 0;
-    for (uint16_t i = 0; i < count; ++i) {
-        uint16_t idx = playerList[i];
-        if (idx >= physicalCapacity)
-            continue;
-        PlayerFile *pf = &team->players[idx];
-        if (!(((uint16_t)pf->positionAndFace & PF_POSITION_MASK) >> PF_POSITION_SHIFT))
-            continue;
-        if (isPlayerDisabled(pf, flag))
-            disabled++;
-        else
-            outfield++;
+    uint8_t *playerList;
+    uint16_t totalCount;
+
+    if (team == &_careerTeam) {
+        playerList = _currentMatchPlayers;
+        totalCount = _careerNumPlayers;
+    } else {
+        playerList = team->team.playerNumbers;
+        totalCount = 16;
     }
-    return ((uint32_t)disabled << 16) | (uint32_t)outfield;
+
+    uint16_t disabled = 0;
+    uint16_t starters = 0;
+    int16_t iter = (int16_t)totalCount - 1;
+
+    for (; iter >= 0; iter--) {
+        int16_t idx = (int8_t)playerList[iter];
+        PlayerFile *pf = &team->players[idx];
+
+        /* Check if NOT goalkeeper (position != 0) */
+        uint16_t position = ((uint16_t)pf->positionAndFace & PF_POSITION_MASK) >> PF_POSITION_SHIFT;
+        if (position == 0)
+            continue;
+
+        starters++;
+        if (isPlayerDisabled(pf, flag)) {
+            disabled++;
+            starters--;
+        }
+    }
+
+    return ((uint32_t)disabled << 16) | (uint32_t)starters;
 }
 
 /* ================================================================
@@ -1110,8 +1118,11 @@ static uint16_t calcCupMatchGateReceiptsFactor(TeamFileEx *team1, TeamFileEx *te
 /* UpdateCareerFinancesAfterMatch
  * Complex dispatcher that calculates gate receipts based on competition type.
  */
+static int32_t careerSaturatingAdd(int32_t a, int64_t b);   /* (below, with the season's finances) */
+
 __attribute__((used, externally_visible))
-void UpdateCareerFinancesAfterMatch(DIYCompetitionEx *comp, TeamFileEx *team) {
+void UpdateCareerFinancesAfterMatch(DIYCompetitionEx *comp, TeamFileEx *team, TeamFileEx *opponent) {
+    int32_t leagueGate = 0;     /* (set on a non-DIY league's home gate) */
     if (_isNationalSelector != 0)
         return;
 
@@ -1128,24 +1139,13 @@ void UpdateCareerFinancesAfterMatch(DIYCompetitionEx *comp, TeamFileEx *team) {
      * compType = slot << 8 and dispatched every match to the panic branch. */
     int16_t compType = (int16_t)*(uint16_t *)&comp->base.compSlot;
     uint32_t d7;
-    /* Final league receipt multiplier (not used by cup matches).
-     * Default 100: ten times lower than the former 1000 multiplier.
-     * Override for comparison with SWOS_LEAGUE_GATE_MULTIPLIER=1000.
-     */
-    unsigned leagueGateMultiplier = 100;
-    const char *leagueGateEnv = getenv("SWOS_LEAGUE_GATE_MULTIPLIER");
-    if (leagueGateEnv && *leagueGateEnv) {
-        char *end = NULL;
-        unsigned long requested = strtoul(leagueGateEnv, &end, 10);
-        if (end != leagueGateEnv && *end == '\0' && requested >= 1 && requested <= 1000)
-            leagueGateMultiplier = (unsigned)requested;
-    }
-    uint64_t leagueCreditScaled = 0;
 
     if (compType == 0) {
         goto league_match;
     } else if (compType == 4) {
         goto cup_match_type4;
+    } else if (compType == 2 && comp->base.hasGroups) {
+        goto diy_comp_match;            /* (a world's state championship in slot 2: states.c) */
     } else if (compType == 1 || compType == 2) {
         goto cup_match_type1or2;
     } else if (compType == 3) {
@@ -1158,10 +1158,9 @@ void UpdateCareerFinancesAfterMatch(DIYCompetitionEx *comp, TeamFileEx *team) {
     }
 
 league_match:
-    d7 = calcLeagueMatchGateReceiptsFactor(team, team /* a2 not used directly, see asm */);
-    /* Actually, asm passes a1=team, a2=team2 separately. For the C version,
-       the league path doesn't use the factor from the cup table;
-       instead it computes a full gate receipt factor from team rank. */
+    /* a1 = the home side, a2 = the opponent (SWOS2.s: CalcLeagueMatchGateReceiptsFactor
+     * weighs both clubs; the C used to pass the home team twice). */
+    d7 = calcLeagueMatchGateReceiptsFactor(team, opponent);
     {
         int16_t isDiy = comp->base.hasGroups;  /* 0x48 */
         if (isDiy != 0) {
@@ -1218,51 +1217,33 @@ league_match:
         int16_t receiptIndex = d3 + (int16_t)factorFromRange;
         _ballSpeed = (uint16_t)receiptIndex;
 
-        /* Multiply by crowd factor from avgSkill (0x30), divide by avg player price */
+        /* Multiply by crowd factor from avgSkill (0x30), divide by avg player price.
+         *
+         * The divisor is GetAveragePlayerPrice(careerTeam) itself (SWOS2.s: `lea careerTeam,a0;
+         * jsr GetAveragePlayerPrice; divu.w d0,d1`), the squad's average price INDEX -- not
+         * the team value CalcGateReceiptsBaseFromTeamValue makes of it, which only the two
+         * factor helpers use. Dividing by that value (thousands, not tens) left nothing:
+         * league home games paid no gate at all, while cup games did (reports: "no gate
+         * receipts for league games, only for cups"; fired for losing money). */
         int8_t crowdFactor = (int8_t)comp->base.avgSkill;  /* 0x30 */
         uint32_t product = (uint32_t)(uint16_t)receiptIndex * (uint16_t)(int16_t)crowdFactor;
-        uint16_t avgPrice = getTeamValueForGateReceipts(&_careerTeam);
+        uint16_t avgPrice = GetAveragePlayerPrice(&_careerTeam);
         if (avgPrice == 0) avgPrice = 1; /* safety */
-        /* The previous port truncated product / avgPrice to an integer
-         * BEFORE applying d7.  For many normal league strengths this
-         * quotient is zero, so home league matches earned nothing.
-         * Keep the fraction until the final division; use 64-bit math
-         * to avoid overflow in the intermediate multiplication. */
-        uint32_t baseReceipts = d7;
-        uint64_t numerator = (uint64_t)baseReceipts * (uint64_t)product;
-        uint64_t denominator = (uint64_t)avgPrice * 100u;
-        uint32_t adjusted = (uint32_t)(numerator / denominator);
-        if (adjusted > 0xffffu)
-            adjusted = 0xffffu;
-        _gateReceiptsFactor = (int16_t)(uint16_t)adjusted;
-        d7 = adjusted;
-        /* Legacy home-match path credits adjusted * 2 * 16. */
-        leagueCreditScaled = (uint64_t)adjusted * 32u * leagueGateMultiplier;
-
-        /* Debug only this branch: the post-match finance display can
-         * otherwise conceal zero gate income behind other movements. */
-        {
-            FILE *log = fopen("swos_finance_debug.log", "a");
-            if (log) {
-                fprintf(log,
-                    "[SWOS FINANCE] LEAGUE home=%d base=%lu rank=%d "
-                    "crowd=%d teamValue=%u amountPreScale=%lu "
-                    "multiplier=%u credit=%lu\n",
-                    team == &_careerTeam,
-                    (unsigned long)baseReceipts, (int)receiptIndex,
-                    (int)crowdFactor, (unsigned)avgPrice,
-                    (unsigned long)adjusted, leagueGateMultiplier,
-                    (unsigned long)(team == &_careerTeam ? leagueCreditScaled : 0u));
-                fclose(log);
-            }
-        }
+        uint16_t priceRatio = (uint16_t)(product / (uint32_t)avgPrice);
+        /* muls.w d1,d7 is a 32-bit product, divs.w #100 then divides it: the product must not
+         * be cut to 16 bits first, as it was. */
+        int32_t gateProduct = (int32_t)(int16_t)d7 * (int32_t)(int16_t)priceRatio;
+        int16_t gateFactorResult = (int16_t)(gateProduct / 100);
+        _gateReceiptsFactor = gateFactorResult;
+        d7 = (uint32_t)(uint16_t)gateFactorResult;
+        leagueGate = 1;     /* (a league's home gate: league_gate_mult, final_update) */
         goto compute_receipts;
     }
 
 cup_match_type4:
     /* compType 4 falls through to cupMatchType1or2 */
 cup_match_type1or2:
-    d7 = calcCupMatchGateReceiptsFactor(team, team);
+    d7 = calcCupMatchGateReceiptsFactor(team, opponent);
     {
         if (compType != 4) {
             /* compType 1 or 2: cup match */
@@ -1284,7 +1265,7 @@ cup_match_type1or2:
     }
 
 diy_comp_match:
-    d7 = calcCupMatchGateReceiptsFactor(team, team);
+    d7 = calcCupMatchGateReceiptsFactor(team, opponent);
     {
         int16_t isDiy = comp->base.hasGroups;  /* 0x48 */
         if (isDiy == 0) {
@@ -1341,25 +1322,18 @@ increment_count:
 final_update:
     d7 &= 0xFFFF;
     d7 <<= 4;
-    if (leagueCreditScaled && team == &_careerTeam) {
-        /* Apply the configured multiplier only to league receipts. Keep cups unchanged.
-         * All finance totals are signed 32-bit; saturate rather than wrap. */
-        int64_t credit = (int64_t)leagueCreditScaled;
-        int64_t next;
-        if (credit > INT32_MAX) credit = INT32_MAX;
-        next = (int64_t)_gateReceipts + credit;
-        _gateReceipts = (int32_t)(next > INT32_MAX ? INT32_MAX : next);
-        next = (int64_t)_newBalance + credit;
-        _newBalance = (int32_t)(next > INT32_MAX ? INT32_MAX : next);
-        next = (int64_t)_seasonGateReceiptsAccum2 + credit;
-        _seasonGateReceiptsAccum2 = (int32_t)(next > INT32_MAX ? INT32_MAX : next);
-        next = (int64_t)_seasonGateReceiptsAccum + credit;
-        _seasonGateReceiptsAccum = (int32_t)(next > INT32_MAX ? INT32_MAX : next);
+    if (leagueGate && _careerParams.league_gate_mult > 1 && team == &_careerTeam) {
+        /* (career_params: the career club's league home gate, times league_gate_mult; saturating) */
+        const int64_t credit = (int64_t)d7 * _careerParams.league_gate_mult;
+        _gateReceipts = careerSaturatingAdd(_gateReceipts, credit);
+        _newBalance = careerSaturatingAdd(_newBalance, credit);
+        _seasonGateReceiptsAccum2 = careerSaturatingAdd(_seasonGateReceiptsAccum2, credit);
+        _seasonGateReceiptsAccum = careerSaturatingAdd(_seasonGateReceiptsAccum, credit);
     } else {
-        _gateReceipts += (int32_t)d7;
-        _newBalance += (int32_t)d7;
-        _seasonGateReceiptsAccum2 += (int32_t)d7;
-        _seasonGateReceiptsAccum += (int32_t)d7;
+    _gateReceipts += (int32_t)d7;
+    _newBalance += (int32_t)d7;
+    _seasonGateReceiptsAccum2 += (int32_t)d7;
+    _seasonGateReceiptsAccum += (int32_t)d7;
     }
     ClampNewBalanceAndUpdateClubStatus();
     ClearOverdraftStateIfRecovered();
@@ -1634,59 +1608,6 @@ void UpdateCareerAfterMatch(void) {
  * Group E: Weekly/season finances
  * ================================================================ */
 
-/* SWOS FINANCE P4: gentle progressive general-expense scaling.
- * Input is the already-halved P3 weekly running cost. Small teams retain it.
- * Higher costs are discounted in brackets so costs continue to grow with size.
- * Use 64-bit intermediate arithmetic to avoid truncation and overflow. */
-static int32_t swos_finance_progressive_running_cost(int32_t weeklyCost)
-{
-    if (weeklyCost <= 20000) return weeklyCost;
-    int64_t result = 20000;
-    int64_t remainder = (int64_t)weeklyCost - 20000;
-    int64_t tier = remainder < 80000 ? remainder : 80000;
-    result += tier * 90 / 100; remainder -= tier;
-    tier = remainder < 200000 ? remainder : 200000;
-    result += tier * 70 / 100; remainder -= tier;
-    tier = remainder < 300000 ? remainder : 300000;
-    result += tier * 55 / 100; remainder -= tier;
-    result += remainder * 45 / 100;
-    return result > INT32_MAX ? INT32_MAX : (int32_t)result;
-}
-
-/* P5: user-adjustable discount applied only to general running costs.
- * Default 45% of the previous progressive P4 result; wages and income stay
- * unchanged. Read on season-cost recalculation, so a new setting takes effect
- * on the next season initialisation. */
-static int swos_finance_running_cost_percent(void)
-{
-    const char *setting = getenv("SWOS_RUNNING_COST_PERCENT");
-    if (!setting || !*setting) return 45;
-    char *end = NULL;
-    long percent = strtol(setting, &end, 10);
-    if (end == setting || *end != '\0' || percent < 10 || percent > 200)
-        return 45;
-    return (int)percent;
-}
-
-/* Guaranteed annual commercial income is weighted towards clubs with a
- * larger payroll, but deliberately capped. Calculated once per new season.
- * Sponsorship: 6/10/14/18 weeks' wages by division (3+/2/1/0).
- * League distribution: 3/5/7/9 weeks' wages by division, respectively.
- * All amounts are rounded to the nearest lower GBP 1,000. */
-static int32_t swos_finance_annual_payment(int32_t weeklyWages, int weeks, int32_t cap)
-{
-    if (weeklyWages <= 0 || weeks <= 0) return 0;
-    int64_t amount = ((int64_t)weeklyWages * weeks / 1000) * 1000;
-    if (amount > cap) amount = cap;
-    return (int32_t)amount;
-}
-
-static int32_t swos_finance_safe_add(int32_t a, int32_t b)
-{
-    int64_t sum = (int64_t)a + b;
-    return sum > INT32_MAX ? INT32_MAX : sum < INT32_MIN ? INT32_MIN : (int32_t)sum;
-}
-
 /* ApplyWeeklyFinancialDeductions */
 __attribute__((used, externally_visible))
 void ApplyWeeklyFinancialDeductions(void) {
@@ -1785,6 +1706,47 @@ static uint16_t getExpectedLeagueRankIndex(uint8_t *ctx, uint16_t moreExpensiveC
 }
 
 /* InitializeCareerSeasonFinancials */
+/* The weekly running costs by the career params (running_cost_mode / _pct; not the original's
+ * values): mode 1 halves them, then takes the part above 20,000 progressively less (90% to
+ * 100,000, 70% to 300,000, 55% to 600,000, 45% beyond: benefactorr's Career+), then the percent. */
+static int32_t careerRunningCosts(int32_t weekly)
+{
+    int64_t cost = weekly;
+    if (_careerParams.running_cost_mode == 1) {
+        cost /= 2;
+        if (cost > 20000) {
+            static const struct { int64_t width; int32_t pct; } bracket[] = {
+                { 80000, 90 }, { 200000, 70 }, { 300000, 55 }, { (int64_t)1 << 40, 45 },
+            };
+            int64_t rest = cost - 20000, sum = 20000;
+            for (uint32_t b = 0; rest > 0 && b < sizeof bracket / sizeof bracket[0]; b++) {
+                const int64_t part = rest < bracket[b].width ? rest : bracket[b].width;
+                sum += part * bracket[b].pct / 100;
+                rest -= part;
+            }
+            cost = sum;
+        }
+    }
+    cost = cost * _careerParams.running_cost_pct / 100;
+    return cost > INT32_MAX ? INT32_MAX : (int32_t)cost;
+}
+
+/* a season payment of so many weeks' wages, in whole thousands, at most `cap` */
+static int32_t careerWeeksOfWages(int32_t weeklyWages, uint16_t weeks, int32_t cap)
+{
+    if (weeklyWages <= 0 || weeks == 0)
+        return 0;
+    if (weeklyWages > cap / (int32_t)weeks)     /* (32-bit: the Amiga has no 64-bit modulo) */
+        return cap;
+    return weeklyWages * (int32_t)weeks / 1000 * 1000;
+}
+
+static int32_t careerSaturatingAdd(int32_t a, int64_t b)
+{
+    const int64_t sum = (int64_t)a + b;
+    return sum > INT32_MAX ? INT32_MAX : sum < -(int64_t)INT32_MAX - 1 ? (int32_t)(-INT32_MAX - 1) : (int32_t)sum;
+}
+
 __attribute__((used, externally_visible))
 void InitializeCareerSeasonFinancials(void) {
     /* Get more expensive teams count and set expected rank */
@@ -1811,16 +1773,18 @@ void InitializeCareerSeasonFinancials(void) {
 
     /* Compute total team value: weeklyPlayerWages * wageScalingDivisor */
     int32_t d6 = 0;
-    /* Player salaries are 40% of the original wage calculation. Restore the
-     * pre-discount team-value proxy so running costs and gate receipts do
-     * not fall when wages are reduced. */
     int32_t wages = _weeklyPlayerWages;
-    int32_t undiscountedWages = (int64_t)wages * 5 / 2 > INT32_MAX
-        ? INT32_MAX : (int32_t)((int64_t)wages * 5 / 2);
+    if (_careerParams.team_value_wage_pct != 100) {     /* (career_params: the value made from more */
+        const int64_t w = (int64_t)wages * _careerParams.team_value_wage_pct / 100;   /* than the wages) */
+        wages = w > INT32_MAX ? INT32_MAX : (int32_t)w;
+    }
     uint16_t scalingCount = _wageScalingDivisor;
     for (uint16_t i = 0; i < scalingCount; i++) {
-        if (undiscountedWages > INT32_MAX - d6) { d6 = INT32_MAX; break; }
-        d6 += undiscountedWages;
+        if (_careerParams.team_value_wage_pct != 100 && wages > INT32_MAX - d6) {
+            d6 = INT32_MAX;     /* (a raised value saturates; the original's cannot reach it) */
+            break;
+        }
+        d6 += wages;
     }
     _totalTeamValue = d6;
 
@@ -1832,15 +1796,9 @@ void InitializeCareerSeasonFinancials(void) {
     d0 = (uint32_t)(uint16_t)d0 * 96;     /* mulu #$60 */
     d0 = (uint16_t)(d0 / _wageScalingDivisor); /* divu wageScalingDivisor */
     d0 = (uint32_t)(uint16_t)d0 * 1000;   /* mulu #$3E8 */
-    /* P3 halves the original cost; P4 progressively discounts large clubs. */
-    int32_t baselineRunning = (int32_t)(d0 / 2u);
-    int32_t progressiveRunning = swos_finance_progressive_running_cost(baselineRunning);
-    int runningPercent = swos_finance_running_cost_percent();
-    int64_t discountedRunning = (int64_t)progressiveRunning * runningPercent / 100;
-    _weeklyRunningCosts = discountedRunning > INT32_MAX ? INT32_MAX : (int32_t)discountedRunning;
-    fprintf(stderr, "[SWOS FINANCE P5] weekly wages=%ld running baseline=%ld progressive=%ld percent=%d final=%ld\n",
-            (long)_weeklyPlayerWages, (long)baselineRunning, (long)progressiveRunning,
-            runningPercent, (long)_weeklyRunningCosts);
+    _weeklyRunningCosts = (int32_t)d0;
+    if (_careerParams.running_cost_mode != 0 || _careerParams.running_cost_pct != 100)
+        _weeklyRunningCosts = careerRunningCosts((int32_t)d0);
 
     /* Clear accumulators */
     _seasonRunningCostsAccum = 0;
@@ -1875,7 +1833,7 @@ void InitializeCareerSeasonFinancials(void) {
 static int16_t calcBoardConfidenceDeltaPercent(void) {
     if (_isNationalSelector != 0) {
         if (_seasonFinished == 0)
-            return _boardConfidenceHistory3;
+            return (int16_t)_boardConfidenceHistory[3];
         return seasonReviewConfidenceDeltaTable[_seasonReview];
     }
 
@@ -1891,9 +1849,9 @@ static int16_t calcBoardConfidenceDeltaPercent(void) {
 __attribute__((used, externally_visible))
 int16_t GetBoardConfidenceScore(void) {
     int16_t d0 = calcBoardConfidenceDeltaPercent();
-    d0 += _boardConfidenceHistory0;
-    d0 += _boardConfidenceHistory1;
-    d0 += _boardConfidenceHistory2;
+    d0 += (int16_t)_boardConfidenceHistory[0];
+    d0 += (int16_t)_boardConfidenceHistory[1];
+    d0 += (int16_t)_boardConfidenceHistory[2];
     d0 += _boardConfidenceScore;
     return d0;
 }
@@ -1928,11 +1886,11 @@ int16_t UpdateBoardConfidenceScore(void) {
 /* PushBoardConfidenceHistory */
 __attribute__((used, externally_visible))
 int16_t PushBoardConfidenceHistory(void) {
-    _boardConfidenceHistory3 = _boardConfidenceHistory2;
-    _boardConfidenceHistory2 = _boardConfidenceHistory1;
-    _boardConfidenceHistory1 = _boardConfidenceHistory0;
+    _boardConfidenceHistory[3] = _boardConfidenceHistory[2];
+    _boardConfidenceHistory[2] = _boardConfidenceHistory[1];
+    _boardConfidenceHistory[1] = _boardConfidenceHistory[0];
     int16_t d0 = calcBoardConfidenceDeltaPercent();
-    _boardConfidenceHistory0 = d0;
+    _boardConfidenceHistory[0] = (uint16_t)d0;
     return d0;
 }
 
@@ -2111,11 +2069,17 @@ check_tertiary_winner:
     if (_selTeamNumber != _euroCupsCompetitionContextBuf.tourn.header.winnerTeam)
         return;
 
-    if (_euroCupSlotIndex == 0 || _euroCupSlotIndex == 3) {
+    if ((_euroCupSlotIndex == 7 || _euroCupSlotIndex == 8) && Conti_TrophyTier() < 0)
+        return;                         /* (another confederation's tie: a trophy only as its cup's final) */
+    if (_euroCupSlotIndex == 9)
+        return;                         /* (a world's group contest: a title, not a cup) */
+    const uint16_t euroIdx = _euroCupSlotIndex == 7 || _euroCupSlotIndex == 8 ? (uint16_t)Conti_TrophyTier()
+                           : _euroCupSlotIndex >= 4 ? _euroCupSlotIndex - 4 : _euroCupSlotIndex;
+    if (euroIdx == 0 || euroIdx == 3) {  /* (4..6: a world's qualifying tie, its cup's tier) */
         /* European Cup (0) or Copa Libertadores (3): the premier continental club
          * cup -> major trophy bonus. */
         _majorTrophyBonusActive = 1;
-    } else if (_euroCupSlotIndex == 2) {
+    } else if (euroIdx == 2) {
         _cupBonus2Active = 1;
     } else {
         _cupBonus1Active = 1;
@@ -2397,10 +2361,9 @@ void Career_UpdatePlayerWeeklyWageCache(uint16_t playerIndex)
     wage = wage * _careerParams.wage_scale;
     wage = wage / (uint32_t)_wageScalingDivisor;
     wage &= 0xFFFF;  /* keep 16-bit quotient (68k divu behavior) */
+    if (_careerParams.wage_pct != 100)  /* (career_params: Career+'s 40%) */
+        wage = wage * _careerParams.wage_pct / 100u;
 
-    /* Pay 40% of the original wage (20% below the previous half-wage
-     * patch). The wage cache drives both Club Business and deductions. */
-    wage = wage * 2u / 5u;
     _weeklyWageByPlayerIndex[playerIndex] = (int32_t)wage;
 
     recalcTotalWeeklyWages();
@@ -2716,44 +2679,14 @@ uint8_t *TrainingMatch_AddTrialPlayerAtPosition(uint16_t position)
 
     /* Set shirtNumber as a flag (used as a marker here) */
     pf->shirtNumber = 0x10;
+    if (_selTeamNumber == BE_READ_U16(&_careerTeam))
+        SquadNumbers_Free(freeSlot);    /* (real squad numbers: a free one, teams.c) */
 
     /* Store position into positionAndFace (position << 5) */
     pf->positionAndFace = (uint8_t)(position << PF_POSITION_SHIFT);
 
     /* Convert player to trialist */
     Career_ConvertPlayerToTrialistFromName(_selTeamNumber, freeSlot);
-
-    /* This is the second generated-player route, distinct from
-     * Career_GenerateTrialistForTeamPlayer in transfer_market.c. The previous
-     * Step 2W missed it, so RES -> regular form reverted to AGE=25. Register
-     * the freshly created footballer at the actual physical player slot. */
-    {
-        unsigned id = SWOS_GeneratedIdentityCreate((unsigned)_selTeamNumber,
-                                                    (unsigned)freeSlot, 17u);
-        const char *existing_name = NULL;
-        unsigned existing_age = 0;
-        int collision = 0;
-        for (size_t j = 0; SWOS_AgesGet(j, &existing_name, &existing_age); ++j) {
-            if (!existing_name) continue;
-            /* The name-indexed fallback cannot safely overwrite an older
-             * footballer's age. The generated ID above is authoritative. */
-            const unsigned char *a = (const unsigned char *)existing_name;
-            const unsigned char *b = (const unsigned char *)pf->playerName;
-            int equal = 1;
-            while (*a || *b) {
-                unsigned char ca = *a++, cb = *b++;
-                if (ca >= 'a' && ca <= 'z') ca -= 32;
-                if (cb >= 'a' && cb <= 'z') cb -= 32;
-                if (ca != cb) { equal = 0; break; }
-            }
-            if (equal) { collision = 1; break; }
-        }
-        int saved_age = collision ? 0 : SWOS_AgesSet(pf->playerName, 17u);
-        swos_age_log("TRIAL_ALT_ID_ATTACH",
-                     "team=%04X slot=%u id=%u age=17 age_saved=%d collision=%d",
-                     (unsigned)_selTeamNumber, (unsigned)freeSlot, id,
-                     saved_age, collision);
-    }
 
     /* Determine insertion point in currentMatchPlayers */
     uint16_t insertOffset;
@@ -2901,7 +2834,8 @@ extern uint16_t GetTeamValueBase(uint16_t avgPrice);
 static inline int32_t computeTotalProfitLoss(void) {
     int32_t total = _startingBalanceCopy;
     total += _competitionBonuses;
-    total += _sensisoftPlcSponsorship;
+    if (_careerParams.profit_loss_sponsorship)  /* (career_params: the sponsor's money counted) */
+        total += _sensisoftPlcSponsorship;
     total += _gateReceipts;
     total += _playerSales;
     total -= _playerPurchases;
@@ -3145,24 +3079,63 @@ void Career_InitializeNewSeasonFinances(void)
     _gateReceipts = 0;
     _sensisoftPlcSponsorship = 0;
 
-    /* P4: Guaranteed, club-size-sensitive sponsorship in every season.
-     * Calculated from the existing (P3 halved) weekly wages. No random
-     * selection, so large clubs do not face catastrophic no-sponsor years.
-     * The original business screen shows this as Sensisoft sponsorship. */
-    {
-        int sponsorshipWeeks = _currentDivisionIndex == 0 ? 18 :
-                               _currentDivisionIndex == 1 ? 14 :
-                               _currentDivisionIndex == 2 ? 10 : 6;
+    if (_careerParams.sponsorship_mode == 1) {
+        /* (career_params: a sponsor every season, the weekly wages times the division's weeks,
+         * at most 10,000,000; no draw) */
+        const uint16_t div = _currentDivisionIndex < 4 ? _currentDivisionIndex : 3;
         _additionalInvestments = 0;
-        _sensisoftPlcSponsorship = swos_finance_annual_payment(
-            _weeklyPlayerWages, sponsorshipWeeks, 10000000);
-        _sensisoftPlcSponsorshipFactor = _sensisoftPlcSponsorship > 0 ? 1 : 0;
-        _newBalance = swos_finance_safe_add(_newBalance, _sensisoftPlcSponsorship);
-        fprintf(stderr, "[SWOS FINANCE P4] annual sponsorship=%ld division=%u wages=%ld\n",
-            (long)_sensisoftPlcSponsorship, (unsigned)_currentDivisionIndex,
-            (long)_weeklyPlayerWages);
+        _sensisoftPlcSponsorship = careerWeeksOfWages(_weeklyPlayerWages, _careerParams.sponsorship_weeks[div], 10000000);
+        _sensisoftPlcSponsorshipFactor = _sensisoftPlcSponsorship > 0;
+        _newBalance = careerSaturatingAdd(_newBalance, _sensisoftPlcSponsorship);
+        goto skipSponsorship;
     }
 
+    if (_stayingInOldClub) {
+        _additionalInvestments = 0;
+        uint16_t d7 = _sensisoftPlcSponsorshipFactor;
+
+        if (d7 == 0) {
+            /* 1/8 chance of getting sponsorship */
+            if (Rand2() >= 0x20) {
+                goto skipSponsorship;
+            }
+            d7 = 0x10;
+            _additionalInvestments = 1;
+        }
+
+        /* Random sponsorship level: 1..32, capped at d7 */
+        {
+            uint16_t rnd = Rand2();
+            rnd = (rnd & 0x1F) + 1;
+            _sensisoftPlcSponsorshipFactor = 0;
+            if (rnd > d7) {
+                goto skipSponsorship;
+            }
+            _sensisoftPlcSponsorshipFactor = rnd;
+            d7 = rnd;
+        }
+
+        /* Calculate sponsorship amount based on team value */
+        {
+            VerifyTeamLoaded(_selTeamNumber);
+            uint16_t avgPrice = GetAveragePlayerPrice(&_careerTeam);
+            uint32_t d0 = (uint32_t)GetTeamValueBase(avgPrice);
+            d0 = d0 * d7;
+
+            if (d0 > 10000) {
+                d0 = 10000;
+                uint16_t rnd = Rand2() & 0xF;
+                rnd = rnd * 100;
+                d0 = 10000 - rnd;
+            }
+
+            d0 = d0 * 1000;
+            _sensisoftPlcSponsorship = (int32_t)d0;
+            _newBalance += (int32_t)d0;
+        }
+    }
+
+skipSponsorship:
     /* Competition bonuses */
     _competitionBonuses = 0;
 
@@ -3170,9 +3143,13 @@ void Career_InitializeNewSeasonFinances(void)
         int16_t bonus = (int8_t)_euroCupsCompetitionContextBuf.tourn.header.trophyBonusValue;
         uint32_t d0;
 
-        if (_euroCupSlotIndex == 1) {
+        const uint16_t euroIdx = _euroCupSlotIndex == 7 ? 1     /* (another confederation's cups) */
+                               : _euroCupSlotIndex == 9 ? 2     /* (a world's group contest) */
+                               : _euroCupSlotIndex == 8 ? (uint16_t)(Conti_TrophyTier() < 0 ? 1 : Conti_TrophyTier())
+                               : _euroCupSlotIndex >= 4 ? _euroCupSlotIndex - 4 : _euroCupSlotIndex;
+        if (euroIdx == 1) {             /* (4..6: a world's qualifying tie, its cup's tier) */
             d0 = (uint32_t)((uint16_t)bonus) * 62644;
-        } else if (_euroCupSlotIndex == 2) {
+        } else if (euroIdx == 2) {
             d0 = (uint32_t)((uint16_t)bonus) * 41668;
             d0 <<= 1;
         } else {
@@ -3202,22 +3179,17 @@ void Career_InitializeNewSeasonFinances(void)
         _competitionBonuses += (int32_t)d0;
     }
 
-    /* P4: Annual league distribution, booked into the existing competition
-     * bonus category so Club Business and saved totals remain consistent.
-     * The other existing competition rewards are retained. */
-    {
-        int leagueWeeks = _currentDivisionIndex == 0 ? 9 :
-                          _currentDivisionIndex == 1 ? 7 :
-                          _currentDivisionIndex == 2 ? 5 : 3;
-        int32_t leaguePayment = swos_finance_annual_payment(
-            _weeklyPlayerWages, leagueWeeks, 12000000);
-        _competitionBonuses = swos_finance_safe_add(_competitionBonuses, leaguePayment);
-        fprintf(stderr, "[SWOS FINANCE P4] annual league distribution=%ld bonuses-total=%ld\n",
-            (long)leaguePayment, (long)_competitionBonuses);
+    {   /* (career_params: the league's money, the weekly wages times the division's weeks, at
+         * most 12,000,000; booked with the competition bonuses) */
+        const uint16_t div = _currentDivisionIndex < 4 ? _currentDivisionIndex : 3;
+        const uint16_t weeks = _careerParams.league_distribution_weeks[div];
+        if (weeks)
+            _competitionBonuses = careerSaturatingAdd(_competitionBonuses,
+                                                      careerWeeksOfWages(_weeklyPlayerWages, weeks, 12000000));
     }
 
     /* Apply competition bonuses and starting balance */
-    _newBalance = swos_finance_safe_add(_newBalance, _competitionBonuses);
+    _newBalance += _competitionBonuses;
     _startingBalanceCopy = _startingBalance;
     _newBalance += _startingBalanceCopy;
 
@@ -3236,7 +3208,6 @@ extern void Career_FillCurrentSeasonInfo(void);
 extern void Career_AutoAdvanceCompetitionAndPersistSlotState(uint8_t *compPtr);
 extern uint16_t _numJobOffers;
 extern uint16_t _numNewJobOffers;
-extern uint16_t _careerJobOfferMode;
 
 __attribute__((used, externally_visible))
 void Career_HandleRetirement(void)
@@ -3266,19 +3237,21 @@ void Career_PostMatchUpdate(void)
     /* Remove expired job offers */
     JobOffers_RemoveExpiredOffers();
 
-    /* Batch appointments near the end of the season.  The counter is
-     * updated as weekly finances advance and reset for each new season.
-     * Early weeks: no routine offers; then three increasingly large waves.
-     * Retain the established 20-offer queue and all eligibility rules. */
-    uint16_t target = 0;
-    if (_youreSacked != 0 || _careerJobOfferMode != 0) {
-        target = (Rand2() & 1) + 19;  /* urgent/explicit job search */
-    } else if (_seasonWeeksDeducted >= 30) {
-        target = (Rand2() & 1) + 19;
-    } else if (_seasonWeeksDeducted >= 25) {
-        target = 12;
-    } else if (_seasonWeeksDeducted >= 20) {
-        target = 6;
+    /* Decide how many job offers to target: 1 or 2 */
+    uint16_t target;
+    if (_careerParams.job_offer_waves != 1) {
+        target = (Rand2() & 1) + 1;
+    } else {
+        /* (career_params: Career+'s waves -- none before week 20, then 6, 12 from week 25, 19-20
+         * from week 30; 19-20 at once when sacked or searching. The queue's capacity still caps it.) */
+        extern uint16_t _careerJobOfferMode;
+        target = 0;
+        if (_youreSacked != 0 || _careerJobOfferMode != 0 || _seasonWeeksDeducted >= 30)
+            target = (Rand2() & 1) + 19;
+        else if (_seasonWeeksDeducted >= 25)
+            target = 12;
+        else if (_seasonWeeksDeducted >= 20)
+            target = 6;
     }
 
     /* Try up to 100 times to generate enough job offers */
@@ -3422,7 +3395,7 @@ void Career_AutoAdvanceCompetitionAndPersistSlotState(uint8_t *compPtr)
         const char *bailReason = 0;
         uint32_t bailTeamSelPtr = 0;
 
-        if (numTeams <= 0 || numTeams > 32) {
+        if (numTeams <= 0 || numTeams > LEAGUE_PHASE_CLUBS) {   /* (a world's league phase: 36) */
             bail = 1;
             bailReason = "numTeams out of range";
         } else if (totalInRound <= 0 || totalInRound > 32) {
@@ -3533,12 +3506,8 @@ extern void Career_InitCompetitionTeamSelectionFromTableEntrySpec(uint8_t *recor
  * loads competition, runs cup match advancement, then restores RNG state.
  * a0 = competition record pointer. */
 __attribute__((used, externally_visible))
-
-extern uint8_t _currentCompetitionIndex;
-#define CUP_STEP(...) do { FILE *cf = fopen("swos_division_debug.log", "a"); if (cf) { fputs("CUPTRACE ", cf); fprintf(cf, __VA_ARGS__); fputc('\n', cf); fclose(cf); } } while (0)
 void Career_AutoAdvanceCupCompetitionFromRecord(uint8_t *record)
 {
-    CUP_STEP("ENTER comp=%u record=%p", (unsigned)_currentCompetitionIndex, (void *)record);
     /* Special-case English cup aliases (118/119 → 120/121). */
     uint8_t rid = record ? comp_id(record) : 0xFFu;
     if (rid == COMPID_englishCup)
@@ -3563,27 +3532,16 @@ void Career_AutoAdvanceCupCompetitionFromRecord(uint8_t *record)
     Randomize2(seed);
 
     _numSelectedTeams = 0;
-    CUP_STEP("TEAM_SELECTION_BEGIN comp=%u record=%p", (unsigned)_currentCompetitionIndex, (void *)record);
     Career_InitCompetitionTeamSelectionFromTableHeaderSpec(record);
-    CUP_STEP("TEAM_SELECTION_END comp=%u selected=%u", (unsigned)_currentCompetitionIndex, (unsigned)_numSelectedTeams);
-    CUP_STEP("MARKET_BEGIN comp=%u", (unsigned)_currentCompetitionIndex);
     Career_ApplyPendingForeignMarketPlayersToSelectedTeams();
-    CUP_STEP("MARKET_END comp=%u", (unsigned)_currentCompetitionIndex);
-    CUP_STEP("INIT_CUP_BEGIN comp=%u", (unsigned)_currentCompetitionIndex);
     InitDIYCupFromRecord(record);
-    CUP_STEP("INIT_CUP_END comp=%u", (unsigned)_currentCompetitionIndex);
-    CUP_STEP("INIT_TEAMS_BEGIN comp=%u", (unsigned)_currentCompetitionIndex);
     InitTeams();
-    CUP_STEP("INIT_TEAMS_END comp=%u", (unsigned)_currentCompetitionIndex);
-    CUP_STEP("MATCHES_BEGIN comp=%u", (unsigned)_currentCompetitionIndex);
     Career_AutoAdvanceCupMatches();
-    CUP_STEP("MATCHES_END comp=%u", (unsigned)_currentCompetitionIndex);
 
     _viewRandomPhase = savedViewRandom;
     _seasonPlaying = savedSeasonPlaying;
     RestoreRand2State();
     _careerLoadedFlag = 0;
-    CUP_STEP("EXIT comp=%u", (unsigned)_currentCompetitionIndex);
 }
 
 /* Career_AutoAdvanceLeagueCompetitionFromRecord (SWOS2.s line 35291)
@@ -3637,19 +3595,11 @@ void Career_AutoAdvanceInternationalCompetitionFixtures(uint8_t *record, uint16_
     uint16_t seed = ((uint16_t)record[0] << 8) | (uint16_t)_seasonPlaying;
     Randomize2(seed);
     _numSelectedTeams = 0;
-    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV before team selection index=%u\n", (unsigned)index); fclose(f); } }
     Career_InitCompetitionTeamSelectionFromTableEntrySpec(record, index);
-    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV after team selection index=%u\n", (unsigned)index); fclose(f); } }
     Career_ApplyPendingForeignMarketPlayersToSelectedTeams();
-    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV before competition initialisation index=%u\n", (unsigned)index); fclose(f); } }
     InitDIYCompetitionFromTableEntry(index, record);
-    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV after competition initialisation index=%u\n", (unsigned)index); fclose(f); } }
-    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV before team loading index=%u\n", (unsigned)index); fclose(f); } }
     InitTeams();
-    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV after team loading index=%u\n", (unsigned)index); fclose(f); } }
-    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV before fixture advancement index=%u\n", (unsigned)index); fclose(f); } }
     Career_AutoAdvanceLeagueFixtures();
-    { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV after fixture advancement index=%u\n", (unsigned)index); fclose(f); } }
 
     _viewRandomPhase = savedViewRandom;
     _seasonPlaying = savedSeasonPlaying;
@@ -4078,26 +4028,6 @@ skipStats: ;
             (TeamSelectionKeyCacheEntry *)(_teamSelectionKeyCache + _teamSelectionKeyCacheOffset);
         base_entry->remainingElements -= 1;
 
-        /* A national-team career can retain a stale opponent pair in the
-         * season key cache after a hybrid tournament advances.  Its result
-         * is produced by the actual match teams, so keeping the stale IDs
-         * makes the same score appear alongside different opponents in the
-         * career schedule.  Bind the cache result to the real participants
-         * at the moment it is recorded.  Do not touch club careers or
-         * unplayed fixtures, and preserve the score orientation: team1 is
-         * the high goal byte, team2 the low goal byte. */
-        if (_isNationalSelector != 0) {
-            uint16_t cached1 = BE_READ_U16((uint8_t *)slot + 2);
-            uint16_t cached2 = BE_READ_U16((uint8_t *)slot + 4);
-            if (cached1 != t1num || cached2 != t2num) {
-                SWOS_DBG("[national-fixture] correcting result-team association: "
-                         "cache=%04X/%04X played=%04X/%04X\n",
-                         (unsigned)cached1, (unsigned)cached2,
-                         (unsigned)t1num, (unsigned)t2num);
-                BE_WRITE_U16((uint8_t *)slot + 2, t1num);
-                BE_WRITE_U16((uint8_t *)slot + 4, t2num);
-            }
-        }
         slot->matchFlags    = (uint8_t)flags;
         slot->packedGoals   = packedGoals;
         slot->aggregate     = aggregate;
@@ -4142,11 +4072,6 @@ void Career_AutoAdvanceLeagueFixtures(void)
 {
     uint8_t currentPhase, nextPhase;
 
-    static unsigned long divisionTraceCall = 0;
-    unsigned long traceCall = ++divisionTraceCall;
-    unsigned long traceStep = 0;
-#define DIVTRACE(...) do { FILE *df = fopen("swos_division_debug.log", "a"); if (df) { fprintf(df, "FIX call=%lu step=%lu ", traceCall, ++traceStep); fprintf(df, __VA_ARGS__); fputc('\n', df); fclose(df); } } while (0)
-    DIVTRACE("ENTER cacheIndex=%u cacheCount=%u flags=%u/%u/%u/%u", (unsigned)_teamSelectionKeyCacheIndex, (unsigned)_teamSelectionKeyCacheCount, (unsigned)_careerAutoAdvanceInProgress, (unsigned)_seasonUpdateInProgress, (unsigned)_internationalAutoAdvanceFlag, (unsigned)_seasonFinished);
     /* Guard checks — if any is active, skip with phases = 0xFF */
     if (_careerAutoAdvanceInProgress != 0 || _seasonUpdateInProgress != 0 ||
         _internationalAutoAdvanceFlag != 0 || _seasonFinished != 0) {
@@ -4156,10 +4081,6 @@ void Career_AutoAdvanceLeagueFixtures(void)
         /* Get phase bytes (sortKey) from TeamSelectionKeyCache */
         TeamSelectionKeyCacheEntry *cacheEntry =
             (TeamSelectionKeyCacheEntry *)TeamSelectionKeyCache_GetCurrentListPtr();
-        if (!cacheEntry || _teamSelectionKeyCacheIndex >= _teamSelectionKeyCacheCount) {
-            DIVTRACE("INVALID CACHE pointer=%p index=%u count=%u; skip simulation", (void *)cacheEntry, (unsigned)_teamSelectionKeyCacheIndex, (unsigned)_teamSelectionKeyCacheCount);
-            currentPhase = nextPhase = 0xFF;
-        } else {
         currentPhase = cacheEntry->sortKey;
         uint16_t nextIdx = _teamSelectionKeyCacheIndex + 1;
         if (nextIdx == _teamSelectionKeyCacheCount) {
@@ -4169,16 +4090,13 @@ void Career_AutoAdvanceLeagueFixtures(void)
                 (TeamSelectionKeyCacheEntry *)((uint8_t *)cacheEntry + cacheEntry->entryStride);
             nextPhase = next->sortKey;
         }
-        }
     }
 
     DIYCompetition *base = &_diyCompetitionStart.base;
     uint8_t *lastMatchSlots = _careerLastMatchIndexByCompetitionSlot;
     uint8_t slotIdx = base->field_2E;
     uint8_t *lastMatchPtr = lastMatchSlots + (uint16_t)slotIdx;
-    if (slotIdx >= 162) { DIVTRACE("INVALID COMPETITION SLOT %u; abort", (unsigned)slotIdx); return; }
     uint8_t lastMatch = *lastMatchPtr;
-    DIVTRACE("PHASE current=%u next=%u slot=%u last=%u view=%u leagueCurrent=%u progress=%u", (unsigned)currentPhase, (unsigned)nextPhase, (unsigned)slotIdx, (unsigned)lastMatch, (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot, (unsigned)_diyCompetitionStart.leagueMatchProgress);
 
 #ifdef SWOS_DEBUG_AUTOSKIP
     {
@@ -4204,9 +4122,7 @@ void Career_AutoAdvanceLeagueFixtures(void)
 
     /* Inline DIY_AdvanceLeagueFixtureIndex: advance fixture and set d6 */
     uint8_t viewRP = base->viewRandomPhase;
-    DIVTRACE("BEFORE first advance viewRP=%u", (unsigned)viewRP);
     DIY_AdvanceFixtureIndex(0, (uint16_t)viewRP);
-    DIVTRACE("AFTER first advance view=%u slot=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot);
     /* d6 tracking not needed — sim path (selector=0) ignores allowSquadChanges */
 
     /* Main simulation loop */
@@ -4215,9 +4131,7 @@ main_loop:
         goto check_next_phase;
 
     /* Sim league fixtures until phase catches up */
-    DIVTRACE("BEFORE SIM view=%u slot=%u progress=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot, (unsigned)_diyCompetitionStart.leagueMatchProgress);
     DIY_PlayOrSimulateLeagueFixture(0, 0); /* allowSquadChanges=0, selector=0 (sim) */
-    DIVTRACE("AFTER SIM view=%u slot=%u progress=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot, (unsigned)_diyCompetitionStart.leagueMatchProgress);
 
     if (((DIYCompetitionEx *)base)->leagueCurrentSlot == 0)
         goto main_loop; /* more matches pending in current fixture set */
@@ -4225,9 +4139,7 @@ main_loop:
     if (((DIYCompetitionEx *)base)->minSubstitutes != 0) {
         /* Advance fixture index and continue */
         viewRP = base->viewRandomPhase;
-        DIVTRACE("BEFORE loop advance viewRP=%u", (unsigned)viewRP);
         DIY_AdvanceFixtureIndex((uint16_t)(viewRP + 1), (uint16_t)viewRP);
-        DIVTRACE("AFTER loop advance view=%u slot=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot);
         goto main_loop;
     }
 
@@ -4239,7 +4151,6 @@ main_loop:
     return; /* groups type 1/3 — return silently */
 
 check_next_phase:
-    DIVTRACE("CHECK NEXT PHASE next=%u view=%u", (unsigned)nextPhase, (unsigned)base->viewRandomPhase);
     if (nextPhase > base->viewRandomPhase)
         goto catch_up_phase;
 
@@ -4272,9 +4183,7 @@ show_menu_check:
      * select-entry-42 isn't overridden by the menuState fallback in
      * UpdateMenuEntryVisibilityAndFocus, which would otherwise drop the
      * controlMask=0xFFFF auto-skip the season transition relies on. */
-    DIVTRACE("BEFORE show menu");
     ShowDiyLeaguesTournamentMenu(1, 1, 0);
-    DIVTRACE("AFTER show menu");
     return;
 
 catch_up_phase:
@@ -4289,9 +4198,7 @@ catch_up_phase:
     if (lastMatch == base->viewRandomPhase) {
         /* Catch-up loop: sim until leagueCurrentSlot != 0 */
         do {
-            DIVTRACE("BEFORE catch-up SIM view=%u slot=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot);
             DIY_PlayOrSimulateLeagueFixture(0, 0);
-            DIVTRACE("AFTER catch-up SIM view=%u slot=%u", (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot);
         } while (((DIYCompetitionEx *)base)->leagueCurrentSlot == 0);
         goto show_menu_check;
     }
@@ -4304,9 +4211,6 @@ catch_up_phase:
         ShowDiyLeaguesTournamentMenu(1, 0, 0);
     }
 }
-
-
-#undef DIVTRACE
 
 /* Career_AutoAdvanceCupMatches (SWOS2.s line 31708)
  *
@@ -4611,6 +4515,8 @@ void Career_SetCurrentCompetitionSlot(uint8_t *comp, uint16_t slot, uint16_t div
             if (compType == 0 || compType == 2)
                 goto validated;
         }
+        if (compType == 2 && slot == 2 && (uint8_t)compHdr->compId == COMPID_stateContest)
+            goto validated;                     /* (a world's state championship: states.c) */
         /* Default: compType must be 1 */
         if (compType != 1)
             goto panic_mismatch;

@@ -108,12 +108,19 @@ extern volatile uint16_t _keyCount;
  * scancode for P, which is 0x19.)
  *
  * Deliberately NOT mapped: A and B (play), the D-pad and sticks (direction), the
- * shoulder buttons (below), and GUIDE — which is HOME on a Switch and belongs to the system. */
-static const struct { int button; uint8_t akey; const char *what; } k_padKeys[] = {
-    { SDL_CONTROLLER_BUTTON_START,         0x19, "P   pause"                    },
-    { SDL_CONTROLLER_BUTTON_BACK,          0x21, "S   statistics"               },
-    { SDL_CONTROLLER_BUTTON_Y,             0x13, "R   instant replay"           },
-    { SDL_CONTROLLER_BUTTON_X,             0x25, "H   replay after the match"   },
+ * shoulder buttons (below), and GUIDE — which is HOME on a Switch and belongs to the system.
+ *
+ * `hold` is the key a button sends once it has been held PAD_HOLD_MS. ESC is a hold
+ * because it ends the match: a handheld (Retroid) has no keyboard and no reachable
+ * ESC, so leaving training needs a pad button, and a hold is one nobody presses by
+ * accident. A button with a hold sends its `tap` key on RELEASE, and only when the
+ * hold did not fire -- so Start pauses as it did, one tap's length later. */
+#define PAD_HOLD_MS 700
+static const struct { int button; uint8_t tap, hold; const char *what; } k_padKeys[] = {
+    { SDL_CONTROLLER_BUTTON_START,      0x19, 0x45, "P   pause; hold: ESC quit the match" },
+    { SDL_CONTROLLER_BUTTON_BACK,       0x21, 0,    "S   statistics"                   },
+    { SDL_CONTROLLER_BUTTON_Y,          0x13, 0,    "R   instant replay"               },
+    { SDL_CONTROLLER_BUTTON_X,          0x25, 0,    "H   replay after the match"       },
     /* The shoulder buttons do NOTHING until there is a CONTROLS menu to assign them
      * in (ReportBot 0030, the owner's decision). They used to send UP and DOWN -- the
      * keys that call the two substitutes' benches -- but those are the cursor keys
@@ -121,8 +128,9 @@ static const struct { int button; uint8_t akey; const char *what; } k_padKeys[] 
      * mid-match. The bench is still the game's own way: three taps left or right
      * with the ball out of play, or the second fire button in the PC style. */
     /* Quit is on a stick CLICK on purpose: it ends the match, and a click is
-     * not something you hit by accident mid-game the way a face button is. */
-    { SDL_CONTROLLER_BUTTON_RIGHTSTICK,    0x45, "ESC quit the match"           },
+     * not something you hit by accident mid-game the way a face button is --
+     * except a handheld's grip can, so it is a hold too, with no tap. */
+    { SDL_CONTROLLER_BUTTON_RIGHTSTICK, 0,    0x45, "hold: ESC quit the match"         },
 };
 
 static int sdl_to_amiga(SDL_Keycode k)
@@ -149,6 +157,7 @@ static int sdl_to_amiga(SDL_Keycode k)
 
     switch (k) {
     case SDLK_ESCAPE:       return AKEY_ESC;
+    case SDLK_AC_BACK:      return AKEY_ESC;    /* (Android's back button: ESC) */
     case SDLK_RETURN:       return AKEY_ENTER;
     case SDLK_KP_ENTER:     return AKEY_ENTER;
     case SDLK_SPACE:        return AKEY_SPACE;
@@ -463,6 +472,69 @@ EMSCRIPTEN_KEEPALIVE void InputSDL_TouchKey(int32_t akey)
         push_amiga_key((uint8_t)akey);
 }
 
+/* RAW TEXT (InputText's, for a password): the characters themselves, as typed -- small
+ * letters, symbols -- from SDL's text input, where the game's keys only give capitals and
+ * digits. A queue the editor empties each frame. */
+static uint8_t s_rawq[64];
+static int     s_rawHead, s_rawTail, s_rawOn;
+
+void InputSDL_RawText(int on)
+{
+    s_rawHead = s_rawTail = 0;
+    s_rawOn = on;
+#ifndef SWOS_WASM_BUILD
+    if (on)
+        SDL_StartTextInput();
+#endif
+}
+
+static void raw_push(int ch)
+{
+    if (ch < 0x20 || ch > 0x7E || ((s_rawTail + 1) & 63) == s_rawHead)
+        return;
+    s_rawq[s_rawTail] = (uint8_t)ch;
+    s_rawTail = (s_rawTail + 1) & 63;
+}
+
+int InputSDL_RawChar(void)
+{
+    int ch;
+    if (s_rawHead == s_rawTail)
+        return -1;
+    ch = s_rawq[s_rawHead];
+    s_rawHead = (s_rawHead + 1) & 63;
+    return ch;
+}
+
+/* A character the page's hidden text field got from a phone's on-screen keyboard
+ * (wasm/shell.html), while the game asks for text (InputText): the key that types it
+ * into the FIFO, as a key press does. `ch`: a printable ASCII character, or 8 BACKSPACE,
+ * 13 ENTER, 27 ESC. A character no key types is dropped. */
+EMSCRIPTEN_KEEPALIVE void InputSDL_WebChar(int32_t ch)
+{
+    int a;
+    if (s_rawOn && ch >= 0x20 && ch <= 0x7E) {     /* a password: the character itself */
+        raw_push(ch);
+        return;
+    }
+    if (ch == 8)
+        a = sdl_to_amiga(SDLK_BACKSPACE);
+    else if (ch == 13)
+        a = sdl_to_amiga(SDLK_RETURN);
+    else if (ch == 27)
+        a = sdl_to_amiga(SDLK_ESCAPE);
+    else if (ch >= 'A' && ch <= 'Z')
+        a = sdl_to_amiga((SDL_Keycode)(ch - 'A' + 'a'));    /* (the field is capitals anyway) */
+    else if (ch > ' ' && ch < 0x7F)
+        a = sdl_to_amiga((SDL_Keycode)ch);
+    else if (ch == ' ')
+        a = sdl_to_amiga(SDLK_SPACE);
+    else
+        a = -1;
+    if (a >= 0)
+        push_amiga_key((uint8_t)a);
+}
+
 static void touch_controls(int *_up, int *_down, int *left, int *right, int *_fire)
 {
     if (s_touch_dirs & 1) *_up    = 1;
@@ -470,6 +542,36 @@ static void touch_controls(int *_up, int *_down, int *left, int *right, int *_fi
     if (s_touch_dirs & 4) *left   = 1;
     if (s_touch_dirs & 8) *right  = 1;
     if (s_touch_fire)     *_fire  = 1;
+}
+
+/* The one k_padKeys button being held for its `hold` key (-1: none): the entry,
+ * the pad, when it went down, and whether the hold has already been sent. */
+static struct { int entry; SDL_JoystickID which; uint32_t since; int sent; } s_pad_hold = { -1, 0, 0, 0 };
+
+static void pad_hold_poll(uint32_t now)
+{
+    if (s_pad_hold.entry >= 0 && !s_pad_hold.sent && now - s_pad_hold.since >= PAD_HOLD_MS) {
+        push_amiga_key(k_padKeys[s_pad_hold.entry].hold);
+        s_pad_hold.sent = 1;
+    }
+}
+
+static void pad_key_button(int entry, SDL_JoystickID which, int down, uint32_t now)
+{
+    if (!k_padKeys[entry].hold) {
+        if (down)
+            push_amiga_key(k_padKeys[entry].tap);
+    } else if (down) {
+        s_pad_hold.entry = entry;
+        s_pad_hold.which = which;
+        s_pad_hold.since = now;
+        s_pad_hold.sent = 0;
+    } else if (s_pad_hold.entry == entry && s_pad_hold.which == which) {
+        pad_hold_poll(now);
+        if (!s_pad_hold.sent && k_padKeys[entry].tap)
+            push_amiga_key(k_padKeys[entry].tap);
+        s_pad_hold.entry = -1;
+    }
 }
 
 /* Open a device and give it a player if one is free. Returns the player (0 or 1),
@@ -644,6 +746,13 @@ void InputSDL_Shutdown(void)
 void InputSDL_HandleEvent(const SDL_Event *e)
 {
     switch (e->type) {
+    case SDL_TEXTINPUT:
+        if (s_rawOn) {
+            const char *t;
+            for (t = e->text.text; *t; t++)
+                raw_push((uint8_t)*t);
+        }
+        break;
     case SDL_KEYDOWN: {
         /* The CONTROLS menu is waiting for a key: this is it. */
         if (s_capture) {
@@ -706,7 +815,7 @@ void InputSDL_HandleEvent(const SDL_Event *e)
         extern int32_t NetplayMatch_Enabled(void);
         extern void    NetplayMatch_RequestLeave(void);
         int in_match = NetplayMatch_Enabled();
-        if (in_match && e->key.keysym.sym == SDLK_ESCAPE && e->key.repeat == 0)
+        if (in_match && (e->key.keysym.sym == SDLK_ESCAPE || e->key.keysym.sym == SDLK_AC_BACK) && e->key.repeat == 0)
             NetplayMatch_RequestLeave();
         if (is_alt || in_match) {
             /* Don't record keyState, don't push to keyBuffer, don't
@@ -835,7 +944,17 @@ void InputSDL_HandleEvent(const SDL_Event *e)
         size_t i;
         for (i = 0; i < sizeof k_padKeys / sizeof k_padKeys[0]; i++) {
             if (e->cbutton.button == k_padKeys[i].button) {
-                push_amiga_key(k_padKeys[i].akey);
+                pad_key_button((int)i, e->cbutton.which, 1, SDL_GetTicks());
+                break;
+            }
+        }
+        break;
+    }
+    case SDL_CONTROLLERBUTTONUP: {
+        size_t i;
+        for (i = 0; i < sizeof k_padKeys / sizeof k_padKeys[0]; i++) {
+            if (e->cbutton.button == k_padKeys[i].button) {
+                pad_key_button((int)i, e->cbutton.which, 0, SDL_GetTicks());
                 break;
             }
         }
@@ -1101,6 +1220,7 @@ void InputSDL_ClearKeyState(void)
     s_kbd_skip = 0;
     s_touch_dirs = s_touch_fire = 0;
     _pauseSkipRequested = 0;
+    s_pad_hold.entry = -1;                  /* its release must not pause what comes next */
     /* joy0Dat / joy1Dat / ciaa_pra are recomputed each frame by
      * InputSDL_PostFrame from the cleared s_kbd_* + read_pad_state, so
      * they don't need explicit clearing here. */
@@ -1280,6 +1400,37 @@ int InputSDL_SelfTest(void)
     selftest_key(SDL_SCANCODE_W, SDLK_w, 0);
     _gTextInputActive = 0;
 
+    /* Pad keys, on a made-up clock: Start taps pause on release, a hold sends ESC
+     * once and no pause, R3 sends nothing but its hold. */
+#define PAD(btn, down, now) do { size_t k_; for (k_ = 0; k_ < sizeof k_padKeys / sizeof k_padKeys[0]; k_++) \
+        if (k_padKeys[k_].button == (btn)) pad_key_button((int)k_, 0, (down), (now)); } while (0)
+    InputSDL_ClearKeyState();
+    PAD(SDL_CONTROLLER_BUTTON_START, 1, 1000);
+    EXPECT(_keyCount == 0, "Start: nothing while it is down");
+    PAD(SDL_CONTROLLER_BUTTON_START, 0, 1150);
+    EXPECT(_keyCount == 1 && _keyBuffer[0] == 0x19, "Start tapped: P on release");
+    InputSDL_ClearKeyState();
+    PAD(SDL_CONTROLLER_BUTTON_START, 1, 2000);
+    pad_hold_poll(2000 + PAD_HOLD_MS - 1);
+    EXPECT(_keyCount == 0, "Start: no ESC before the hold time");
+    pad_hold_poll(2000 + PAD_HOLD_MS);
+    pad_hold_poll(2000 + PAD_HOLD_MS + 500);
+    EXPECT(_keyCount == 1 && _keyBuffer[0] == 0x45, "Start held: ESC, once");
+    PAD(SDL_CONTROLLER_BUTTON_START, 0, 4000);
+    EXPECT(_keyCount == 1, "Start held: no P on release");
+    InputSDL_ClearKeyState();
+    PAD(SDL_CONTROLLER_BUTTON_RIGHTSTICK, 1, 5000);
+    PAD(SDL_CONTROLLER_BUTTON_RIGHTSTICK, 0, 5100);
+    EXPECT(_keyCount == 0, "R3 tapped: nothing");
+    PAD(SDL_CONTROLLER_BUTTON_RIGHTSTICK, 1, 6000);
+    PAD(SDL_CONTROLLER_BUTTON_RIGHTSTICK, 0, 6000 + PAD_HOLD_MS);
+    EXPECT(_keyCount == 1 && _keyBuffer[0] == 0x45, "R3 held: ESC, even when the release is the first look");
+    InputSDL_ClearKeyState();
+    PAD(SDL_CONTROLLER_BUTTON_Y, 1, 7000);
+    EXPECT(_keyCount == 1 && _keyBuffer[0] == 0x13, "Y: R on the press, as before");
+    InputSDL_ClearKeyState();
+#undef PAD
+
     for (i = 0; i < BIND_COUNT; i++)
         InputSDL_SetKeyBinding(i, "");
     InputSDL_ClearKeyState();
@@ -1294,6 +1445,10 @@ void InputSDL_PostFrame(void)
      * loop iteration. Recomputing them from the real keyboard/pads here
      * would overwrite the recorded stick with whatever is physically held. */
     { extern int ReplayTest_Running(void); if (ReplayTest_Running()) return; }
+
+    /* A held Start/R3 sends its key here, on the same terms as a press always has:
+     * k_padKeys pushes from HandleEvent, which a netplay match does not stop. */
+    pad_hold_poll(SDL_GetTicks());
 
     /* A netplay match owns them for the same reason, and more sharply: they
      * carry the SYNCED inputs of both players, so recomputing them from this

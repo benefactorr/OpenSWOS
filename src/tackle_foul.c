@@ -3,10 +3,17 @@
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
+#include "tweaks.h"   /* [tweaks] cpu_cards */
 #include "tackle_foul.h"
 #include "test_rules.h"
 #include "dos_sound.h"
 #include "contest_log.h"    /* how long a slide leaves a player down (ContestLog_Down) */
+
+/* the mods' match events (include/mod_api.h ModEventKind): team, sprite */
+extern void ModMatch_Event(int32_t kind, int32_t team, int32_t player, int32_t arg);   /* src/mod_match.c */
+extern int32_t ModMatch_PlayerIndex(const Sprite *s);
+#define MOD_EVENT(kind, team, sprite) ModMatch_Event((kind), (team)->teamNumber, ModMatch_PlayerIndex(sprite), 0)
+
 
 extern int16_t  _gsPlayerDownTimer;   /* Amiga 50 / DOS 55 — dos_gameplay.c */
 
@@ -152,6 +159,7 @@ PlayerTackledTheBallWeak(Sprite *player, TeamGeneralInfo *team)
             int32_t distSq = (int32_t)dxp * dxp + (int32_t)dyp * dyp;
             if (distSq > 32) {
                 player->tackleState = (int16_t)TS_GOOD_TACKLE;
+                MOD_EVENT(15 /* MODEVENT_TACKLE */, team, player);
             }
         }
     }
@@ -201,6 +209,11 @@ PlayerTackled(Sprite *player, TeamGeneralInfo *team)
     int16_t severity;
     int16_t i;
 
+    {   /* a mod's match that injures nobody (mod_match.c): no roll taken */
+        extern int32_t ModMatch_NoInjuries(void);
+        if (ModMatch_NoInjuries())
+            goto set_tackled;
+    }
     /* Training game: 25% chance of any injury processing */
     if (_trainingGame != 0) {
         roll = Rand();
@@ -259,6 +272,7 @@ PlayerTackled(Sprite *player, TeamGeneralInfo *team)
 
 apply_injury:
     pi->isInjured = 1;
+    MOD_EVENT(8 /* MODEVENT_INJURY */, team, player);
     DOS_SOUND(DOS_EV_INJURY, team->playerNumber != 0);
 
     /* Only upgrade injury severity, never downgrade */
@@ -300,7 +314,11 @@ TryBookingThePlayer(Sprite *player, TeamGeneralInfo *team)
     if (TestRules_NoInjuriesCards())
         return 1;  /* the testers' rule (test_rules.h): never book — eligibility=no */
 
-    if (_plgD3Param != 0) {
+    /* (The original books only a team with a human controller; [tweaks] cpu_cards books the
+     * computer's too: include/tweaks.h.) */
+    if (Tweaks_On(TWEAK_CPU_CARDS)) {
+        /* every side by the same rolls */
+    } else if (_plgD3Param != 0) {
         /* Highlight mode */
         if (team->playerNumber == 0 &&
             team->playerCoachNumber == 0) {
@@ -309,8 +327,11 @@ TryBookingThePlayer(Sprite *player, TeamGeneralInfo *team)
                 return 1; /* not eligible */
         }
     } else {
-        /* Normal matches: bookings apply to human and AI teams equally.
-         * Keep the existing disciplinary limits and card rules below. */
+        /* Normal mode -- need at least one human controller */
+        if (team->playerNumber == 0 &&
+            team->playerCoachNumber == 0) {
+            return 1; /* not eligible */
+        }
     }
 
     /* If player already has a card, check injury quota for second yellow / red */
@@ -364,6 +385,7 @@ TryBookingThePlayer(Sprite *player, TeamGeneralInfo *team)
             _team1NumAllowedInjuries--;
         else
             _team2NumAllowedInjuries--;
+        MOD_EVENT(6 /* MODEVENT_SECOND_YELLOW */, team, player);
         return 0;
     }
 
@@ -371,6 +393,7 @@ TryBookingThePlayer(Sprite *player, TeamGeneralInfo *team)
     _whichCard = CARD_YELLOW;
     stats = team->teamStatsPtr;
     stats->bookings++;
+    MOD_EVENT(5 /* MODEVENT_YELLOW_CARD */, team, player);
     return 0;
 }
 
@@ -390,8 +413,10 @@ TrySendingOffThePlayer(Sprite *player, TeamGeneralInfo *team)
     if (TestRules_NoInjuriesCards())
         return 1;  /* the testers' rule (test_rules.h): never send off — eligibility=no */
 
-    /* Allow straight red cards for AI-controlled teams as well.
-     * The existing card and injury-quota safeguards remain active. */
+    /* Need at least one human controller (not with [tweaks] cpu_cards: include/tweaks.h) */
+    if (team->playerNumber == 0 &&
+        team->playerCoachNumber == 0 && !Tweaks_On(TWEAK_CPU_CARDS))
+        return 1;
 
     /* Check injury quota */
     if (team->teamNumber == 1) {
@@ -442,6 +467,7 @@ TrySendingOffThePlayer(Sprite *player, TeamGeneralInfo *team)
     else
         _team2NumAllowedInjuries--;
 
+    MOD_EVENT(7 /* MODEVENT_RED_CARD */, team, player);
     return 0;
 }
 
@@ -534,10 +560,9 @@ PlayerTacklingTestFoul(Sprite *player, TeamGeneralInfo *team)
         /* Check direction difference: within +/-1 means from the side = no foul */
         dirDiff = player->direction - victim->direction;
         if (dirDiff < -1 || dirDiff > 1) {
-            /* Small, symmetric increase in foul calls for borderline contact.
-             * Previously all these directional cases were waved on; now
-             * 1/16 are given as fouls. Clean tackles are still exempt. */
-            if ((Rand() & 0xFF) >= 16)
+            /* The more_fouls tweak (include/tweaks.h; benefactorr's Career+): one of these
+             * borderline tackles in 16 is a foul. Its roll is taken only with the tweak on. */
+            if (!Tweaks_On(TWEAK_MORE_FOULS) || (Rand() & 0xFF) >= 16)
                 return;
         }
     }
@@ -545,10 +570,16 @@ PlayerTacklingTestFoul(Sprite *player, TeamGeneralInfo *team)
     /* It's a foul! Increment fouls counter */
     stats = team->teamStatsPtr;
     stats->foulsConceded++;
+    MOD_EVENT(4 /* MODEVENT_FOUL */, team, player);
 
     /* Check if cards are allowed */
     if (_cardsDisallowed != 0 || _trainingGame != 0)
         goto foul_no_card;
+    {   /* a mod's match where every carded foul is a red (mod_match.c, G9) */
+        extern int32_t ModMatch_StraightReds(void);
+        if (ModMatch_StraightReds())
+            goto try_red;
+    }
 
     /* Discipline zone check: victim inside main playing area? */
     {
@@ -746,6 +777,7 @@ PlayerTackledTheBallStrong(Sprite *player, TeamGeneralInfo *team)
             if (distSq > 32) {
                 DOS_SOUND(DOS_EV_GOOD_TACKLE, 0);
                 player->tackleState = (int16_t)TS_GOOD_TACKLE;
+                MOD_EVENT(15 /* MODEVENT_TACKLE */, team, player);
             }
         }
     }
@@ -879,6 +911,11 @@ apply_break:
 void __attribute__((used, externally_visible))
 PlayerBeginTackling(int16_t pressedDir, Sprite *player, TeamGeneralInfo *team)
 {
+    {   /* a mod's match with no tackles (mod_match.c, G9) */
+        extern int32_t ModMatch_NoTackles(void);
+        if (ModMatch_NoTackles())
+            return;
+    }
     player->tackleState = 0;
     team->controlledPlDirection = pressedDir;
     player->direction = pressedDir;

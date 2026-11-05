@@ -682,8 +682,17 @@ simulation depends on before a session starts, because a disagreement is a desyn
 first frame rather than an error:
 
 - the protocol version,
-- the build itself: the commit, with a mark for uncommitted changes (`P2P_FAIL_VERSION`,
-  "THE OTHER PLAYER HAS ANOTHER VERSION", since 2026-09-27),
+- a COMPATIBLE build: the same `NETPLAY_COMPAT` (`include/netplay_compat.h`,
+  `P2P_FAIL_VERSION`, "THE OTHER PLAYER HAS ANOTHER VERSION"). From 2026-09-27 to
+  2026-10-25 it had to be the same commit, which turned away most players who had not
+  updated that day. The number is raised by whoever changes how a match plays, and
+  `scripts/check_netplay_compat.sh` fails when the test recordings' SIM hashes change
+  and it was not (record: `tests/netplay_compat.txt`). A build with uncommitted changes
+  (a flag in the setup) plays only its own commit. Two different commits that DO agree
+  are logged (`[p2p] the other player runs build ...: both netplay N`), so a desync
+  between them is a missed raise. The matchmaking server lists a game only to players
+  with the same number (`VERSION:OPENSWOS/<n>`, `PlayKey` in `Connections.cpp`), so
+  nobody is shown a game the handshake would refuse,
 - `SimState_LayoutHash` — the shape of the state a rollback saves, so two builds whose
   match state differs refuse each other,
 - the rules: arcade mode and the original fire-hold lockout, which must match,
@@ -752,6 +761,19 @@ round trip it measured (`propose_delay`), they exchange proposals, and both take
 **maximum** — the same two numbers on both sides, so the same answer — fixed for the
 match. `P2PLink_AgreedDelay()`.
 
+**The proposal is Playa's table** (2026-10-30), from the measured ping, never 0, capped:
+
+| Delay | DOS gameplay (70 fps) | Amiga gameplay (50 fps) |
+|---|---|---|
+| 1 | up to 35 ms | up to 50 ms |
+| 2 | 36–70 ms | 51–99 ms |
+| 3 | 71–140 ms | 100–175 ms |
+| 4 | 141–210 ms | over 175 ms (the cap) |
+| 5 | over 210 ms (the cap) | — |
+
+It replaced SWOS 2020's AUTO formula (33 ms off the ping, 0 on a clean link,
+ceil(rtt / 3 frames), capped at 3 / 4); jitter no longer counts.
+
 This is deliberate, and it is the bug that makes one player feel they are **chasing** the
 other. SWOS 2020 derives a delay on each machine from that machine's own ping, jitter and
 `1000/getMPFps()`, and applies it to its own player only; two machines do not measure the
@@ -816,8 +838,9 @@ the host and the top team.
 | CUP | host | how a draw is settled, SWOS 2020's row: **OFF** (a friendly: a draw stands), **1 LEG** or **2 LEGS**, then **ET + PEN** or **PEN ONLY**. Details below |
 | GAME LENGTH, PITCH TYPE, SUBSTITUTES | host | the friendly menu's own cycles; the joiner sees them change |
 | START | host | lit when both are ready on the current rules |
-| FRAME DELAY | — | the delay the link agreed; shown, not chosen |
-| SHORT PRESSES, CATCH UP, KICK-OFF SYNC, BALANCE, CARDS/INJURIES | host | the host's switches, ON/OFF, on the left; below |
+| FRAME DELAY | each player | **never below AUTO** -- the delay the link agreed from the ping (Playa's table, `propose_delay`) -- but **-** and **+** add a player's own extra frames (up to 4), against a stutter. Both play the same delay: AUTO plus the larger of the two extras, put in the START by the host (`NetplayLobby_SetExtraDelay`). Shown `AUTO (n)`, or `n+x` with frames added; a change takes both GOs down |
+| CHAT / SWITCHES | everyone | the left half under the players: **the chat** (below), or, after SWITCHES (where SWOS 2020 has LIVE CAST URL), **the host's switches**; the button then says CHAT and brings the chat back |
+| SHORT PRESSES, KICK-OFF SYNC, CARDS/INJURIES | host | the host's switches, ON/OFF, behind SWITCHES; below |
 
 **The host's switches** (`NETPLAY_SW_*`, `include/netplay_match.h`). Report 0042 said online
 play changed after 7d9d6d9; each netplay change since then that can be turned off is a
@@ -829,16 +852,29 @@ take them back after (`NetplayLobby_RestoreTactics`). ON is how this build plays
 | Switch | Default | OFF means |
 |---|---|---|
 | SHORT PRESSES | the host's own `[input] latch_presses` | a fire tap shorter than a frame is lost, as before 6976feaf (`input_sdl.c`, the press latch) |
-| CATCH UP | ON | after a stall the backlog is dropped, as before fd911618 (`Platform_SetCatchUpFrames`) |
 | KICK-OFF SYNC | ON | GGPO-X predicts the whole window from frame 0, as before 4e7553f3 (`ggpo_set_kickoff_prediction`) |
-| BALANCE | the host's own `[netplay] balance` | GGPO-X's prediction balance off (docs/NETPLAY_BALANCE.md); ON turns it on for BOTH |
 | CARDS/INJURIES | ON | nobody booked or injured: the old tester builds' online game (`TestRules_Force`); the recording's rules say 0xD8 and `--srp-resim` replays it by that rule. Hidden in a `--release` build, which has the rule compiled out: as host it always plays with cards, and as joiner it will not ready up for a host with them off ("HOST PLAYS WITHOUT CARDS: NOT IN YOUR BUILD") |
+
+CATCH UP (a stall's backlog played back to back, fd911618) and BALANCE (GGPO-X's prediction
+balance, docs/NETPLAY_BALANCE.md) were switches too until 2026-10-30, when they were removed:
+Playa's tests found them causing netplay problems. Their bits (0x02, 0x08) are never set, and
+an older host's are dropped (`clamp_rules`); `NETPLAY_COMPAT` 5.
 
 Not a switch: the time sync's frame advantage (29009dbd). The old builds sent garbage there
 that was nearly always 0, and 0 is what is sent now (`GGPO_SEND_FRAME_ADVANTAGE=0`).
 `[lobby]` and `[netplay] the host's switches: ...` lines in both logs (so in the match report)
 say what a match was played by. `SWOS_LOBBY_SWITCHES=<hex>` sets them in the lobby and relay
 tests: `HOST_ENV=SWOS_LOBBY_SWITCHES=0 scripts/netplay_lobby_test.sh`.
+
+**The chat** (SWOS 2020's lobby chat, 2026-10-31). Type on the bar under it (Enter says it);
+**+** and **-** scroll back and forward. Each line goes to the other player only, over the
+lobby's own link -- never through a server -- and the bot, JON HARE (BOT), adds lines of its
+own on each machine: who connected, FULL TIME and the score after each match, a cup's next leg,
+why the lobby closed. It is kept for the whole lobby, across rematches. On the wire (channel 5,
+`NETPLAY_COMPAT` 6) each message is the sender's last 8 lines with the number of the first, so
+one replaced before it arrived costs nothing, and a reconnect re-sends them without showing any
+twice. `SWOS_LOBBY_SAY=<text>` says a line as the lobby opens; `relay_test.sh` has each player
+say one and requires the other's exactly once, and every line is logged as `[chat]`.
 
 The protocol is three messages, each on a link channel of its own:
 
@@ -925,9 +961,12 @@ of every menu. **Returning from it restores the lobby menu from its template**, 
 entry visible again, so the lobby re-applies its layout (and the navigation links SWOS 2020
 wires in code) on every draw.
 
-Not ported: the location flags, ranked and tournament modes, team database choice, chat and
-the live cast — hidden. (Cup legs are there now: the CUP row, below. So is editing a tactic:
-TACTICS opens the team screen, whose EDIT TACTICS is the game's own editor.)
+Not ported: the location flags, team database choice and the live cast — hidden. (Cup legs
+are there now: the CUP row, below. So are the CHAT and FRAME DELAY, and editing a tactic:
+TACTICS opens the team screen, whose EDIT TACTICS is the game's own editor.) Ranked and league
+/ cup matches are a service's (`include/online_account.h`): OpenSWOS has none, so its rules'
+`mode` is always FRIENDLY; a fork with accounts asks at OPEN and follows the lobby through the
+hooks there. `SWOS_LOBBY_MODE=friendly|ranked|league` sets the host's for a test.
 
 **Both peers kick off from the host's state.** The init (`InitAndPlayGame`) does not write
 everything a match reads: the game state, the stoppage timers, where the ball and players
@@ -940,6 +979,20 @@ load it, then apply the setup, then run the init (`NetplayLobby_ApplyMatch`). Ea
 its own LOCAL fields (`SimState_RestoreLocal`): the HUD is placed for its own display.
 Checked with `SWOS_LIVE_DESYNC_FRAME=150` on the joiner for three matches in a row: every
 one now agrees up to 151; before, matches 2 and 3 parted at frame 0.
+
+**The crowd** is match state, and it comes from each player's own pitch artwork. The crowd
+animation (`animated_patterns.c`) flips cells of the two fan rows between a still and a waving
+tile, and which tile a cell holds decides whether it flips -- and with it how many random numbers
+the frame draws. The SWOS 2020 pitches (`[graphics] style = 2020`) have a different crowd
+entirely, and a release of the game data can differ in a few cells: a live match went out of
+step at frame 1 (Elsheimy / Lauchlan, 2026-11-01; found with `SWOS_SRP_DIFF_KICKOFF`, which
+names the fields two recordings kicked off differently on). Since `SETUP_VERSION` 4 (NETPLAY_COMPAT
+8) the setup carries the host's crowd for all six pitch files (`Pitch_CrowdLayout`, read from its
+files without loading them: the pitch is chosen at the match's init), and once the pitch is
+loaded both games put it over their own (`Pitch_ApplyCrowdLayout`, armed with the tie rules for
+one match). On the host that changes nothing; a joiner cell whose own tile differs plays the
+host's and is drawn still, in the joiner's own artwork (`AnimatedPatterns_SetOwnCell`). Proved
+with the lobby test, a joiner and a host on `amiga`, `dos` and `2020` in every pairing.
 
 **The CUP row** is the game's own tie-break, not an imitation: the setup carries
 `_extraTimeState`, `_penaltiesState`, `_secondLeg`, `_playing2ndGame` and the first leg's
@@ -1470,6 +1523,39 @@ each player's and the recorder's -- must `--srp-resim` with every frame as recor
 whole match is `FRAMES=0 WAIT=600` (the test then complains about the match clock's five
 extra ticks at a natural end, which is older than this and not about recordings).
 
+### Watching a match live (LIVE CAST, `src/live_cast.c`)
+
+SWOS 2020's "watch live matches". The recorder already has a live match the way a player's game
+streams it -- what was DRAWN, frame by frame, with its sounds and chapters (the `.SRP` it keeps) --
+so a viewer is sent that, and plays it in the replay viewer as it arrives. Nothing is simulated:
+the viewer's build, platform and screen width need not be the players' (a recording plays the
+same anywhere), and it never touches the players or the match.
+
+- `--watch-list=<host[:port]>` prints the live matches (id, players, teams, frames so far).
+- `--watch=<host[:port]>[,<id>]` watches one -- the one recorded the longest without an id: the
+  match so far, then each batch as it arrives, about three seconds behind the players (a viewer
+  that joins late is put near the live edge, and can scrub back).
+- The protocol is in `include/record_proto.h` (`RECORD_WATCH_LIST`, `RECORD_WATCH`): a viewer's
+  first message says `SWRV`; the answer is the ordinary `RECORD_REPLAY_META` /
+  `RECORD_REPLAY_FRAMES` / `RECORD_REPLAY_SCORE` / `RECORD_END` a player sends, built from what the
+  recorder keeps (`Recorder::ServeViewer`), so a viewer joining late gets everything from frame 0.
+  The recorder rebuilds a viewer's batches from its own copy, at most ~1 MB waiting per viewer.
+- The client appends what arrives to the loaded recording (`ReplayV2_LiveAppend`), so the player
+  plays on where it would have held the last frame.
+- **For a mod's menus** (include/mod_api.h, "LIVE CAST"): `ModApi_LiveList` (the matches as
+  data, ~2 s at most), `ModApi_LiveAny` (is anything live: the last answer, asked again in the
+  background at most every 20 s, for a main-menu icon), `ModApi_LiveWatch(id)` (watch, and back to
+  the calling menu: 0 the match ended, 1 the viewer left). All on the server matchmaking uses.
+  `ModApi_SetMenuImage` changes an entry's image while its menu is up (the icon's live / idle).
+- **A player can say no:** `[netplay] live_cast = false` (default true, as SWOS 2020's LIVE CAST
+  ON) sets HELLO's `RECORD_HELLO_NO_WATCH`; the recorder never lists or sends a match either player
+  keeps from viewers. Recording it for the desync checks goes on as before.
+  `JOIN_INI='[netplay]\nlive_cast=false' RECORD=1 scripts/relay_test.sh` checks it.
+- **The server must be rebuilt and redeployed** for viewers (an older one closes a viewer's
+  connection). Checked: `RECORD=1 FRAMES=4000 scripts/relay_test.sh` with a viewer attached
+  mid-match -- the viewer played on for 40 s, and the recorder's copy was still the host's
+  `LATEST.SRP` byte for byte, every resim as recorded.
+
 ### Status
 
 Working and tested end to end against a local server:
@@ -1517,7 +1603,7 @@ name (nothing is bound, and 0 stays 0), so the web build picks a random one for 
 (`open_socket`), or two browsers behind one address would both be `:0`.
 
 **A browser can only ever play through the relay** -- it reaches nothing but the server.
-It says so at login (`VERSION:OPENSWOS-WEB`, still `OPENSWOS` to every prefix test),
+It says so at login (`VERSION:OPENSWOS-WEB/<n>`, still `OPENSWOS` to every prefix test),
 and a server with `--websocket` relays any match with a browser in it, `--relay` or not
 (`Connections.cpp`). A START the server did not relay is refused on the waiting screen:
 "THIS SERVER CANNOT RELAY A BROWSER GAME". There are no local addresses to offer

@@ -11,6 +11,12 @@
 
 /* ---- Team file loading functions ---- */
 int16_t LoadTeamFile(uint16_t extNumber);
+/* The team-file buffer and which file it holds, put aside (NULL: no memory) and put back (and
+ * freed): a look at another file that leaves a screen's teams as they were (Career_PeekTeam). */
+void *TeamFile_PutAside(void);
+void TeamFile_PutBack(void *aside);
+/* A club outside its country's league (was league == 4; teams.c). */
+int32_t Team_IsOutsideLeague(const TeamFile *t);
 void SetTeamGlobalNumbers(uint16_t numTeams, uint8_t *firstTeam);
 
 /* ---- Team identification ---- */
@@ -49,6 +55,10 @@ uint16_t GetPlayerSlotIndexByPlayerNumber(uint16_t teamNumber, uint16_t playerNu
 
 /* ---- SetBenchPlayersNumbers, Career_RemovePlayerFromSelectedTeamRoster (Chunk 95) ---- */
 void SetBenchPlayersNumbers(TeamFileEx *team);
+/* Real squad numbers (a world's squad_numbers, in a career): on; a new player of the managed club
+ * (its slot) keeps his number or takes the lowest free. */
+int32_t SquadNumbers_On(void);
+void SquadNumbers_Free(uint16_t slot);
 void Career_RemovePlayerFromSelectedTeamRoster(uint16_t index);
 void RemovePlayerFromTeam(uint16_t playerOrd);
 

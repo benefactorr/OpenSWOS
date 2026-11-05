@@ -6,6 +6,9 @@
 #include "swos_types.h"
 #include "game_types.h"   /* CompetitionSlotBuffer (Phase B raw-save size) */
 #include "file_io.h"
+#ifdef SWOS_SDL_BUILD
+#include "diy_import_dos.h"
+#endif
 #include "display.h"
 #include "menus.h"
 #include "audio.h"
@@ -286,7 +289,7 @@ int16_t LoadFileEx(uint8_t *filename, uint8_t *dest, uint32_t *outFileSize)
             /* RNC header offset 4 = unpacked size (big-endian). A
              * native uint32 load on LE would byte-swap it (e.g.
              * 0x00007AEA becomes 0xEA7A0000 ≈ 3.9 GB) and trip the
-             * > 64000 sanity check at LoadTeamFile. */
+             * size sanity check at LoadTeamFile. */
             fileSize = BE_READ_U32(frontbuf + 4);
             if (magic == RNC_MAGIC_V1)
                 RncDecompressV1(rncSrc, dest);
@@ -510,8 +513,16 @@ int16_t LoadDIYFile(uint8_t *filename)
      * deliberately does NOT run the career RebuildPointersAfterLoad (a routed
      * .DIY goes to the DIY menu, not the career contestMenu). See
      * docs/SAVE_DATA.md "Format migration / read-support policy". */
+    /* A .DIY from the PC game or SWOS 2020 (their raw DOS dump) is imported
+     * into the same state (diy_import_dos.c, SDL only: the Amiga refuses it). */
+#ifdef SWOS_SDL_BUILD
+    if (SaveJson_FileIsJson(filename) == 1
+            ? SaveJson_LoadDIY(filename, NULL, 0) != 0
+            : DiyImportDos_Load(filename) != 0) {
+#else
     if (SaveJson_FileIsJson(filename) != 1 ||
         SaveJson_LoadDIY(filename, NULL, 0) != 0) {
+#endif
         ShowErrorMenu(_aFileSavedByDif);
         RestoreOptions();
         InitUserTactics();
@@ -656,6 +667,15 @@ int16_t LoadHilFile(uint8_t *filename)
     int16_t result;
 
     if (SaveJson_FileIsJson(filename) == 1) {
+#ifdef SWOS_SDL_BUILD
+        {   /* as the other branches: our own recording's geometry and rate (the JSON sets its
+             * rate) -- not a DOS / SWOS 2020 file's, left by the one watched before */
+            extern int _replayRecordingIsWide;
+            extern int _replayPlaybackFps;
+            _replayRecordingIsWide = 0;
+            _replayPlaybackFps = 50;
+        }
+#endif
         int16_t jr = SaveJson_LoadHighlights(filename, NULL, 0);
         if (jr != 0) {
             _hilNumGoals = 0;
@@ -991,6 +1011,9 @@ int16_t SelectFileToSaveDialog(uint32_t filterExt, uint8_t *defaultFilename,
                 ext == 0x2E534541u || /* .SEA */
                 ext == 0x2E434152u || /* .CAR */
                 ext == 0x2E544143u || /* .TAC */
+#ifdef SWOS_SDL_BUILD
+                ext == 0x2E535250u || /* .SRP: a whole-match replay kept by SAVE HIGHLIGHTS */
+#endif
                 ext == 0x2E48494Cu)   /* .HIL */
             {
                 _totalNumberOfFiles++;

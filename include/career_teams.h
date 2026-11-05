@@ -18,6 +18,10 @@ void CopySelectedTeamNumbers(uint16_t count, uint8_t *dest);
 /* --- Save/Restore --- */
 void SaveSelectedTeams(void);
 void RestoreSelectedTeams(void);
+/* The records SaveSelectedTeams parked (count, records), and their count set (a loaded career's
+ * "selected_teams_parked", save_format_json.c). */
+TeamFileEx *Career_ParkedTeams(uint16_t *count);
+void Career_SetParkedTeamCount(uint16_t count);
 
 /* --- Key cache (Chunk 76) --- */
 uint8_t *TeamSelectionKeyCache_InsertSpaceSorted(uint16_t key, uint16_t insertionBytes);
@@ -26,6 +30,7 @@ uint8_t *TeamSelectionKeyCache_InsertSpaceSorted(uint16_t key, uint16_t insertio
 int16_t SearchTeamInTmdFile(uint16_t teamNo);
 void Career_RemoveTeamFromTmdTeamPool(uint16_t teamNo);
 void Career_AppendTeamToTmdTeamPool(TeamFileEx *team);
+void Career_RetireSlotCalendarEntries(uint8_t slot);   /* (before a slot takes another contest mid-season) */
 
 /* --- Career competition team selection (Chunk 90) --- */
 void Career_SortTeamFilePtrsByAvgPlayerPrice(uint16_t extNumber);

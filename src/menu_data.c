@@ -4,9 +4,11 @@
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
 #include "menu_data.h"
+#include "project_identity.h"
 
 extern void MultiplayerMenuSelected(void);
 extern void CreditsMenuSelected(void);
+extern void ModesMenuSelected(void);
 extern void SetExitMenuFlag(void);
 extern void TopGoalScorersMenu_0(void);
 extern void SetupDIYCompetitionStatsMenu(void);
@@ -15,7 +17,7 @@ extern DIYTournamentState _diyFileBufferCopy;  /* header field was the diyTourna
 
 /* ---- Stub functions (trivial wrappers removed from SWOS2.s) ---- */
 void GlobalRetn(void) { }
-void NationalTeamAddPlayerInit(void) { }
+extern void NationalTeamAddPlayerInit(void);   /* (src/menus.c: no HOME for a nation without clubs) */
 void locret_139AE2(void) { }
 void ExitPlayerMarketMenu(void) { SetExitMenuFlag(); }
 void DesignDIYTournamentOnSelect91(void) { SetExitMenuFlag(); }
@@ -28,8 +30,6 @@ extern void AbortEditTactics(void);
 extern void AbortSaveFile(void);
 extern void AbortSelected(void);
 extern void AcceptJobOffer(void);
-extern void JobOffers_TogglePage(void);
-static char s_jobPageLabel[] = "NEXT PAGE";
 extern void AcceptOffer(void);
 extern void AskForMore(void);
 extern void BuyOtherDomesticPlayer(void);
@@ -39,6 +39,10 @@ extern void BuyOtherPlayersCommon(void);
 extern void BuyOtherPlayersFinish(void);
 extern void BuyOtherPlayersInit(void);
 extern void BuyPlayerExit(void);
+extern void TransferMarketModRow(void);
+extern void NationalTeamAddPlayerModRow(void);
+extern void CompetitionStatsModRow(void);
+extern void BuyPlayerModRow(void);
 extern void BuyPlayerInit(void);
 extern void BuyPlayerMenu(void);
 extern void BuyPlayerViewSquad(void);
@@ -57,7 +61,9 @@ extern void ChangeAutoSaveHighlights(void);
 extern void ChangeGameLength(void);
 extern void ChangeMenuMusic(void);
 extern void ChangeGameplayStyle(void);
+extern void ChangeWorld(void);
 extern void ShowControlsMenu(void);
+extern void ShowModsMenu(void);
 extern void ChangePitchStyle(void);
 extern void ChangeNationality(void);
 extern void ChangePitchType(void);
@@ -79,6 +85,8 @@ extern void ClubBusinessMenu(void);
 extern void ClubTeams(void);
 extern void CoachOrPlayerCoach(void);
 extern void CompetitionInfo(void);
+extern void CompetitionStatsInit(void);
+extern void CompetitionStatsWinners(void);
 extern void CompetitionTopGoalScorersExit(void);
 extern void CompetitionTopGoalScorersInit(void);
 extern void ConsiderJobOffer(void);
@@ -207,6 +215,7 @@ extern void EditedCustomTeams(void);
 extern void ExitCareerMenu(void);
 extern void ExitChooseTacticsMenu(void);
 extern void ExitChooseTeams(void);
+extern void TeamPacksTeams(void);
 extern void ExitChooseTeams2(void);
 extern void ExitHighlights(void);
 extern void ExitImportTactics(void);
@@ -235,6 +244,7 @@ extern void _JobOffer(void);
 extern void JobOffersAfterDrawCommon(void);
 extern void JobOffersCommon(void);
 extern void JobOffersExit(void);
+extern void JobOffersNextPage(void);
 extern void JobOffersFinish(void);
 extern void JobOffersInit(void);
 extern void JobOffersMenu(void);
@@ -252,7 +262,6 @@ extern void MaxSubstitutes(void);
 extern void MinSubstitutes(void);
 extern void NationalTeamAddPlayer(void);
 extern void NationalTeamAddPlayerAbroadOnSelect(void);
-extern void NationalTeamAddPlayerSearchOnSelect(void);
 extern void NationalTeamAddPlayerExit(void);
 extern void NationalTeamAddPlayerHomeOnSelect(void);
 extern void NationalTeamRemovePlayers(void);
@@ -461,6 +470,8 @@ extern char _aEditTactics[];
 extern char _aEditedCustomTe_0[];
 extern char _aExPlayerGoals[];
 extern char _aExit[];
+extern char _aModRow[];
+extern char _aNextPage[];
 extern char _aF[];
 extern char _aFilename[];
 extern char _aFirstKit[];
@@ -498,6 +509,11 @@ extern char _aMatch[];
 extern char _aMemoFromTheClu[];
 extern char _aMenuMusic[];
 extern char _aGameplay[];
+extern char _aWorldOption[];
+extern char _aModsOption[];
+extern char _aModes[];
+extern char _aTeamPacks[];
+extern char _aModsNone[];
 extern char _aControls[];
 extern char _aRedefineKeys[];
 extern char _aPitches[];
@@ -582,6 +598,7 @@ extern char _aViewResult[];
 extern char _aViewSelectedTe[];
 extern char _aViewSquad[];
 extern char _aViewSquads[];
+extern char _aWinners[];
 extern char _aViewTeam[];
 extern char _aViewWorld[];
 extern char _aW[];
@@ -661,6 +678,7 @@ extern char* _friendlyPitchTypeTable[];
 extern char* _gameLengthStrTable[];
 extern char* _menuMusicStrTable[];
 extern char* _gameplayStyleStrTable[];
+extern char* _worldStrTable[];
 extern char* _pitchStyleStrTable[];
 extern char* _pitchTypeOrSeasonTable[];
 extern char* _pitchTypeStrTable[];
@@ -2791,7 +2809,7 @@ Menu_DIYCup _diyCupMenu = {
     MENU_MARK_END_MENU
 };
 Menu_Options _optionsMenu = {
-    { OptionsMenuBeforeDraw, 0, 0, 19 },
+    { OptionsMenuBeforeDraw, OptionsMenuBeforeDraw, 0, 19 },
     MENU_MARK_BYTE_COORDS,
     {
         { 92, 0, 120, 15 },
@@ -2906,7 +2924,7 @@ Menu_Options _optionsMenu = {
     },
     {
         { -102, 148, -116, 11 },
-        { MENU_CMD_NAV, -1, -1, 14, 19 },
+        { MENU_CMD_NAV, -1, -1, 14, 22 },
         { MENU_CMD_COLORS, 0xD },
         { MENU_CMD_TEXT_PTR, 0x0, _aRedefineKeys },
         { MENU_CMD_ONSELECT_FIRE, ShowControlsMenu },
@@ -2928,7 +2946,7 @@ Menu_Options _optionsMenu = {
     },
     { MENU_MARK_START_MENU, 0, 0 },
     { 102, -71, 100, 15 },
-    { MENU_CMD_NAV, -1, -1, 16, -1 },
+    { MENU_CMD_NAV, -1, -1, 24, -1 },
     { MENU_CMD_COLORS, 0xC },
     { MENU_CMD_TEXT_PTR, 0x0, _aExit },
     { MENU_CMD_INPUT_FUNC, 0x30, ExitOptions },
@@ -2937,6 +2955,34 @@ Menu_Options _optionsMenu = {
     { MENU_CMD_INVISIBLE },
     { MENU_CMD_TEXT_PTR, 0x0, _aSwosVersion152 },
     MENU_CMD_END,
+    {
+        { 10, 160, -116, 11 },
+        { MENU_CMD_COLORS, 0x9 },
+        { MENU_CMD_TEXT_PTR, 0x0, _aWorldOption },
+        MENU_CMD_END
+    },
+    {
+        { -102, 160, -116, 11 },
+        { MENU_CMD_NAV, -1, -1, 16, 24 },
+        { MENU_CMD_COLORS, 0xD },
+        { MENU_CMD_STRING_TABLE, 0x0, _worldStrTable },
+        { MENU_CMD_ONSELECT_FIRE, ChangeWorld },
+        MENU_CMD_END
+    },
+    {
+        { 10, 172, -116, 11 },
+        { MENU_CMD_COLORS, 0x9 },
+        { MENU_CMD_TEXT_PTR, 0x0, _aModsOption },
+        MENU_CMD_END
+    },
+    {
+        { -102, 172, -116, 11 },
+        { MENU_CMD_NAV, -1, -1, 22, 19 },
+        { MENU_CMD_COLORS, 0xD },
+        { MENU_CMD_TEXT_PTR, 0x0, _aModsNone },
+        { MENU_CMD_ONSELECT_FIRE, ShowModsMenu },
+        MENU_CMD_END
+    },
     MENU_MARK_END_MENU
 };
 Menu_DesignDiyTournament _designDiyTournamentMenu = {
@@ -4995,86 +5041,8 @@ Menu_Squad _squadMenu = {
     },
     MENU_MARK_END_MENU
 };
-extern void SWOS_RetirementNewsInit(void);
-extern void SWOS_RetirementNewsNext(void);
-extern char _retirementNewsHeading[];
-extern char _retirementNewsRows[10][64];
-extern char _retirementNewsAction[];
-
-Menu_RetirementNews _retirementNewsMenu = {
-    { SWOS_RetirementNewsInit, 0, 0, 11 },
-    MENU_MARK_BYTE_COORDS,
-    { { 42, 3, -84, 13 }, { MENU_CMD_COLORS, 0x17 },
-      { MENU_CMD_TEXT_PTR, 0, _retirementNewsHeading }, MENU_CMD_END },
-    {
-    { { 25, 22, -50, 10 }, { MENU_CMD_COLORS, 0x79 }, { MENU_CMD_TEXT_PTR, 0x8000, _retirementNewsRows[0] }, MENU_CMD_END },
-    { { 25, 33, -50, 10 }, { MENU_CMD_COLORS, 0x79 }, { MENU_CMD_TEXT_PTR, 0x8000, _retirementNewsRows[1] }, MENU_CMD_END },
-    { { 25, 44, -50, 10 }, { MENU_CMD_COLORS, 0x79 }, { MENU_CMD_TEXT_PTR, 0x8000, _retirementNewsRows[2] }, MENU_CMD_END },
-    { { 25, 55, -50, 10 }, { MENU_CMD_COLORS, 0x79 }, { MENU_CMD_TEXT_PTR, 0x8000, _retirementNewsRows[3] }, MENU_CMD_END },
-    { { 25, 66, -50, 10 }, { MENU_CMD_COLORS, 0x79 }, { MENU_CMD_TEXT_PTR, 0x8000, _retirementNewsRows[4] }, MENU_CMD_END },
-    { { 25, 77, -50, 10 }, { MENU_CMD_COLORS, 0x79 }, { MENU_CMD_TEXT_PTR, 0x8000, _retirementNewsRows[5] }, MENU_CMD_END },
-    { { 25, 88, -50, 10 }, { MENU_CMD_COLORS, 0x79 }, { MENU_CMD_TEXT_PTR, 0x8000, _retirementNewsRows[6] }, MENU_CMD_END },
-    { { 25, 99, -50, 10 }, { MENU_CMD_COLORS, 0x79 }, { MENU_CMD_TEXT_PTR, 0x8000, _retirementNewsRows[7] }, MENU_CMD_END },
-    { { 25, 110, -50, 10 }, { MENU_CMD_COLORS, 0x79 }, { MENU_CMD_TEXT_PTR, 0x8000, _retirementNewsRows[8] }, MENU_CMD_END },
-    { { 25, 121, -50, 10 }, { MENU_CMD_COLORS, 0x79 }, { MENU_CMD_TEXT_PTR, 0x8000, _retirementNewsRows[9] }, MENU_CMD_END },
-    },
-    { { 104, -33, 112, 13 }, { MENU_CMD_NAV, -1, -1, -1, -1 },
-      { MENU_CMD_COLORS, 0xC }, { MENU_CMD_TEXT_PTR, 0, _retirementNewsAction },
-      { MENU_CMD_ONSELECT_FIRE, SWOS_RetirementNewsNext }, MENU_CMD_END },
-    MENU_MARK_END_MENU
-};
-
-extern void PastWinnersOpen(void);
-extern void PastWinnersInit(void);
-extern void PastWinnersPrevious(void);
-extern void PastWinnersNext(void);
-extern char _pastWinnerHeading[];
-extern char _pastWinnerRows[10][64];
-extern char _pastWinnerPrevLabel[];
-extern char _pastWinnerNextLabel[];
-extern char _pastWinnerExitLabel[];
-extern char _pastWinnersLabel[];
-
-Menu_PastWinners _pastWinnersMenu = {
-    { PastWinnersInit, 0, 0, 11 },
-    MENU_MARK_BYTE_COORDS,
-    { { 42, 3, -84, 13 }, { MENU_CMD_COLORS, 0x17 },
-      { MENU_CMD_TEXT_PTR, 0, _pastWinnerHeading }, MENU_CMD_END },
-    {
-    { { 25, 22, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
-      { MENU_CMD_TEXT_PTR, 0x8000, _pastWinnerRows[0] }, MENU_CMD_END },
-    { { 25, 33, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
-      { MENU_CMD_TEXT_PTR, 0x8000, _pastWinnerRows[1] }, MENU_CMD_END },
-    { { 25, 44, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
-      { MENU_CMD_TEXT_PTR, 0x8000, _pastWinnerRows[2] }, MENU_CMD_END },
-    { { 25, 55, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
-      { MENU_CMD_TEXT_PTR, 0x8000, _pastWinnerRows[3] }, MENU_CMD_END },
-    { { 25, 66, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
-      { MENU_CMD_TEXT_PTR, 0x8000, _pastWinnerRows[4] }, MENU_CMD_END },
-    { { 25, 77, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
-      { MENU_CMD_TEXT_PTR, 0x8000, _pastWinnerRows[5] }, MENU_CMD_END },
-    { { 25, 88, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
-      { MENU_CMD_TEXT_PTR, 0x8000, _pastWinnerRows[6] }, MENU_CMD_END },
-    { { 25, 99, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
-      { MENU_CMD_TEXT_PTR, 0x8000, _pastWinnerRows[7] }, MENU_CMD_END },
-    { { 25, 110, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
-      { MENU_CMD_TEXT_PTR, 0x8000, _pastWinnerRows[8] }, MENU_CMD_END },
-    { { 25, 121, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
-      { MENU_CMD_TEXT_PTR, 0x8000, _pastWinnerRows[9] }, MENU_CMD_END },
-    },
-    { { 18, -33, 88, 13 }, { MENU_CMD_NAV, -1, 12, -1, 12 },
-      { MENU_CMD_COLORS, 0xE }, { MENU_CMD_TEXT_PTR, 0, _pastWinnerPrevLabel },
-      { MENU_CMD_ONSELECT_FIRE, PastWinnersPrevious }, MENU_CMD_END },
-    { { 113, -33, 88, 13 }, { MENU_CMD_NAV, 11, 13, 11, 13 },
-      { MENU_CMD_COLORS, 0xE }, { MENU_CMD_TEXT_PTR, 0, _pastWinnerNextLabel },
-      { MENU_CMD_ONSELECT_FIRE, PastWinnersNext }, MENU_CMD_END },
-    { { 208, -33, 75, 13 }, { MENU_CMD_NAV, 12, -1, 12, -1 },
-      { MENU_CMD_COLORS, 0xC }, { MENU_CMD_TEXT_PTR, 0, _pastWinnerExitLabel },
-      { MENU_CMD_ONSELECT_FIRE, SetExitMenuFlag }, MENU_CMD_END },
-    MENU_MARK_END_MENU
-};
 Menu_CompetitionStats _competitionStatsMenu = {
-    { 0, 0, 0, 1 },
+    { CompetitionStatsInit, CompetitionStatsInit, 0, 1 },
     MENU_MARK_BYTE_COORDS,
     {
         { 92, 0, 120, 15 },
@@ -5100,26 +5068,34 @@ Menu_CompetitionStats _competitionStatsMenu = {
     },
     {
         { 92, 90, 120, 15 },
-        { MENU_CMD_NAV, -1, -1, 2, 4 },
+        { MENU_CMD_NAV, -1, -1, 2, 5 },
         { MENU_CMD_COLORS, 0xE },
         { MENU_CMD_TEXT_PTR, 0x0, _aViewSquads },
         { MENU_CMD_ONSELECT_FIRE, StatsViewSquads },
         MENU_CMD_END
     },
     {
-        { 92, 115, 120, 15 },
-        { MENU_CMD_NAV, -1, -1, 3, 5 },
-        { MENU_CMD_COLORS, 0xE },
-        { MENU_CMD_TEXT_PTR, 0x0, _pastWinnersLabel },
-        { MENU_CMD_ONSELECT_FIRE, PastWinnersOpen },
-        MENU_CMD_END
-    },
-    {
         { 102, -71, 100, 15 },
-        { MENU_CMD_NAV, -1, -1, 4, -1 },
+        { MENU_CMD_NAV, -1, -1, 5, -1 },
         { MENU_CMD_COLORS, 0xC },
         { MENU_CMD_TEXT_PTR, 0x0, _aExit },
         { MENU_CMD_ONSELECT_FIRE, StatsExit },
+        MENU_CMD_END
+    },
+    {
+        { 92, 115, 120, 15 },
+        { MENU_CMD_NAV, -1, -1, 3, 4 },
+        { MENU_CMD_COLORS, 0xE },
+        { MENU_CMD_TEXT_PTR, 0x0, _aWinners },
+        { MENU_CMD_ONSELECT_FIRE, CompetitionStatsWinners },
+        MENU_CMD_END
+    },
+    {
+        { 92, -116, 120, 15 },
+        { MENU_CMD_NAV, -1, -1, 5, 4 },
+        { MENU_CMD_COLORS, 0xE },
+        { MENU_CMD_TEXT_PTR, 0x0, _aModRow },
+        { MENU_CMD_ONSELECT_FIRE, CompetitionStatsModRow },
         MENU_CMD_END
     },
     MENU_MARK_END_MENU
@@ -6600,7 +6576,7 @@ Menu_ChooseTeams _chooseTeamsMenu = {
     },
     {
         { 92, -116, 120, 25 },
-        { MENU_CMD_NAV, -1, -1, 2, 4 },
+        { MENU_CMD_NAV, -1, -1, 2, 5 },
         { MENU_CMD_COLORS, 0xE },
         { MENU_CMD_TEXT_PTR, 0x0, _aEditedCustomTe_0 },
         { MENU_CMD_ONSELECT_FIRE, EditedCustomTeams },
@@ -6608,10 +6584,18 @@ Menu_ChooseTeams _chooseTeamsMenu = {
     },
     {
         { 102, -71, 100, 15 },
-        { MENU_CMD_NAV, -1, -1, 3, -1 },
+        { MENU_CMD_NAV, -1, -1, 5, -1 },
         { MENU_CMD_COLORS, 0xC },
         { MENU_CMD_TEXT_PTR, 0x0, _aExit },
         { MENU_CMD_ONSELECT_FIRE, ExitChooseTeams },
+        MENU_CMD_END
+    },
+    {
+        { 92, -90, 120, 15 },
+        { MENU_CMD_NAV, -1, -1, 3, 4 },
+        { MENU_CMD_COLORS, 0xD },
+        { MENU_CMD_TEXT_PTR, 0x0, _aTeamPacks },
+        { MENU_CMD_ONSELECT_FIRE, TeamPacksTeams },
         MENU_CMD_END
     },
     MENU_MARK_WIDE_COORDS,
@@ -6922,7 +6906,7 @@ Menu_ContinueAbort _continueAbortMenu = {
  * so the last credits line (three lines of testers since 2026-10-21) clears it. */
 extern void CreditsAgaInit(void);
 extern void CreditsAgaDraw(void);
-char _aCreditsAgaHeader[] = "OPENSWOS - CREDITS";
+char _aCreditsAgaHeader[] = PROJECT_NAME_UPPER " - CREDITS";
 char _aCreditsAgaExit[]   = "AMIGA FOREVER!";
 Menu_CreditsAga _creditsAgaMenu = {
     { CreditsAgaInit, 0, CreditsAgaDraw, 1 },
@@ -6944,6 +6928,11 @@ Menu_CreditsAga _creditsAgaMenu = {
     MENU_MARK_END_MENU
 };
 #endif
+
+/* The main menu's address (src/menu_system.c Menu_IsMainMenu): this file alone knows its type. */
+const void *MenuData_MainMenu(void);
+Menu_SWOSMainMenu _swosMainMenu;
+const void *MenuData_MainMenu(void) { return &_swosMainMenu; }
 
 Menu_SWOSMainMenu _swosMainMenu = {
     { SWOSMainMenuInit, GlobalRetn, 0, 6 },
@@ -7069,6 +7058,14 @@ Menu_SWOSMainMenu _swosMainMenu = {
         { MENU_CMD_COLORS, 0xD },
         { MENU_CMD_TEXT_PTR, 0x0, _aCredits },
         { MENU_CMD_ONSELECT_FIRE, CreditsMenuSelected },
+        MENU_CMD_END
+    },
+    {
+        { -12, -52, 60, 14 },
+        { MENU_CMD_NAV, -1, -1, 13, 15 },
+        { MENU_CMD_COLORS, 0xD },
+        { MENU_CMD_TEXT_PTR, 0x0, _aModes },
+        { MENU_CMD_ONSELECT_FIRE, ModesMenuSelected },
         MENU_CMD_END
     },
     { MENU_MARK_START_MENU, 0, 0 },
@@ -8283,8 +8280,6 @@ Menu_ShowPlayerMarket _showPlayerMarketMenu = {
     MENU_CMD_END,
     MENU_MARK_END_MENU
 };
-extern void WorldPlayerSearch(void);
-static char _aWorldPlayerSearch[] = "WORLD PLAYER SEARCH";
 Menu_BuyPlayer _buyPlayerMenu = {
     { BuyPlayerInit, BuyPlayerInit, 0, 2 },
     MENU_MARK_BYTE_COORDS,
@@ -8332,33 +8327,31 @@ Menu_BuyPlayer _buyPlayerMenu = {
         MENU_CMD_END
     },
     {
-        { 102, -112, 100, 15 },
-        { MENU_CMD_NAV, -1, -1, 5, 8 },
+        { 102, -101, 100, 15 },
+        { MENU_CMD_NAV, -1, -1, 5, 7 },
         { MENU_CMD_COLORS, 0xE },
         { MENU_CMD_TEXT_PTR, 0x0, _aViewSquad },
         { MENU_CMD_ONSELECT_FIRE, BuyPlayerViewSquad },
         MENU_CMD_END
     },
     {
-        { 122, -59, 60, 15 },
-        { MENU_CMD_NAV, -1, -1, 8, -1 },
+        { 122, -71, 60, 15 },
+        { MENU_CMD_NAV, -1, -1, 6, -1 },
         { MENU_CMD_COLORS, 0xC },
         { MENU_CMD_TEXT_PTR, 0x0, _aExit },
         { MENU_CMD_ONSELECT_FIRE, BuyPlayerExit },
         MENU_CMD_END
     },
     {
-        { 82, -89, 140, 15 },
+        { 57, -126, -66, 15 },
         { MENU_CMD_NAV, -1, -1, 6, 7 },
         { MENU_CMD_COLORS, 0xE },
-        { MENU_CMD_TEXT_PTR, 0x0, _aWorldPlayerSearch },
-        { MENU_CMD_ONSELECT_FIRE, WorldPlayerSearch },
+        { MENU_CMD_TEXT_PTR, 0x0, _aModRow },
+        { MENU_CMD_ONSELECT_FIRE, BuyPlayerModRow },
         MENU_CMD_END
     },
     MENU_MARK_END_MENU
 };
-char _aAiTransferMarket[] = "AI TRANSFER MARKET";
-extern void SWOS_AI_RunTransfersMenu(void);
 Menu_TransferMarket _transferMarketMenu = {
     { TransferMarketInit, TransferMarketFinish, 0, 2 },
     MENU_MARK_BYTE_COORDS,
@@ -8374,7 +8367,7 @@ Menu_TransferMarket _transferMarketMenu = {
         MENU_CMD_END
     },
     {
-        { 102, 34, 100, 15 },
+        { 102, 40, 100, 15 },
         { MENU_CMD_NAV, -1, -1, -1, 3 },
         { MENU_CMD_COLORS, 0xE },
         { MENU_CMD_TEXT_PTR, 0x0, _aBuyPlayer },
@@ -8382,59 +8375,51 @@ Menu_TransferMarket _transferMarketMenu = {
         MENU_CMD_END
     },
     {
-        { 82, 55, 140, 15 },
+        { 102, 65, 100, 15 },
         { MENU_CMD_NAV, -1, -1, 2, 4 },
-        { MENU_CMD_COLORS, 0xE },
-        { MENU_CMD_TEXT_PTR, 0x0, _aAiTransferMarket },
-        { MENU_CMD_ONSELECT_FIRE, SWOS_AI_RunTransfersMenu },
-        MENU_CMD_END
-    },
-    {
-        { 102, 76, 100, 15 },
-        { MENU_CMD_NAV, -1, -1, 3, 5 },
         { MENU_CMD_COLORS, 0xE },
         { MENU_CMD_TEXT_PTR, 0x0, _aViewOffers },
         { MENU_CMD_ONSELECT_FIRE, ViewOffersMenu },
         MENU_CMD_END
     },
     {
-        { 62, 97, -76, 15 },
-        { MENU_CMD_NAV, -1, -1, 4, 10 },
+        { 62, 90, -76, 15 },
+        { MENU_CMD_NAV, -1, -1, 3, 9 },
         { MENU_CMD_COLORS, 0xE },
         { MENU_CMD_TEXT_PTR, 0x0, _aPutPlayerOnTra_0 },
         { MENU_CMD_ONSELECT_FIRE, PutPlayerOnMarketMenu },
         MENU_CMD_END
     },
     {
-        { 0, -55, 121, 15 },
-        { MENU_CMD_NAV, -1, 7, 14, -1 },
+        { 0, -71, 121, 15 },
+        { MENU_CMD_NAV, -1, 6, 13, -1 },
         { MENU_CMD_COLORS, 0xE },
         { MENU_CMD_TEXT_PTR, 0x0, _aGiveFreeTransf },
         { MENU_CMD_ONSELECT_FIRE, GiveFreeTransfer },
         MENU_CMD_END
     },
     {
-        { 122, -55, 60, 15 },
-        { MENU_CMD_NAV, 6, 8, 14, -1 },
+        { 122, -71, 60, 15 },
+        { MENU_CMD_NAV, 5, 7, 13, -1 },
         { MENU_CMD_COLORS, 0xC },
         { MENU_CMD_TEXT_PTR, 0x0, _aExit },
         { MENU_CMD_ONSELECT_FIRE, SetExitMenuFlag },
         MENU_CMD_END
     },
     {
-        { -73, -55, 121, 15 },
-        { MENU_CMD_NAV, 7, -1, 14, -1 },
+        { -73, -71, 121, 15 },
+        { MENU_CMD_NAV, 6, -1, 13, -1 },
         { MENU_CMD_COLORS, 0xE },
         { MENU_CMD_TEXT_PTR, 0x0, _aTakeOffMarket },
         { MENU_CMD_ONSELECT_FIRE, TakeOffMarketMenu },
         MENU_CMD_END
     },
     {
-        { -104, 92, 0, 8 },
+        { -104, 115, 0, 8 },
         { MENU_CMD_TEXT_PTR, 0x0, _aPlayersCurrent },
         MENU_CMD_END
     },
-    { MENU_MARK_START_MENU, 0, 116 },
+    { MENU_MARK_START_MENU, 0, 130 },
     MENU_MARK_START_TEMPLATE,
     { 0, 0, 0, 0 },
     { MENU_CMD_COLORS, 0x0 },
@@ -8445,52 +8430,27 @@ Menu_TransferMarket _transferMarketMenu = {
     {
         {
             { 0, 0, 304, 8 },
-            { MENU_CMD_NAV, -1, -1, 5, 11 },
+            { MENU_CMD_NAV, -1, -1, 4, 10 },
             MENU_CMD_END
         },
         {
             { 0, 9, 304, 8 },
-            { MENU_CMD_NAV, -1, -1, 10, 12 },
+            { MENU_CMD_NAV, -1, -1, 9, 11 },
             MENU_CMD_END
         },
         {
             { 0, 18, 304, 8 },
-            { MENU_CMD_NAV, -1, -1, 11, 13 },
+            { MENU_CMD_NAV, -1, -1, 10, 12 },
             MENU_CMD_END
         },
         {
             { 0, 27, 304, 8 },
-            { MENU_CMD_NAV, -1, -1, 12, 14 },
+            { MENU_CMD_NAV, -1, -1, 11, 13 },
             MENU_CMD_END
         },
         {
             { 0, 36, 304, 8 },
-            { MENU_CMD_NAV, -1, -1, 13, 15 },
-            MENU_CMD_END
-        },
-        {
-            { 0, 45, 304, 8 },
-            { MENU_CMD_NAV, -1, -1, 14, 16 },
-            MENU_CMD_END
-        },
-        {
-            { 0, 54, 304, 8 },
-            { MENU_CMD_NAV, -1, -1, 15, 17 },
-            MENU_CMD_END
-        },
-        {
-            { 0, 63, 304, 8 },
-            { MENU_CMD_NAV, -1, -1, 16, 18 },
-            MENU_CMD_END
-        },
-        {
-            { 0, 72, 304, 8 },
-            { MENU_CMD_NAV, -1, -1, 17, 19 },
-            MENU_CMD_END
-        },
-        {
-            { 0, 81, 304, 8 },
-            { MENU_CMD_NAV, -1, -1, 18, 7 },
+            { MENU_CMD_NAV, -1, -1, 12, 6 },
             MENU_CMD_END
         }
     },
@@ -8556,6 +8516,53 @@ Menu_TransferMarket _transferMarketMenu = {
     { 272, 0, 32, 8 },
     { MENU_CMD_TEXT_PTR, 0x8000, 0 },
     MENU_CMD_END,
+    { MENU_MARK_START_MENU, 0, 130 },
+    MENU_MARK_START_TEMPLATE,
+    MENU_MARK_BYTE_COORDS,
+    { 0, 0, 0, 0 },
+    { MENU_CMD_COLORS, 0x0 },
+    { MENU_CMD_AFTER_DRAW, TransferMarketAfterDrawCommon },
+    { MENU_CMD_ONSELECT_FIRE, TransferMarketCommon },
+    MENU_CMD_END,
+    MENU_MARK_WIDE_COORDS,
+    {
+        {
+            { 0, 45, 304, 8 },
+            { MENU_CMD_NAV, -1, -1, 13, 27 },
+            MENU_CMD_END
+        },
+        {
+            { 0, 54, 304, 8 },
+            { MENU_CMD_NAV, -1, -1, 26, 28 },
+            MENU_CMD_END
+        },
+        {
+            { 0, 63, 304, 8 },
+            { MENU_CMD_NAV, -1, -1, 27, 29 },
+            MENU_CMD_END
+        },
+        {
+            { 0, 72, 304, 8 },
+            { MENU_CMD_NAV, -1, -1, 28, 30 },
+            MENU_CMD_END
+        },
+        {
+            { 0, 81, 304, 8 },
+            { MENU_CMD_NAV, -1, -1, 29, 6 },
+            MENU_CMD_END
+        }
+    },
+    MENU_MARK_INIT_ENTRY,
+    { MENU_MARK_START_MENU, 0, 0 },
+    MENU_MARK_BYTE_COORDS,
+    {
+        { -98, 40, 100, 15 },
+        { MENU_CMD_NAV, 2, -1, -1, 3 },
+        { MENU_CMD_COLORS, 0xE },
+        { MENU_CMD_TEXT_PTR, 0x0, _aModRow },
+        { MENU_CMD_ONSELECT_FIRE, TransferMarketModRow },
+        MENU_CMD_END
+    },
     MENU_MARK_END_MENU
 };
 Menu_SelectNationalTeam _selectNationalTeamMenu = {
@@ -8815,19 +8822,19 @@ Menu_NationalTeamAddPlayer _nationalTeamAddPlayerMenu = {
         MENU_CMD_END
     },
     {
-        { 57, 120, -66, 15 },
-        { MENU_CMD_NAV, -1, -1, 2, 4 },
-        { MENU_CMD_COLORS, 0xE },
-        { MENU_CMD_TEXT_PTR, 0x0, "SEARCH NATIONAL PLAYERS" },
-        { MENU_CMD_ONSELECT_FIRE, NationalTeamAddPlayerSearchOnSelect },
-        MENU_CMD_END
-    },
-    {
         { 122, -71, 60, 15 },
-        { MENU_CMD_NAV, -1, -1, 3, -1 },
+        { MENU_CMD_NAV, -1, -1, 2, -1 },
         { MENU_CMD_COLORS, 0xC },
         { MENU_CMD_TEXT_PTR, 0x0, _aExit },
         { MENU_CMD_ONSELECT_FIRE, NationalTeamAddPlayerExit },
+        MENU_CMD_END
+    },
+    {
+        { 57, 120, -66, 15 },
+        { MENU_CMD_NAV, -1, -1, 2, 3 },
+        { MENU_CMD_COLORS, 0xE },
+        { MENU_CMD_TEXT_PTR, 0x0, _aModRow },
+        { MENU_CMD_ONSELECT_FIRE, NationalTeamAddPlayerModRow },
         MENU_CMD_END
     },
     MENU_MARK_END_MENU
@@ -9240,7 +9247,7 @@ Menu_JobOffers _jobOffersMenu = {
         },
         {
             { 0, 60, 304, 12 },
-            { MENU_CMD_NAV, -1, -1, 4, 17 },
+            { MENU_CMD_NAV, -1, -1, 4, 7 },
             MENU_CMD_END
         }
     },
@@ -9283,7 +9290,7 @@ Menu_JobOffers _jobOffersMenu = {
         },
         {
             { 0, 60, 304, 12 },
-            { MENU_CMD_NAV, -1, -1, 10, 17 },
+            { MENU_CMD_NAV, -1, -1, 10, 12 },
             MENU_CMD_END
         }
     },
@@ -9292,7 +9299,7 @@ Menu_JobOffers _jobOffersMenu = {
     MENU_MARK_BYTE_COORDS,
     {
         { 122, -71, 60, 15 },
-        { MENU_CMD_NAV, 17, -1, 11, 17 },
+        { MENU_CMD_NAV, -1, -1, 11, -1 },
         { MENU_CMD_COLORS, 0xC },
         { MENU_CMD_TEXT_PTR, 0x0, _aExit },
         { MENU_CMD_ONSELECT_FIRE, JobOffersExit },
@@ -9321,14 +9328,13 @@ Menu_JobOffers _jobOffersMenu = {
         { MENU_CMD_TEXT_NO_PTR, 0x8000 },
         MENU_CMD_END
     },
-    MENU_MARK_BYTE_COORDS, /* Entry 17 uses compact (signed-byte) coordinates. */
+    MENU_MARK_BYTE_COORDS,
     {
-        /* Same bottom row as EXIT, positioned to its left. */
         { 24, -71, 88, 15 },
-        { MENU_CMD_NAV, -1, 12, 11, 12 },
+        { MENU_CMD_NAV, -1, 12, 11, -1 },
         { MENU_CMD_COLORS, 0xC },
-        { MENU_CMD_TEXT_PTR, 0x0, s_jobPageLabel },
-        { MENU_CMD_ONSELECT_FIRE, JobOffers_TogglePage },
+        { MENU_CMD_TEXT_PTR, 0x0, _aNextPage },
+        { MENU_CMD_ONSELECT_FIRE, JobOffersNextPage },
         MENU_CMD_END
     },
     MENU_MARK_END_MENU

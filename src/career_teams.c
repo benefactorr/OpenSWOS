@@ -11,6 +11,17 @@
  */
 
 #include "career_teams.h"
+#include <stdio.h>    /* (Career_PeekTeam) */
+#include <stdlib.h>   /* (Career_ForEachClub) */
+#include <string.h>
+#include "uefa_coef.h"
+#include "conti_season.h"
+#include "states.h"
+#include "league_split.h"
+#include "league_phase.h"
+#include "world_playoff.h"
+#include "world_cups.h"
+#include "world_cupd.h"
 #include "translations.h"
 #include "endian_helpers.h"
 #include "game_types.h"
@@ -20,9 +31,14 @@
 
 #include "diy_competition.h"
 #include "file_io.h"
+#include "world.h"
 
 /* ---- Constants ---- */
-#define SAVE_SIZE                   0x5582  /* bytes to save: numSelectedTeams + team data */
+/* Bytes parked by SaveSelectedTeams: numSelectedTeams + the records. The original parked 32
+ * (0x5582); the cache holds SELECTED_TEAMS_MAX, and a world's season end can park more than
+ * 32 -- a Serie C career at its league's end held 51, and the 19 past the 32nd were lost
+ * (a VerifyTeamLoaded panic at the season end, world_playoff.c) -- so all of them. */
+#define SAVE_SIZE                   (2 + SELECTED_TEAMS_MAX * 684)
 
 /* ---- ASM externs ---- */
 extern uint16_t _currentTeamNumber;
@@ -198,6 +214,121 @@ TeamFileEx *GetTeamPointer(uint16_t teamId)
     return ptr;
 }
 
+/* Whether team file `ext` is there for LoadTeamFile, which halts on a missing one (panic
+ * 0x8008, right for the game's own ids): Career_PeekTeam asks before loading a mod's id. 100 is
+ * CUSTOMS.EDT, never a career's. */
+static int32_t teamFileExists(uint8_t ext)
+{
+    if (ext == 100)
+        return 0;
+#ifdef SWOS_SDL_BUILD
+    extern int DataJson_CountryHasTeamFile(int countryNum);
+    return DataJson_CountryHasTeamFile(ext);
+#else
+    extern uint32_t Resload_FileSize(const char *name);
+    char name[16];
+    snprintf(name, sizeof name, "data/team.%03d", ext);
+    return Resload_FileSize(name) != 0;
+#endif
+}
+
+/* ================================================================
+ * Career_PeekTeam -- a copy of a team as the career has it (for the mods' ModApi_CareerTeam):
+ * the live copy (the current team, the career club, the selected teams, the TMD pool) or its
+ * team file's record with the career pool's changes on it, as GetTeamPointer would give -- but
+ * the team-file buffer, which a screen may be showing, is left as it was (snapshot and restore),
+ * and an id that is no team gives 0 rather than GetTeamPointer's endless scan. 1 when found.
+ * ================================================================ */
+int32_t Career_PeekTeam(uint16_t teamId, TeamFileEx *out)
+{
+    TeamFileEx *t;
+    uint16_t idx;
+    if (findTeamInCache(teamId, &t, &idx) == 0 || (t = findTeamInTmdBuffer(teamId)) != NULL) {
+        *out = *t;
+        return 1;
+    }
+    if (!teamFileExists((uint8_t)(teamId >> 8)))
+        return 0;
+    const int32_t other = !(_teamsLoaded && _lastLoadedExtNumber == (uint8_t)(teamId >> 8));
+    void *aside = NULL;             /* (allocated: the Amiga keeps no second team-file buffer) */
+    if (other && (aside = TeamFile_PutAside()) == NULL)
+        return 0;
+    int32_t found = 0;
+    if (LoadTeamFile((uint16_t)(teamId >> 8)) == 0) {
+        const uint16_t count = *(uint16_t *)&_teamFileBuffer;
+        const TeamFileEx *rec = (const TeamFileEx *)(&_teamFileBuffer + 2);
+        for (uint16_t i = 0; i < count && i < TEAM_FILE_MAX_TEAMS; i++, rec++)
+            if (PACK_BE_U16(rec->team.countryNumber, rec->team.teamOrdinal) == teamId) {
+                *out = *rec;
+                Career_PatchTeamWithForeignMarketPlayers(out);
+                found = 1;
+                break;
+            }
+    }
+    if (other)
+        TeamFile_PutBack(aside);
+    return found;
+}
+
+/* ================================================================
+ * Career_ForEachClub -- every club of the career's countries, as the career has it (for the
+ * mods' ModApi_CareerClubs): each country with a league (_competitionsTable: not the national
+ * teams' files, nor CN_CUSTOM's joke teams, whose entry is their own table), each club of its team file -- the live copy where there
+ * is one (the career club, the current team, the selected teams, the TMD pool), else its
+ * record with the career pool's changes on it, as GetTeamPointer would give. Each file is read
+ * once and copied, so `each` may call anything (Career_PeekTeam, Career_WriteTeamPlayer); the
+ * team-file buffer is put back as it was. `each` returns nonzero to stop. The clubs visited,
+ * -1 when there is no memory.
+ * ================================================================ */
+int32_t Career_ForEachClub(int32_t (*each)(const TeamFileEx *club, void *ctx), void *ctx)
+{
+    extern void *_competitionsTable[];
+    extern uint8_t _currentTeam[];
+    extern uint16_t _currentTeamNumber;
+    uint8_t *copy = (uint8_t *)malloc(TEAM_FILE_BUFFER_SIZE);
+    void *aside = TeamFile_PutAside();
+    int32_t visited = 0, stop = 0;
+    if (!copy || !aside) {
+        free(copy);
+        if (aside)
+            TeamFile_PutBack(aside);
+        return -1;
+    }
+    for (int32_t file = 0; file < CN_EUROPE && !stop; file++) {
+        void **entry = (void **)_competitionsTable[file];
+        if (file == CN_CUSTOM)          /* (its entry is the custom teams' table, not a league) */
+            continue;
+        if (!entry || (intptr_t)entry == -1 || !entry[0] || (intptr_t)entry[0] == -1 ||
+            !teamFileExists((uint8_t)file) || LoadTeamFile((uint16_t)file) != 0)
+            continue;
+        memcpy(copy, &_teamFileBuffer, TEAM_FILE_BUFFER_SIZE);
+        const uint16_t count = *(const uint16_t *)copy;
+        for (uint16_t i = 0; i < count && i < TEAM_FILE_MAX_TEAMS && !stop; i++) {
+            TeamFileEx club = ((const TeamFileEx *)(copy + 2))[i];
+            const uint16_t id = PACK_BE_U16(club.team.countryNumber, club.team.teamOrdinal);
+            TeamFileEx *live;
+            uint16_t idx;
+            if (club.team.countryNumber != (uint8_t)file)
+                continue;               /* (a club of another country's in this file) */
+            if (id == _selTeamNumber)
+                club = _careerTeam;
+            else if (id == _currentTeamNumber &&
+                     PACK_BE_U16(((TeamFileEx *)_currentTeam)->team.countryNumber,
+                                 ((TeamFileEx *)_currentTeam)->team.teamOrdinal) == id)
+                club = *(TeamFileEx *)_currentTeam;
+            else if (findTeamInCache(id, &live, &idx) == 0 || (live = findTeamInTmdBuffer(id)) != NULL)
+                club = *live;
+            else
+                Career_PatchTeamWithForeignMarketPlayers(&club);
+            visited++;
+            stop = each(&club, ctx);
+        }
+    }
+    free(copy);
+    TeamFile_PutBack(aside);
+    return visited;
+}
+
 /* ================================================================
  * CopySelectedTeamNumbers — copy first word of each team record.
  * Asm: CopySelectedTeamNumbers (d0=count, a0=dest)
@@ -244,8 +375,8 @@ void CopySelectedTeamNumbers(uint16_t count, uint8_t *dest)
  * ================================================================ */
 static uint8_t savedTeamsBackupBuffer[SAVE_SIZE];
 
-/* numSelectedTeams (2 B) and the selectedTeams[32] array (SAVE_SIZE-2 =
- * 32*684 = 21888 B at &selTeamsPtr) are backed up / restored as TWO independent
+/* numSelectedTeams (2 B) and the selectedTeams array (SAVE_SIZE-2 =
+ * SELECTED_TEAMS_MAX*684 B at &selTeamsPtr) are backed up / restored as TWO independent
  * runs, so neither relies on the array sitting immediately after numSelectedTeams
  * in BSS. The array is being lifted out of the careerFileBuffer overlay into a
  * typed carrier (see docs/SELECTED_TEAMS_UNTANGLE.md); decoupling here is
@@ -257,7 +388,7 @@ void SaveSelectedTeams(void)
     volatile uint16_t *dst = (volatile uint16_t *)savedTeamsBackupBuffer;
     *dst++ = _numSelectedTeams;                              /* count -> backup[0] */
     volatile uint16_t *src = (volatile uint16_t *)&_selTeamsPtr;
-    uint32_t remaining = SAVE_SIZE - 2;                    /* 21888 = 32 * 684 */
+    uint32_t remaining = SAVE_SIZE - 2;
     while (remaining) {
         *dst++ = *src++;
         remaining -= 2;
@@ -265,10 +396,27 @@ void SaveSelectedTeams(void)
     _numSelectedTeams = 0;
 }
 
+/* The records parked by SaveSelectedTeams (count, records), for whoever must change them in
+ * place -- a world's pool swapping a slot's identity (src/team_pool.c). */
+TeamFileEx *Career_ParkedTeams(uint16_t *count)
+{
+    *count = *(uint16_t *)savedTeamsBackupBuffer;
+    if (*count > SELECTED_TEAMS_MAX)
+        *count = 0;
+    return (TeamFileEx *)(savedTeamsBackupBuffer + 2);
+}
+
+/* How many records are parked (a loaded career's: its "selected_teams_parked", whose records the
+ * loader wrote at Career_ParkedTeams). */
+void Career_SetParkedTeamCount(uint16_t count)
+{
+    *(uint16_t *)savedTeamsBackupBuffer = count <= SELECTED_TEAMS_MAX ? count : 0;
+}
+
 __attribute__((used, externally_visible, optimize("no-tree-loop-distribute-patterns")))
 void RestoreSelectedTeams(void)
 {
-    if (_numSelectedTeams > 32) {
+    if (_numSelectedTeams > SELECTED_TEAMS_MAX) {
         PanicHaltLoop();
     }
     volatile uint16_t *src = (volatile uint16_t *)savedTeamsBackupBuffer;
@@ -440,8 +588,12 @@ void Career_AppendTeamToTmdTeamPool(TeamFileEx *team)
         PanicHaltLoop();
     }
 
-    /* Append at end of pool */
+    /* Append at end of pool (full: panic, never past the buffer) */
     uint16_t count = _careerFileBuffer;
+    if (count >= TMD_POOL_RECORDS) {
+        _panicReasonCode = 0x3444;
+        PanicHaltLoop();
+    }
     TeamFileEx *dest = (TeamFileEx *)&_tmdFileBuffer + count;
     volatile uint16_t *src = (volatile uint16_t *)team;
     volatile uint16_t *dst = (volatile uint16_t *)dest;
@@ -799,6 +951,9 @@ void AppendTeamsToSelectionFromTmdOrTeamFile(uint16_t *out, uint16_t *teamIds, u
  *     leagueFilter  = league value to match at offset 25 (d1 → d6)
  *     expectedCount = expected number of matching teams (d2 in asm)
  * ================================================================ */
+/* One file's clubs of the division, from idOut on; returns past the last written. */
+static uint16_t *fillLeagueTeamsOfLoadedFile(uint16_t *idOut, uint16_t leagueFilter);
+
 static void fillLeagueTeamSelectionFromFile(uint16_t extNumber, uint16_t leagueFilter,
                                              int16_t expectedCount)
 {
@@ -813,6 +968,19 @@ static void fillLeagueTeamSelectionFromFile(uint16_t extNumber, uint16_t leagueF
     for (j = 0; j < tfCount; j++) {
         if (tfBase[j].team.league == (uint8_t)leagueFilter)
             actualCount++;
+    }
+    /* A country over two team files (include/world.h): the division's clubs of the second
+     * too, when the first falls short; the first file loaded again after it. */
+    const uint8_t second = World_SecondFile((uint8_t)extNumber);
+    if (second && (int16_t)actualCount < expectedCount) {
+        uint16_t *idOut = fillLeagueTeamsOfLoadedFile(_diyCompetitionStart.matchData.league.leagueTeamIds,
+                                                      leagueFilter);
+        LoadTeamFile(second);
+        uint16_t *end = fillLeagueTeamsOfLoadedFile(idOut, leagueFilter);
+        actualCount = (uint16_t)(end - _diyCompetitionStart.matchData.league.leagueTeamIds);
+        LoadTeamFile(extNumber);
+        if ((int16_t)actualCount == expectedCount)
+            return;
     }
     if ((int16_t)actualCount != expectedCount) {
         /* [verify-fill] -O2 makes gdb's `expectedCount=...` value
@@ -832,9 +1000,15 @@ static void fillLeagueTeamSelectionFromFile(uint16_t extNumber, uint16_t leagueF
      * produce the same `(country << 8) | ordinal` value that
      * findTeamInCache / isTeamInCache compare against, and
      * BE_WRITE_U16 to store. */
+    fillLeagueTeamsOfLoadedFile(_diyCompetitionStart.matchData.league.leagueTeamIds, leagueFilter);
+}
+
+static uint16_t *fillLeagueTeamsOfLoadedFile(uint16_t *idOut, uint16_t leagueFilter)
+{
+    TeamFileEx *tfBase = (TeamFileEx *)(&_teamFileBuffer + 2);
+    uint16_t tfCount = *(uint16_t *)&_teamFileBuffer;
     TeamFileEx *selDst = _selectedTeams + _numSelectedTeams;
-    uint16_t *idOut = _diyCompetitionStart.matchData.league.leagueTeamIds;
-    for (j = 0; j < tfCount; j++) {
+    for (uint16_t j = 0; j < tfCount; j++) {
         TeamFileEx *src = &tfBase[j];
         if (src->team.league == (uint8_t)leagueFilter) {
             uint16_t teamId = PACK_BE_U16(src->team.countryNumber,
@@ -848,6 +1022,7 @@ static void fillLeagueTeamSelectionFromFile(uint16_t extNumber, uint16_t leagueF
             }
         }
     }
+    return idOut;
 }
 
 /* ================================================================
@@ -1190,7 +1365,10 @@ void Career_InitCompetitionTeamSelectionFromTableHeaderSpec(uint8_t *spec)
         uint16_t idsOff = teamIdsOffset + 2u * (sizeof(char *) - sizeof(uint32_t));
         uint16_t count = spec[10];  /* andi.w #$FF,d7 — unsigned byte */
         uint16_t *teamIds = (uint16_t *)(spec + 7 + idsOff);
+        /* a world cup with byes lists fewer clubs than its bracket (world_cups.c) */
+        count = WorldCups_Entrants(spec, count);
         AppendTeamsToSelectionFromTmdOrTeamFile(_diyCompetitionStart.cupTeamIds, teamIds, count);
+        WorldCups_Padded(spec);
     } else {
         uint16_t extNumber = spec[2];
         int16_t teamCount = (int16_t)(int8_t)spec[10];  /* ext.w d1 — signed */
@@ -1455,7 +1633,7 @@ uint8_t *TeamSelectionKeyCache_GetListPtr(uint16_t listIndex)
          * same approach as the builder walker fix. See
          * docs/OVERLAPPED_DATA.md entry #8. */
         uint16_t stride = ((TeamSelectionKeyCacheEntry *)ptr)->entryStride;
-        if (stride < 10 || stride > 256)
+        if (stride < KEYCACHE_STRIDE_MIN || stride > KEYCACHE_STRIDE_MAX)
             return ptr;
         ptr += stride;
     }
@@ -1610,6 +1788,15 @@ void Career_UpdateCareerFinishedFlag(void)
 __attribute__((used, externally_visible))
 void Career_AdvanceToNextTeamSelectionKeyCacheEntry(void)
 {
+    /* the Coppa Italia Serie D's rounds that have come (world_cupd.c): the entry just
+     * played is the current one */
+    if (_teamSelectionKeyCacheCount) {
+        CupD_Step(((TeamSelectionKeyCacheEntry *)(_teamSelectionKeyCache + _teamSelectionKeyCacheOffset))->sortKey);
+        UefaQual_Daily();       /* (a world's: the career club's qualifying tie decided) */
+        Conti_Daily();          /* (or its tie in another confederation's cup) */
+        WorldPlayoff_Advance(((TeamSelectionKeyCacheEntry *)(_teamSelectionKeyCache + _teamSelectionKeyCacheOffset))->sortKey);
+    }
+
     if (_gameType == 4) {
         _homeMarketUpdateBacklog++;
         _foreignMarketUpdateBacklog++;
@@ -1642,7 +1829,7 @@ void Career_AdvanceToNextTeamSelectionKeyCacheEntry(void)
          * range, treat the season as finished early rather than walking
          * into the careerForeignMarketPlayers overlay. */
         uint16_t stride = ((TeamSelectionKeyCacheEntry *)ptr)->entryStride;
-        if (stride < 10 || stride > 256) {
+        if (stride < KEYCACHE_STRIDE_MIN || stride > KEYCACHE_STRIDE_MAX) {
             _seasonFinished = 1;
             _careerFinished = 1;
             Career_FillCurrentSeasonInfo();
@@ -1654,6 +1841,23 @@ void Career_AdvanceToNextTeamSelectionKeyCacheEntry(void)
             _teamSelectionKeyCacheOffset = (uint16_t)((uintptr_t)ptr - (uintptr_t)_teamSelectionKeyCache);
             return;
         }
+    }
+}
+
+/* A slot about to take another contest mid-season (a world's ties and play-offs): its calendar
+ * entries up to the current one get round FFh. The cache's lookups take a slot's first entry of
+ * the round from the cache's start, so the finished contest's (a Coppa Serie D tie in slot 4)
+ * would take the new one's matches and leave its own entries empty -- a play-out simulated
+ * instead of played. The later entries stay: a contest still running keeps its own. (The SWOS
+ * 96/97 Mod's uefaq .build does the same.) */
+void Career_RetireSlotCalendarEntries(uint8_t slot)
+{
+    uint8_t *e = _teamSelectionKeyCache;
+    for (uint16_t i = 0; i < _teamSelectionKeyCacheCount && i <= _teamSelectionKeyCacheIndex; i++) {
+        TeamSelectionKeyCacheEntry *x = (TeamSelectionKeyCacheEntry *)e;
+        if (x->compSlot == slot)
+            x->roundIdx = 0xFF;
+        e += x->entryStride;
     }
 }
 
@@ -1765,7 +1969,9 @@ void Career_ProcessCurrentCompetitionSlotAfterMatch(void)
          * region = minSubstitutes */
         if (((DIYCompetitionEx *)slotPtr)->minSubstitutes != 0)
             return;
-        DIY_RebuildCompetitionAndTeamSelectionCaches();
+        if (!WorldPlayoff_CareerLeagueEnded() &&   /* a world's play-off the club plays (world_playoff.c), */
+            !CupD_InSlot4())                       /* a Coppa Italia Serie D tie's slot (world_cupd.c) */
+            DIY_RebuildCompetitionAndTeamSelectionCaches();
     }
 }
 
@@ -1886,7 +2092,9 @@ void Career_OpenCompetitionSlotMenuAndApplyChanges(uint16_t d2)
         return;
     if (((DIYCompetitionEx *)slotPtr)->minSubstitutes != 0)
         return;
-    DIY_RebuildCompetitionAndTeamSelectionCaches();
+    if (!WorldPlayoff_CareerLeagueEnded() &&    /* a world's play-off the club plays (world_playoff.c), */
+        !CupD_InSlot4())                        /* a Coppa Italia Serie D tie's slot (world_cupd.c) */
+        DIY_RebuildCompetitionAndTeamSelectionCaches();
 }
 
 /* ================================================================
@@ -2048,6 +2256,10 @@ __attribute__((used, externally_visible))
 void Career_AutoSimulateLeagueFixturesUntilHumanTeam(void)
 {
     for (;;) {
+        /* After a world league's split the career club may play no more today: the rest of
+         * the day only (else the next day's matches up to its own, include/league_split.h). */
+        if (LeagueSplit_RestOfDayWithoutCareerClub())
+            return;
         DIY_GetCurrentFixtureTeamPtrs();
         uint8_t *comp1 = _fixtureTeam1CompPtr;
         uint8_t *comp2 = _fixtureTeam2CompPtr;
@@ -2344,10 +2556,16 @@ void DIY_AdvanceToNextCompetitionSlot(void)
     uint8_t *comp = (uint8_t *)&_diyCompetitionStart;
 
     if (slotRec->isLeagueFormat != 0) {
-        /* League type: build seeded bracket */
+        /* League type: build seeded bracket (a world's league phase: its play-off ties) */
+        LeaguePhase_GroupsEnd(buf, 0);
+        Conti_GroupsEnd(buf, 0);              /* (another confederation's main round: conti_season.c) */
         DIY_BuildSeededBracketAndUpdateScores(buf, slot, comp, comp);
+        LeaguePhase_GroupsEnd(buf, 1);
+        Conti_GroupsEnd(buf, 1);
+        States_GroupsEnd(buf, 1);             /* (a world's state championship: states.c) */
     } else {
         /* Cup type: copy team grid */
+        States_KnockoutEnd();
         DIY_CopyTeamGridFromCompToDIY(buf, slot, comp, comp);
     }
 
@@ -2382,13 +2600,6 @@ __attribute__((used, externally_visible))
 void NationalTeamAddPlayerAbroadOnSelect(void)
 {
     _careerNationalTeamAddPlayerType = 1;
-    SetExitMenuFlag();
-}
-
-__attribute__((used, externally_visible))
-void NationalTeamAddPlayerSearchOnSelect(void)
-{
-    _careerNationalTeamAddPlayerType = 2;
     SetExitMenuFlag();
 }
 
@@ -2836,7 +3047,10 @@ static uint8_t *addNextRoundCupEntry(uint8_t **srcPtr, uint16_t idx, uint16_t to
     (*srcPtr)++;
 
     /* GetNextCupRoundStringIndex(idx, total, subRoundCounter) */
-    uint16_t cupRoundIdx = GetNextCupRoundStringIndex(idx, total, ((DIYCompetition *)base)->subRoundCounter);
+    /* (a world cup's own names: world_cups.c) */
+    const int32_t world = WorldCups_RoundStringIndex((uint8_t)((DIYCompetition *)base)->field_2E, idx, total);
+    uint16_t cupRoundIdx = world >= 0 ? (uint16_t)world :
+                           GetNextCupRoundStringIndex(idx, total, ((DIYCompetition *)base)->subRoundCounter);
     e->cupRoundStringIdx = (uint8_t)cupRoundIdx;
     e->roundIdx          = (uint8_t)idx;
     e->compSlot            = (uint8_t)teamId;

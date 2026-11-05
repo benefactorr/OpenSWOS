@@ -242,7 +242,7 @@ ShouldGoalkeeperDive(Sprite *keeper, Sprite *ball, TeamGeneralInfo *team)
      * zkz-10140228 frame 1108 has the keeper diving in the recording and
      * standing here, and the DOS expression is what makes him dive.
      * The Amiga path is untouched — see docs/DOS_GAMEPLAY.md. */
-    if (_gDosGameplay) {
+    if (_gDosKeepers) {         /* the DOS keeper: DOS, and XBOX (dos_mode.h) */
         skillIndex = shotTable->index[(uint16_t)_currentGameTick & 0xF];
         skillIndex--;
         if (skillIndex < 0)
@@ -345,6 +345,7 @@ NextPenalty(void)
 {
     int16_t totalAttempts;
     int16_t *shooterIdx;
+    { extern void ModMatch_ShootoutKick(void); ModMatch_ShootoutKick(); }  /* the mods' event (mod_match.c) */
 
     totalAttempts = _team1PenaltyAttempts + _team2PenaltyAttempts;
 
@@ -404,6 +405,16 @@ setup_next:
     (*shooterIdx)--;
     if (*shooterIdx == 0)
         *shooterIdx = 10;
+    {
+        /* A mod's match with its own order of takers (mod_match.c, H5; the5ar's SHOOTING
+         * ORDER, 920e9123): written through the same variable, so all below sees nothing new. */
+        extern int16_t ModMatch_ShootoutSlot(int16_t teamNumber, int16_t attempt);
+        const int16_t slot = ModMatch_ShootoutSlot(_bottomTeamData.teamNumber,
+                                                   _bottomTeamData.teamNumber == 1 ? _team1PenaltyAttempts
+                                                                                  : _team2PenaltyAttempts);
+        if (slot)
+            *shooterIdx = slot;
+    }
 
     /* Load penalty shooter sprite pointer */
     {
@@ -615,4 +626,25 @@ GoalkeeperJumping(int16_t diveDir, int16_t speedVariant, int16_t destDir,
     int16_t destIdx = destDir * 2;
     keeper->destX = keeper->x.s.i + _kDefaultDestinations[destIdx];
     keeper->destY = keeper->y.s.i + _kDefaultDestinations[destIdx + 1];
+}
+
+
+/* ==================================================================
+ * GoalkeeperForceDiveAnim -- OpenSWOS, for a mod's manual penalty keeper (the5ar)
+ *
+ * GoalkeeperJumping picks the high or low dive from the ball's height -- the AI knows where
+ * the ball is. A player's keeper guesses the height with the side (down held = low), so after
+ * GoalkeeperJumping set the rest up, this re-picks the state and animation from that choice.
+ * ================================================================== */
+void GoalkeeperForceDiveAnim(Sprite *keeper, TeamGeneralInfo *team, int16_t low)
+{
+    if (low) {
+        keeper->playerState = (uint8_t)PL_GOALIE_DIVING_LOW;
+        SetPlayerAnimationTable(team == &_bottomTeamData ? &_rightGoalieJumpingLowAnimTable
+                                                         : &_leftGoalieJumpingLowAnimTable, keeper);
+    } else {
+        keeper->playerState = (uint8_t)PL_GOALIE_DIVING_HIGH;
+        SetPlayerAnimationTable(team == &_bottomTeamData ? &_rightGoalieJumpingHighAnimTable
+                                                         : &_leftGoalieJumpingHighAnimTable, keeper);
+    }
 }
