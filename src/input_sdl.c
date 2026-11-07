@@ -1,3 +1,4 @@
+#include "career_plus_options.h"
 /*
  * input_sdl.c -- SDL keyboard / gamepad → Amiga input state.
  *
@@ -47,6 +48,8 @@ extern uint8_t  _ciaa_pra;
  * the SPACE multi-role binding so SPACE during a live match falls through
  * to the Amiga highlight-capture path only, not the menu fire/skip path. */
 extern uint16_t _gameState;
+extern int16_t _gameStatePl;
+extern volatile uint16_t _playGame; /* true only inside a match */
 
 /* ---- Keyboard FIFO consumed by GetKey() ----
  * The Amiga build's level-2 ISR pushes raw scan codes into keyBuffer
@@ -191,6 +194,37 @@ static int sdl_to_amiga(SDL_Keycode k)
 
 /* ---- Tracked keyboard state for joystick/fire synthesis ---- */
 static int s_kbd_up, s_kbd_down, s_kbd_left, s_kbd_right, s_kbd_fire;
+/* Career+ experimental instant shot.  A short tap stays queued for up to
+ * twelve player-1 input updates, since a runner can reach the ball after the
+ * key event.  Consuming the queue only when the match engine has actually
+ * accepted the action avoids dropping shots during transitional animations. */
+static int s_instant_shot_pending;
+static int s_super_shot_pending;
+
+/* Return 1 for the normal instant kick (D), 2 for SWOS high kick (A). */
+int InputSDL_TakeSpecialShot(void)
+{
+    if (!_careerThreeButtonOption) {
+        s_super_shot_pending = s_instant_shot_pending = 0;
+        return 0;
+    }
+    if (s_super_shot_pending > 0) {
+        --s_super_shot_pending;
+        return 2;
+    }
+    if (s_instant_shot_pending > 0) {
+        --s_instant_shot_pending;
+        return 1;
+    }
+    return 0;
+}
+
+void InputSDL_SpecialShotCompleted(void)
+{
+    s_instant_shot_pending = 0;
+    s_super_shot_pending = 0;
+}
+
 /* The arrows as they physically are, beside the four above, which are what the game
  * is told. A keyboard, unlike a stick, can hold LEFT and RIGHT at once -- and does,
  * for a few frames, every time a player rolls from one arrow to the other. DOS SWOS
@@ -243,6 +277,7 @@ static void kbd_arrow(SDL_Keycode k, int down)
 #define KBD_FIRE_RETURN 0x4
 #define KBD_FIRE_BOUND  0x8     /* the player's own fire key ([input] key_fire) */
 static int s_kbd_fire_keys;
+#define KBD_FIRE_THREE_BUTTON_S 0x10
 
 /* ---- The player's own keys: [input] key_up / key_down / key_left / key_right / key_fire ----
  *
@@ -257,9 +292,11 @@ static int s_kbd_fire_keys;
  * key remapper, and reported fire presses that the game never read (ReportBot 0041). A
  * remapper feeds the game synthetic key events of its own timing; bound here, the game
  * reads the keyboard itself. */
-enum { BIND_UP, BIND_DOWN, BIND_LEFT, BIND_RIGHT, BIND_FIRE, BIND_COUNT };
+enum { BIND_UP, BIND_DOWN, BIND_LEFT, BIND_RIGHT, BIND_FIRE,
+       BIND_PASS, BIND_SHOOT, BIND_HIGH_SHOT, BIND_COUNT };
 static SDL_Scancode s_bind[BIND_COUNT];        /* SDL_SCANCODE_UNKNOWN: not bound */
-static const char *const k_bindName[BIND_COUNT] = { "key_up", "key_down", "key_left", "key_right", "key_fire" };
+static const char *const k_bindName[BIND_COUNT] = { "key_up", "key_down", "key_left", "key_right", "key_fire",
+    "key_pass", "key_shoot", "key_high_shot" };
 extern volatile uint16_t _gTextInputActive;    /* input_text.c */
 
 /* `which`: 0 up, 1 down, 2 left, 3 right, 4 fire. `name`: an SDL scancode name ("W",
@@ -296,7 +333,7 @@ static int bound_action(SDL_Scancode sc)
     int i;
     if (sc == SDL_SCANCODE_UNKNOWN || _gTextInputActive)
         return -1;
-    for (i = 0; i < BIND_COUNT; i++)
+    for (i = 0; i <= BIND_FIRE; i++)
         if (s_bind[i] == sc)
             return i;
     return -1;
@@ -653,6 +690,33 @@ void InputSDL_HandleEvent(const SDL_Event *e)
             }
             break;
         }
+        /* Career+ three-button keys, customisable in CONTROLS and SWOS.ini.
+         * These are active only in offline live matches. */
+        if (_careerThreeButtonOption && !_gTextInputActive && _playGame &&
+            (_gameStatePl == 100 || _gameStatePl == 101 || _gameStatePl == 102)) {
+            const SDL_Scancode sc = e->key.keysym.scancode;
+            extern int32_t NetplayMatch_Enabled(void);
+            extern int ReplayTest_Running(void);
+            if (!NetplayMatch_Enabled() && !ReplayTest_Running() &&
+                ((sc != SDL_SCANCODE_UNKNOWN && sc == s_bind[BIND_PASS]) ||
+                 (sc != SDL_SCANCODE_UNKNOWN && sc == s_bind[BIND_SHOOT]) ||
+                 (sc != SDL_SCANCODE_UNKNOWN && sc == s_bind[BIND_HIGH_SHOT]))) {
+                if (sc == s_bind[BIND_PASS]) {
+                    s_kbd_fire_keys |= KBD_FIRE_THREE_BUTTON_S;
+                    s_kbd_fire = 1;
+                    if (e->key.repeat == 0) s_fire_event = 1;
+                } else if (e->key.repeat == 0) {
+                    if (sc == s_bind[BIND_HIGH_SHOT]) {
+                        s_super_shot_pending = 12;
+                        s_instant_shot_pending = 0;
+                    } else {
+                        s_instant_shot_pending = 12;
+                        s_super_shot_pending = 0;
+                    }
+                }
+                break;
+            }
+        }
         /* One of the player's own keys ([input] key_*): a control, and nothing else. */
         int act = bound_action(e->key.keysym.scancode);
         if (act >= 0) {
@@ -785,10 +849,28 @@ void InputSDL_HandleEvent(const SDL_Event *e)
         }
     } break;
     case SDL_KEYUP: {
+        /* A held PASS key must release fire even if the mode changed. */
+        if (e->key.keysym.scancode != SDL_SCANCODE_UNKNOWN &&
+            e->key.keysym.scancode == s_bind[BIND_PASS] &&
+            (s_kbd_fire_keys & KBD_FIRE_THREE_BUTTON_S)) {
+            s_kbd_fire_keys &= ~KBD_FIRE_THREE_BUTTON_S;
+            s_kbd_fire = s_kbd_fire_keys != 0;
+            break;
+        }
+        if (_careerThreeButtonOption && !_gTextInputActive && _playGame &&
+            (_gameStatePl == 100 || _gameStatePl == 101 || _gameStatePl == 102)) {
+            SDL_Scancode sc = e->key.keysym.scancode;
+            extern int32_t NetplayMatch_Enabled(void);
+            extern int ReplayTest_Running(void);
+            if (!NetplayMatch_Enabled() && !ReplayTest_Running() &&
+                ((sc != SDL_SCANCODE_UNKNOWN && sc == s_bind[BIND_SHOOT]) ||
+                 (sc != SDL_SCANCODE_UNKNOWN && sc == s_bind[BIND_HIGH_SHOT])))
+                break;
+        }
         /* Released whatever a text field says: a key held when one opened must not stick. */
         {
             int i, act = -1;
-            for (i = 0; i < BIND_COUNT; i++)
+            for (i = 0; i <= BIND_FIRE; i++)
                 if (s_bind[i] != SDL_SCANCODE_UNKNOWN && s_bind[i] == e->key.keysym.scancode)
                     act = i;
             if (act >= 0) {
@@ -824,6 +906,22 @@ void InputSDL_HandleEvent(const SDL_Event *e)
         }
     } break;
     case SDL_CONTROLLERBUTTONDOWN: {
+        /* Optional instant shot on the LEFT SHOULDER of player 1's pad.
+         * In a two-human match with one pad, that pad belongs to player 2,
+         * so never accidentally shoot on behalf of the keyboard player. */
+        if (e->cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER &&
+            _playGame &&
+            (_gameStatePl == 100 || _gameStatePl == 101 || _gameStatePl == 102) &&
+            s_player_dev[0] >= 0 && s_dev_gc[s_player_dev[0]] &&
+            s_dev_id[s_player_dev[0]] == e->cbutton.which) {
+            extern uint16_t _twoPlayers;
+            extern int32_t NetplayMatch_Enabled(void);
+            extern int ReplayTest_Running(void);
+            int split = _twoPlayers != 0 && s_player_dev[1] < 0;
+            if (!split && !NetplayMatch_Enabled() && !ReplayTest_Running())
+                if (_careerThreeButtonOption)
+                    s_instant_shot_pending = 12;
+        }
         /* A fire button of player 1's pad went down (the latch and the recording's
          * evidence, above). A plain joystick has no such event and is read as before. */
         if ((e->cbutton.button == SDL_CONTROLLER_BUTTON_A || e->cbutton.button == SDL_CONTROLLER_BUTTON_B) &&
@@ -1097,6 +1195,8 @@ void InputSDL_ClearKeyState(void)
     s_kbd_up = s_kbd_down = s_kbd_left = s_kbd_right = s_kbd_fire = 0;
     s_kbd_held_up = s_kbd_held_down = s_kbd_held_left = s_kbd_held_right = 0;
     s_kbd_fire_keys = 0;
+    s_instant_shot_pending = 0;
+    s_super_shot_pending = 0;
     s_fire_event = s_fire_event_pad = 0;    /* a press from before is not one in what comes next */
     s_kbd_skip = 0;
     s_touch_dirs = s_touch_fire = 0;

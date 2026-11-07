@@ -152,7 +152,11 @@ static int handler(void *user, const char *section,
         }
     } else if (eqi(section, "gameplay")) {
         int b;
-        if (eqi(name, "fire_hold_lockout") && parse_bool(value, &b))
+        if (eqi(name, "improved_ai") && parse_bool(value, &b))
+            opts->improved_ai = b;
+        else if (eqi(name, "three_button") && parse_bool(value, &b))
+            opts->three_button = b;
+        else if (eqi(name, "fire_hold_lockout") && parse_bool(value, &b))
             opts->fire_hold_lockout = b;
         else if (eqi(name, "contest_own_ratings") && parse_bool(value, &b))
             opts->contest_own_ratings = b;
@@ -173,9 +177,10 @@ static int handler(void *user, const char *section,
             int b;
             if (parse_bool(value, &b)) opts->latch_presses = b;
         } else {
-            static const char *const keys[5] = { "key_up", "key_down", "key_left", "key_right", "key_fire" };
+            static const char *const keys[8] = { "key_up", "key_down", "key_left", "key_right", "key_fire",
+                "key_pass", "key_shoot", "key_high_shot" };
             int i;
-            for (i = 0; i < 5; i++)
+            for (i = 0; i < 8; i++)
                 if (eqi(name, keys[i]))
                     snprintf(opts->key_bind[i], sizeof opts->key_bind[i], "%s", value);
         }
@@ -451,6 +456,12 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
     SETTING(n) = (IniEntry){ "input", "key_left",  NULL, opts->key_bind[2] };
     SETTING(n) = (IniEntry){ "input", "key_right", NULL, opts->key_bind[3] };
     SETTING(n) = (IniEntry){ "input", "key_fire",  NULL, opts->key_bind[4] };
+    SETTING(n) = (IniEntry){ "input", "key_pass",
+        "; Career+ THREE BUTTONS: key_pass, key_shoot, key_high_shot. Defaults S, D, A.\n"
+        "; Active in live offline matches only when [gameplay] three_button = true.\n"
+        "; Key names are SDL scancode names. Empty disables that action.", opts->key_bind[5] };
+    SETTING(n) = (IniEntry){ "input", "key_shoot", NULL, opts->key_bind[6] };
+    SETTING(n) = (IniEntry){ "input", "key_high_shot", NULL, opts->key_bind[7] };
     SETTING(n) = (IniEntry){ "gameplay", "fire_hold_lockout",
         "; fire_hold_lockout: true | false — true restores a BUG IN THE ORIGINAL\n"
         "; AMIGA GAME: an OPPONENT's tackle wipes your held fire button's shot charge,\n"
@@ -469,6 +480,12 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
         opts->contest_own_ratings ? "true" : "false" };
 
 
+    SETTING(n) = (IniEntry){ "gameplay", "improved_ai",
+        "; improved_ai: true (default) | false (original SWOS AI).",
+        opts->improved_ai ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "gameplay", "three_button",
+        "; three_button: false (default, classic) | true (A high, S fire, D shoot).",
+        opts->three_button ? "true" : "false" };
     SETTING(n) = (IniEntry){ "gameplay", "style",
         "; style: amiga | dos. The Amiga release is the definitive one and what this\n"
         "; port is reverse engineered from; dos is the PC release's 70 FPS physics,\n"

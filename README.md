@@ -1,3 +1,16 @@
+## 🌍 V3: International Football Overhaul
+
+- **Start your career as a national team manager!** You can now manage a national team from the very beginning of your career.
+- **A dynamic international football world!** All national teams are now active and select their strongest available players from the career database. National squads evolve over time instead of remaining unchanged season after season.
+- **Generated players for smaller nations!** More than 75 national teams lack enough players in the original database. A new Football Manager-style system fills the gaps with generated players, drawing on a database of over **21,000 names**!
+- **International players age and retire!** When players retire, they disappear from their national teams. If you manage a national team, you will need to select their replacements.
+- **International competition history!** You can now view previous winners of the World Cup, European Championship, Copa América, African Nations Cup, Asian Cup and other international tournaments, even when managing a club.
+
+## ⚽ Gameplay Improvements
+
+- **Optional Advanced AI!** The improved AI builds attacks more intelligently, passes more accurately and generally plays more realistic football. Prefer the original SWOS experience? Simply switch back to the original AI in the Options menu.
+- **Optional three-button gameplay!** Experience SWOS with three dedicated controls instead of the traditional single fire button: passing, shooting and long shooting. This gives you more control and makes gameplay faster and more responsive! You can enable or disable it in the Options menu.
+
 # Version 2
 
 - **Player age and aging:** All players now have age, and they age as the career progresses. I have tried to find accurate age for the majority of players in the database!

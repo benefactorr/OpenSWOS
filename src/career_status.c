@@ -30,6 +30,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include "swos_national_trace.h"
 #include "career_status.h"
 #include "test_rules.h"
 #include "comp_identity.h"
@@ -3538,6 +3539,10 @@ extern uint8_t _currentCompetitionIndex;
 #define CUP_STEP(...) do { FILE *cf = fopen("swos_division_debug.log", "a"); if (cf) { fputs("CUPTRACE ", cf); fprintf(cf, __VA_ARGS__); fputc('\n', cf); fclose(cf); } } while (0)
 void Career_AutoAdvanceCupCompetitionFromRecord(uint8_t *record)
 {
+    if (record && comp_id(record) < COMPID_customsLeague)
+        SWOS_NationalTrace("AUTO_CUP_BEGIN", "comp=%u playing=%u season_update=%u",
+            (unsigned)comp_id(record), (unsigned)_seasonPlaying,
+            (unsigned)_seasonUpdateInProgress);
     CUP_STEP("ENTER comp=%u record=%p", (unsigned)_currentCompetitionIndex, (void *)record);
     /* Special-case English cup aliases (118/119 → 120/121). */
     uint8_t rid = record ? comp_id(record) : 0xFFu;
@@ -3583,6 +3588,9 @@ void Career_AutoAdvanceCupCompetitionFromRecord(uint8_t *record)
     _seasonPlaying = savedSeasonPlaying;
     RestoreRand2State();
     _careerLoadedFlag = 0;
+    if (record && comp_id(record) < COMPID_customsLeague)
+        SWOS_NationalTrace("AUTO_CUP_END", "comp=%u playing=%u",
+            (unsigned)comp_id(record), (unsigned)_seasonPlaying);
     CUP_STEP("EXIT comp=%u", (unsigned)_currentCompetitionIndex);
 }
 
@@ -3591,6 +3599,10 @@ void Career_AutoAdvanceCupCompetitionFromRecord(uint8_t *record)
 __attribute__((used, externally_visible))
 void Career_AutoAdvanceLeagueCompetitionFromRecord(uint8_t *record)
 {
+    if (record && comp_id(record) < COMPID_customsLeague)
+        SWOS_NationalTrace("AUTO_OTHER_BEGIN", "comp=%u type=%d playing=%u season_update=%u",
+            (unsigned)comp_id(record), (int)((Competition *)record)->type,
+            (unsigned)_seasonPlaying, (unsigned)_seasonUpdateInProgress);
     _careerLoadedFlag = 1;
 
     if (_seasonUpdateInProgress == 0 && _internationalAutoAdvanceFlag == 0)
@@ -3626,6 +3638,11 @@ void Career_AutoAdvanceLeagueCompetitionFromRecord(uint8_t *record)
 __attribute__((used, externally_visible))
 void Career_AutoAdvanceInternationalCompetitionFixtures(uint8_t *record, uint16_t index)
 {
+    SWOS_NationalTrace("AUTO_LEAGUE_BEGIN", "comp=%u type=%d division=%u playing=%u national=%u season_update=%u",
+        record ? (unsigned)comp_id(record) : 255u,
+        record ? (int)((Competition *)record)->type : -1,
+        (unsigned)index, (unsigned)_seasonPlaying,
+        (unsigned)_isNationalSelector, (unsigned)_seasonUpdateInProgress);
     _careerLoadedFlag = 1;
     if (_seasonUpdateInProgress == 0 && _internationalAutoAdvanceFlag == 0)
         _teamSelectionKeyCacheEnd = 1;
@@ -3649,6 +3666,9 @@ void Career_AutoAdvanceInternationalCompetitionFixtures(uint8_t *record, uint16_
     { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV after team loading index=%u\n", (unsigned)index); fclose(f); } }
     { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV before fixture advancement index=%u\n", (unsigned)index); fclose(f); } }
     Career_AutoAdvanceLeagueFixtures();
+    SWOS_NationalTrace("AUTO_LEAGUE_END", "comp=%u division=%u playing=%u",
+        record ? (unsigned)comp_id(record) : 255u,
+        (unsigned)index, (unsigned)_seasonPlaying);
     { FILE *f = fopen("swos_division_debug.log", "a"); if (f) { fprintf(f, "ADV after fixture advancement index=%u\n", (unsigned)index); fclose(f); } }
 
     _viewRandomPhase = savedViewRandom;

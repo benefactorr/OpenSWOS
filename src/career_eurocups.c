@@ -8,7 +8,9 @@
  * Chunk 65: 7 exported + 12 static functions ported from SWOS2.s.
  */
 
+#include "swos_national_trace.h"
 #include "career_eurocups.h"
+#include "comp_identity.h"
 #include "game_types.h"
 #include "diy_competition.h"
 #include "endian_helpers.h"
@@ -706,6 +708,9 @@ extern void Career_AutoAdvanceInternationalCompetitionFixtures(uint8_t *record, 
  * If active competition, edit interactively; else auto-advance. */
 static void updateECSlot(uint8_t *competition, uint16_t count, uint8_t *out)
 {
+    SWOS_NationalTrace("EC_QUAL_GROUP", "comp=%u type=%d qualifiers=%u active=%u",
+        (unsigned)comp_id(competition), (int)((Competition *)competition)->type,
+        (unsigned)count, (unsigned)(competition == _currentCompetitionPtr));
     if (competition == _currentCompetitionPtr) {
         RestoreSelectedTeams();
         Career_CopyCompetitionFileBufferToOrFromActive();
@@ -722,6 +727,9 @@ static void updateECSlot(uint8_t *competition, uint16_t count, uint8_t *out)
 __attribute__((used, externally_visible))
 void Career_UpdateEuropeanChampionshipCompetitions(void)
 {
+    SWOS_NationalTrace("EC_UPDATE_CHECK", "selected=%04X flags=%02X active=%u",
+        (unsigned)_selTeamNumber, (unsigned)_someTeamFlags,
+        (unsigned)((_someTeamFlags & 0x01) != 0));
     if (!(_someTeamFlags & 0x01))
         return;
 
@@ -758,6 +766,9 @@ void Career_UpdateEuropeanChampionshipCompetitions(void)
  * More complex: handles type 0 (league), type 2 (cup), and error cases. */
 static void updateWCSlot(uint8_t *competition, uint16_t count, uint8_t *out)
 {
+    SWOS_NationalTrace("WC_QUAL_GROUP", "comp=%u type=%d qualifiers=%u active=%u",
+        (unsigned)comp_id(competition), (int)((Competition *)competition)->type,
+        (unsigned)count, (unsigned)(competition == _currentCompetitionPtr));
     int8_t compType = ((Competition *)competition)->type;
     if (competition == _currentCompetitionPtr) {
         RestoreSelectedTeams();
@@ -793,6 +804,9 @@ static void updateWCSlot(uint8_t *competition, uint16_t count, uint8_t *out)
 __attribute__((used, externally_visible))
 void Career_UpdateWorldCupCompetitions(void)
 {
+    SWOS_NationalTrace("WC_UPDATE_CHECK", "selected=%04X flags=%02X host=%04X qualifier_update=%u",
+        (unsigned)_selTeamNumber, (unsigned)_someTeamFlags,
+        (unsigned)_worldCupHostTeam, (unsigned)((_someTeamFlags & 0x40) != 0));
     if (_someTeamFlags & 0x80)
         _worldCupHostTeam = _primaryCompetitionBuf.tourn.header.winnerTeam;
 

@@ -49,3 +49,6 @@ void JobOffers_TogglePage(void);
 
 /* --- Career_MaybeGenerateJobOffer (Chunk 216) --- */
 void Career_MaybeGenerateJobOffer(void);
+
+/* V3: starting-career nationality mapping and player pool guard. */
+int SWOS_NationalCareerStartEligible(uint16_t teamId);

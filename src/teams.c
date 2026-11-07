@@ -23,6 +23,9 @@
 #include <stdlib.h>            /* getenv — SWOS_DATA_JSON team-load wire-in */
 #endif
 
+/* Set only while ViewWorldMenu displays the competition chooser. */
+extern uint16_t _swosViewWorldChooserActive;
+
 /* ---- Constants ---- */
 #define GAME_TYPE_CAREER            4
 #define ORIGINAL_CUSTOM_TEAMS   2
@@ -2207,6 +2210,10 @@ extern uintptr_t _selectedContest;
 extern uint8_t _copaAmerica[];
 extern uint8_t _aAllSelectedTea[];
 
+/* V3: Apply the 30-player rule only while choosing the initial career team. */
+uint16_t SWOS_CareerStartFilterNationalTeams = 0;
+extern int SWOS_NationalCareerStartEligible(uint16_t teamId);
+
 extern uint16_t GetStringLength(const uint8_t *str);
 extern void SetCurrentEntry(uint16_t entryIndex);
 
@@ -2458,7 +2465,11 @@ void ChooseTeamsFriendlyInitFinish(void)
     uint16_t i;
 
     for (i = 0; i < numTeamsInFile; i++) {
-        if (teamRecord->team.league == league) {
+        if (teamRecord->team.league == league &&
+            !(SWOS_CareerStartFilterNationalTeams && _teamsType == 0 &&
+              !SWOS_NationalCareerStartEligible(
+                  PACK_BE_U16(teamRecord->team.countryNumber,
+                              teamRecord->team.teamOrdinal)))) {
             /* selNum is BE-packed (country<<8 | ordinal); compare via
              * PACK_BE_U16 so the user's own team is correctly skipped
              * out of the friendly-menu list on LE hosts (a raw
@@ -3024,7 +3035,7 @@ loc_E086:
     }
 
     /* Career mode continental cup filtering (loc_13E0A6) */
-    if (_gameType == GAME_TYPE_CAREER) {
+    if (_gameType == GAME_TYPE_CAREER && !_swosViewWorldChooserActive) {
         /* NOTE: Copa Libertadores is deliberately NOT filtered here. It is a
          * CLUB cup — the CONMEBOL analog of the European club cups
          * (euroCup/cupWinnersCup/uefaCup), which are likewise absent from this
@@ -3068,7 +3079,7 @@ loc_E086:
 
     /* loc_13E120: European Championships check */
     if (compEntry == _europeanChampionships) {
-        if (_gameType == GAME_TYPE_CAREER) {
+        if (_gameType == GAME_TYPE_CAREER && !_swosViewWorldChooserActive) {
             if ((uint8_t)(_selTeamNumber >> 8) != CN_EUROPE)
                 goto loc_E086;
             if (!(_someTeamFlags & (1 << 0))) {
@@ -3102,7 +3113,7 @@ skip_continental_check:
 
     /* loc_13E1A6: World Cup check */
     if (compEntry == _worldCup) {
-        if (_gameType == GAME_TYPE_CAREER) {
+        if (_gameType == GAME_TYPE_CAREER && !_swosViewWorldChooserActive) {
             if (_isNationalSelector == 0)
                 goto loc_E086;
             if (!(_someTeamFlags & (1 << 7)))
@@ -3346,7 +3357,7 @@ loc_E50A:
             if (_someTeamFlags & (1 << 0))
                 contest = (uint8_t *)0xFD;
         }
-        if (contest == _worldCup) {
+        if (contest == _worldCup && !_swosViewWorldChooserActive) {
             if (_someTeamFlags & (1 << 6))
                 contest = (uint8_t *)0xFC;
         }

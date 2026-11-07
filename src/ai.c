@@ -13,9 +13,11 @@
  */
 
 #include "ai.h"
+#include "career_plus_options.h"
 #include "dos_mode.h"       /* _gDosGameplay: the DOS build has no position gate here */
 #include "game_types.h"
 #include "math68k.h"
+#include "ball_possession.h"  /* actual pass-target selection */
 
 extern Sprite          _ballSprite;
 extern int16_t         _gsResultAutoAdvance;   /* GS_660_600 600/660 — dos_gameplay.c */
@@ -305,6 +307,350 @@ FindClosestPlayerToBallFacing(uint16_t fullDir, TeamGeneralInfo *team)
 }
 
 
+/* ===== Career+ advanced AI (experimental) =====
+ * Changes decisions only. DoPass and the standard ball/shot engines remain
+ * responsible for execution, skill-based misses, trajectory and interception.
+ * Never run for a human side or while taking a restart.
+ */
+static int32_t AI_DistanceSq(int32_t dx, int32_t dy)
+{
+    return dx * dx + dy * dy;
+}
+
+static int32_t AI_OpponentDistanceSq(TeamGeneralInfo *team, int16_t x,
+                                      int16_t y)
+{
+    int32_t nearest = 0x7FFFFFFF;
+    Sprite **players = team->opponentsTeam->spritesTable;
+    int i;
+    if (!players)
+        return nearest;
+    for (i = 0; i < 11; ++i) {
+        Sprite *opp = players[i];
+        int32_t d;
+        if (!opp || opp->sentAway || opp->playerState != PL_NORMAL)
+            continue;
+        d = AI_DistanceSq((int32_t)opp->x.s.i - x,
+                          (int32_t)opp->y.s.i - y);
+        if (d < nearest)
+            nearest = d;
+    }
+    return nearest;
+}
+
+/* Discourage a pass that crosses an opponent near the middle of its path.
+ * Integer projection avoids floating point in the match loop. */
+static int AI_LaneBlocked(TeamGeneralInfo *team, Sprite *from, Sprite *to)
+{
+    int32_t vx = (int32_t)to->x.s.i - from->x.s.i;
+    int32_t vy = (int32_t)to->y.s.i - from->y.s.i;
+    int32_t len2 = AI_DistanceSq(vx, vy);
+    Sprite **opps = team->opponentsTeam->spritesTable;
+    int i;
+    if (!opps || len2 < 1)
+        return 0;
+    for (i = 0; i < 11; ++i) {
+        Sprite *opp = opps[i];
+        int32_t ox, oy, along, cross;
+        if (!opp || opp->sentAway || opp->playerState != PL_NORMAL)
+            continue;
+        ox = (int32_t)opp->x.s.i - from->x.s.i;
+        oy = (int32_t)opp->y.s.i - from->y.s.i;
+        along = ox * vx + oy * vy;
+        if (along <= len2 / 10 || along >= (len2 * 9) / 10)
+            continue;
+        cross = ox * vy - oy * vx;
+        /* 20 world units is a conservative interception corridor. */
+        if ((int64_t)cross * cross < (int64_t)len2 * 400)
+            return 1;
+    }
+    return 0;
+}
+
+/* A target is useful only if the actual SWOS pass resolver selects it.
+ * This avoids "smart" directional passes going to an unexpected player. */
+/* Evaluate the eight ACTUAL short-pass directions, rather than guessing a
+ * direction from the receiver's facing angle. SWOS uses the receiver's
+ * facing to select a target, so we must score precisely the player that
+ * GetClosestNonControlledPlayerInDirection() will choose. */
+static Sprite *AI_BestSafePass(TeamGeneralInfo *team, Sprite *from,
+                               int16_t *passDir, int32_t *passScore,
+                               int preferLong)
+{
+    Sprite *best = 0;
+    int32_t bestScore = -1000000;
+    int16_t forward = team == &_topTeamData ? 1 : -1;
+    int dir;
+    if (!team->spritesTable || !team->opponentsTeam)
+        return 0;
+    for (dir = 0; dir < 8; ++dir) {
+        Sprite *pl = GetClosestNonControlledPlayerInDirection((uint16_t)dir, team);
+        int32_t dx, dy, range, progress, nearby, score;
+        int32_t ownGoalDist, edge, carrierOwnGoalDist, ballEdge;
+        int32_t backAmount;
+        if (!pl || pl == (Sprite *)0xFFFFFFFF || pl == from ||
+            pl->playerOrdinal == 1 || pl->sentAway ||
+            pl->playerState != PL_NORMAL)
+            continue;
+        dx = (int32_t)pl->x.s.i - from->x.s.i;
+        dy = (int32_t)pl->y.s.i - from->y.s.i;
+        range = AI_DistanceSq(dx, dy);
+        if (range < 900 || range > 160000)
+            continue;
+        progress = forward * dy;
+        backAmount = progress < 0 ? -progress : 0;
+        carrierOwnGoalDist = forward > 0 ? from->y.s.i - 129 : 769 - from->y.s.i;
+        nearby = AI_OpponentDistanceSq(team, pl->x.s.i, pl->y.s.i);
+        if (nearby < 900) /* avoid receivers under very close marking */
+            continue;
+        /* The standard pass flies beyond the receiver rather than stopping
+         * on their feet. Keep a wide reception corridor, especially when a
+         * long pass would continue towards a touchline. */
+        edge = pl->x.s.i < 336 ? pl->x.s.i - 81 : 590 - pl->x.s.i;
+        ballEdge = from->x.s.i < 336 ? from->x.s.i - 81 : 590 - from->x.s.i;
+        if (edge < 75 || pl->y.s.i < 193 || pl->y.s.i > 705)
+            continue;
+        if (edge < 112 && (range > 10000 || edge < ballEdge))
+            continue;
+        /* The angle of a pass leaving the narrow side of the pitch is
+         * dangerous even with an accurate player. Avoid the outward vector. */
+        if ((from->x.s.i < 175 && dx < -8) ||
+            (from->x.s.i > 496 && dx > 8) ||
+            (pl->x.s.i < 195 && dx < -25) ||
+            (pl->x.s.i > 476 && dx > 25))
+            continue;
+
+        ownGoalDist = forward > 0 ? pl->y.s.i - 129 : 769 - pl->y.s.i;
+        /* In the defensive half, avoid speculative backward passing.
+         * Small backwards resets are allowed when safely clear of the goal,
+         * but no retreat into the goalmouth or a deep corner. */
+        if (ownGoalDist < 160 && progress < 24)
+            continue;
+        if (carrierOwnGoalDist < 340 && backAmount > 15)
+            continue;
+        if (carrierOwnGoalDist < 435 && backAmount > 65)
+            continue;
+        /* v8: a backward pass is a deliberate safe reset, never a routine
+         * way of escaping the defensive half. Receiver needs generous room,
+         * a central lane and a short retreat; keep the wing restrictions above
+         * exactly as they were in v7. */
+        if (backAmount > 0 &&
+            (carrierOwnGoalDist < 450 || ownGoalDist < 325 ||
+             backAmount > 55 || nearby < 6400 || edge < 125))
+            continue;
+        if (AI_LaneBlocked(team, from, pl))
+            continue;
+        /* A receiver who can turn forward in space beats a marked square
+         * pass. Still favour open long passes on some possession windows. */
+        score = progress * 3 - range / 230;
+        if (nearby > 6400) score += 105;
+        else if (nearby > 2500) score += 55;
+        if (edge < 100) score -= (100 - edge) * 3;
+        /* Prefer progression, yet allow a safe sideways reset or a small
+         * backpass in midfield when no sensible forward outlet exists. */
+        if (backAmount > 0) score -= 155 + backAmount * 5;
+        if (progress > 20) score += 35;
+        if (ownGoalDist < 225 && progress < 20) score -= 140;
+        if (range > 22500) {
+            if (preferLong && progress > 45 && nearby > 2500)
+                score += 190 + (range > 62500 ? 55 : 0);
+            else
+                score -= 25;
+        }
+        if (range > 90000 && !preferLong)
+            score -= 45;
+        if (score > bestScore) {
+            best = pl;
+            bestScore = score;
+            *passDir = (int16_t)dir;
+        }
+    }
+    *passScore = bestScore;
+    return best;
+}
+
+/* Called only for a team in open play with a playable ball nearby.
+ * Returns 1 if we deliberately selected a pass or carry direction. */
+static int AI_AdvancedPossession(TeamGeneralInfo *team, Sprite *carrier,
+                                 int32_t goalDistSq)
+{
+    Sprite *target;
+    int16_t dir = -1;
+    int32_t score = 0, pressure;
+    int16_t forward = team == &_topTeamData ? 1 : -1;
+    int16_t bx, by;
+    int32_t leftSpace, rightSpace;
+    int32_t attackingLineDist;
+    int16_t carryDir;
+
+    if (team->playerNumber != 0 || _gameStatePl != ST_GAME_IN_PROGRESS ||
+        _playingPenalties || _penalty || !carrier ||
+        carrier->playerOrdinal == 1 || carrier->playerState != PL_NORMAL ||
+        carrier->ballDistance > 650 || team->passKickTimer >= 13 ||
+        _aiResumePlayTimer != 0 || team->spinTimer >= 0)
+        return 0;
+
+    pressure = AI_OpponentDistanceSq(team, carrier->x.s.i, carrier->y.s.i);
+
+    /* v16: Near the attacking byline, a wide ball carrier must not keep
+     * advancing straight into touch or over the goal line. The original AI
+     * only treated the touchline, and its inward diagonal could still run
+     * out over the byline. This is an open-play, wide-player rule only;
+     * preserve central shots, real set pieces and pressured clearances. */
+    attackingLineDist = forward > 0 ? 769 - carrier->y.s.i :
+                                       carrier->y.s.i - 129;
+    if (attackingLineDist < 125 && attackingLineDist > -12 &&
+        (carrier->x.s.i < 205 || carrier->x.s.i > 467) &&
+        pressure > 625) {
+        int16_t safeDir = -1;
+        int32_t safeScore = 0;
+        Sprite *safeReceiver = AI_BestSafePass(team, carrier,
+                                               &safeDir, &safeScore, 0);
+        if (safeReceiver && safeScore > 0) {
+            team->currentAllowedDirection = safeDir;
+            team->quickFire = 1;
+            _aiResumePlayTimer = 13;
+            return 1;
+        }
+        /* A forward diagonal is safe further from the line, but in the
+         * final 80 units we must run parallel to the goal line instead. */
+        if (attackingLineDist <= 80)
+            carryDir = carrier->x.s.i < 336 ? 2 : 6;
+        else
+            carryDir = carrier->x.s.i < 336 ?
+                (forward > 0 ? 3 : 1) : (forward > 0 ? 5 : 7);
+        team->currentAllowedDirection = carryDir;
+        return 1;
+    }
+
+    /* Do not interfere with genuine attempts near the centre of the goal. */
+    if (goalDistSq < 22500)
+        return 0;
+    /* Eleven of 32 possession windows favour a purposeful longer
+     * forward pass, provided a real and reasonably open teammate exists. */
+    target = AI_BestSafePass(team, carrier, &dir, &score,
+                             (team->AI_timer & 31) < 11 && pressure > 1200);
+
+    /* Close to the touchline, prefer an inward pass or inward movement.
+     * Never override a genuine emergency clearance when heavily pressed. */
+    if (carrier->x.s.i < 125 || carrier->x.s.i > 546) {
+        if (pressure > 625) {
+            if (target && _aiResumePlayTimer == 0) {
+                team->currentAllowedDirection = dir;
+                team->quickFire = 1;
+                _aiResumePlayTimer = 13;
+                return 1;
+            }
+            /* SWOS directions: 0=N, 2=E, 4=S, 6=W.
+             * A diagonal carries the ball towards both goal and pitch centre. */
+            team->currentAllowedDirection = carrier->x.s.i < 125 ?
+                (forward > 0 ? 3 : 1) : (forward > 0 ? 5 : 7);
+            return 1;
+        }
+    }
+
+    /* Pressure makes passing more urgent. In open space, retain possession
+     * instead of spamming one-touch passes. A deliberately modest random
+     * element preserves classic mistakes and different match rhythms. */
+    if (target && (pressure < 3600 ||
+                   (score > 260 && (team->AI_timer & 3) == 0) ||
+                   (score > 90 && (team->AI_timer & 7) == 0) ||
+                   (score > 0 && (team->AI_timer & 15) == 0))) {
+        team->currentAllowedDirection = dir;
+        team->quickFire = 1;
+        _aiResumePlayTimer = 13;
+        return 1;
+    }
+
+    /* If no safe pass is available and the AI has room, do not return to
+     * SWOS's old speculative directional kick. Carry the ball into an open
+     * channel, unless a defender is so close that an emergency clearance
+     * is genuinely justified. */
+    if (pressure > 900 && goalDistSq > 42000) {
+        bx = carrier->x.s.i;
+        by = carrier->y.s.i;
+        leftSpace = AI_OpponentDistanceSq(team, bx - 35, by + forward * 42);
+        rightSpace = AI_OpponentDistanceSq(team, bx + 35, by + forward * 42);
+        carryDir = forward > 0 ? 4 : 0;
+        if (leftSpace > rightSpace + 1200 && bx > 120)
+            carryDir = forward > 0 ? 3 : 7;
+        else if (rightSpace > leftSpace + 1200 && bx < 550)
+            carryDir = forward > 0 ? 5 : 1;
+        team->currentAllowedDirection = carryDir;
+        return 1;
+    }
+    /* Conservative defensive fallback: if there is no reasonable receiver
+     * and we are not under pressing pressure, hold the ball and move into
+     * space instead of invoking an unassessed aimless pass. */
+    /* v15: a non-pressured carrier must never return to the original
+     * speculative pass/kick branch merely because a good pass was not
+     * available (or was deferred this tick). Carry instead. Defenders
+     * immediately under pressure and attackers in shooting range retain
+     * the original clearance/shooting decisions. */
+    if (pressure > 625 && goalDistSq > 22500) {
+        team->currentAllowedDirection = carrier->x.s.i < 155 ?
+            (forward > 0 ? 3 : 1) :
+            (carrier->x.s.i > 516 ? (forward > 0 ? 5 : 7) :
+             (forward > 0 ? 4 : 0));
+        return 1;
+    }
+    return 0;
+}
+
+/* Prefer a short, controlled restart after a goal or at half-time.
+ * Ordinary set pieces are deliberately unaffected.  SWOS's DoPass resolver
+ * selects a teammate by facing direction, not just the geometric direction
+ * of a pass: check the actual resolved teammate before choosing a direction.
+ */
+static int AI_ControlledKickoff(TeamGeneralInfo *team, Sprite *kicker)
+{
+    int16_t bestDir = -1;
+    int32_t bestScore = -0x7FFFFFFF;
+    int dir;
+    if (!kicker || kicker->playerOrdinal == 1 ||
+        !team->spritesTable || kicker->ballDistance > 650 ||
+        (!team->plCloseToBall && !team->plVeryCloseToBall))
+        return 0;
+    for (dir = 0; dir < 8; dir++) {
+        Sprite *pl;
+        int32_t dx, dy, d2, score;
+        if (!(_playerTurnFlags & (1 << dir)))
+            continue;
+        pl = GetClosestNonControlledPlayerInDirection((uint16_t)dir, team);
+        if (!pl || pl == (Sprite *)0xFFFFFFFF || pl == kicker ||
+            pl->playerOrdinal == 1 || pl->sentAway ||
+            pl->playerState != PL_NORMAL)
+            continue;
+        dx = (int32_t)pl->x.s.i - kicker->x.s.i;
+        dy = (int32_t)pl->y.s.i - kicker->y.s.i;
+        d2 = AI_DistanceSq(dx, dy);
+        if (d2 < 225 || d2 > 62500 || pl->x.s.i < 101 || pl->x.s.i > 570)
+            continue;
+        /* Favour midfield receivers and lateral/backward starts. */
+        score = 250 - d2 / 120;
+        if (dir == 2 || dir == 6) score += 110;
+        if (dir == 1 || dir == 3 || dir == 5 || dir == 7) score += 35;
+        if (AI_OpponentDistanceSq(team, pl->x.s.i, pl->y.s.i) < 900)
+            score -= 200;
+        if (score > bestScore) {
+            bestScore = score;
+            bestDir = (int16_t)dir;
+        }
+    }
+    if (bestDir < 0) {
+        /* Do not hold up the match indefinitely if all squad members are
+         * out of position. A sideways ground pass is safer than the old
+         * long shot from the centre circle. */
+        bestDir = (_playerTurnFlags & (1 << 2)) ? 2 :
+                  (_playerTurnFlags & (1 << 6)) ? 6 : -1;
+    }
+    if (bestDir < 0)
+        return 0;
+    team->currentAllowedDirection = bestDir;
+    team->quickFire = 1;
+    return 1;
+}
+
 /* ===== AI_SetControlsDirection =====
  *
  * Main AI controller for computer-controlled teams.
@@ -431,6 +777,13 @@ AI_SetControlsDirection(TeamGeneralInfo *team)
         if (_stoppageTimerActive < (uint16_t)d0)
             goto set_direction;
 
+        /* Kick-offs are restarts, not open-play shots. Never use the
+         * original centre-circle long-shot logic for CPU sides. */
+        if (_careerImprovedAiOption && _gameState == ST_PLAYERS_TO_INITIAL_POSITIONS &&
+            team->playerNumber == 0 && team == _lastTeamPlayedBeforeBreak &&
+            AI_ControlledKickoff(team, a5))
+            return;
+
         /* Check penalties */
         if (_playingPenalties != 0 || _gameState == ST_PENALTY)
             goto penalties_after_the_game;
@@ -516,6 +869,35 @@ AI_SetControlsDirection(TeamGeneralInfo *team)
     if (team->spinTimer >= 0)
         goto we_have_ball_spin;
 
+    /* Career+ defensive pressure: when facing a human ball carrier, the
+     * selected computer defender should keep closing down rather than
+     * turning away under the original random-direction fallback. Leave
+     * close-range tackling, ball contact, and every restart to SWOS. */
+    if (_careerImprovedAiOption && team->playerNumber == 0 && !team->playerHasBall &&
+        team->opponentsTeam && team->opponentsTeam->playerNumber != 0 &&
+        team->opponentsTeam->playerHasBall &&
+        a5->playerState == PL_NORMAL && !a5->sentAway &&
+        a5->ballDistance > 750 && a5->ballDistance < 19600 &&
+        (_currentGameTick & 3) != 0) {
+        Sprite *attacker = team->opponentsTeam->controlledPlayer;
+        if (attacker && attacker->playerState == PL_NORMAL &&
+            !attacker->sentAway) {
+            int32_t ax = (int32_t)attacker->x.s.i - a5->x.s.i;
+            int32_t ay = (int32_t)attacker->y.s.i - a5->y.s.i;
+            if (ax * ax + ay * ay < 19600) {
+                int16_t dir = (int16_t)CalculateDeltaXAndY(
+                    attacker->x.s.i, attacker->y.s.i,
+                    a5->x.s.i, a5->y.s.i, 256,
+                    &outDeltaX, &outDeltaY);
+                if (dir >= 0) {
+                    team->currentAllowedDirection =
+                        (int16_t)(((uint16_t)(dir + 16)) & 0xFF) >> 5;
+                    return;
+                }
+            }
+        }
+    }
+
     /* Check if a player is near the ball */
     if (team->plVeryCloseToBall != 0 || team->plCloseToBall != 0)
         goto theres_a_player_near;
@@ -527,6 +909,10 @@ AI_SetControlsDirection(TeamGeneralInfo *team)
 theres_a_player_near:
     if (AI_DecideWhetherToTriggerFire(a5, team, d7) == 0)
         return;  /* firing */
+    /* Career+ advanced possession decisions for CPU-controlled teams.
+     * Preserve original shots, clearances, marking and set pieces. */
+    if (_careerImprovedAiOption && AI_AdvancedPossession(team, a5, d6))
+        return;
 
     /* deadVarAlways0 check (always 0 in practice) */
     if (_deadVarAlways0 != 0) {
@@ -735,6 +1121,26 @@ decide_immediate_turn_or_gate:
     }
 
 setup_resume_play_and_turn_bias:
+    /* Avoid direction-only long kicks in open space. If there is an actual
+     * pass outlet use it; otherwise advance with the ball. Do not interfere
+     * with pressured defensive clearances or shooting-range decisions. */
+    if (_careerImprovedAiOption && team->playerNumber == 0 && _gameStatePl == ST_GAME_IN_PROGRESS &&
+        a5 && a5->playerOrdinal != 1 && a5->ballDistance <= 650 &&
+        d6 > 60000 &&
+        AI_OpponentDistanceSq(team, a5->x.s.i, a5->y.s.i) > 3600) {
+        int16_t safeDir;
+        int32_t safeScore;
+        Sprite *safeTarget = AI_BestSafePass(team, a5, &safeDir, &safeScore,
+                                               (team->AI_timer & 15) < 5);
+        if (safeTarget && safeScore > -25 && _aiResumePlayTimer == 0) {
+            team->currentAllowedDirection = safeDir;
+            team->quickFire = 1;
+            _aiResumePlayTimer = 13;
+        } else {
+            team->currentAllowedDirection = d7;
+        }
+        return;
+    }
     team->AI_afterTouchStrength = 2;
     if (d6 <= 115600)
         team->AI_afterTouchStrength = 1;

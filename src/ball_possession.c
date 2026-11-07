@@ -1,3 +1,4 @@
+#include "career_plus_options.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
@@ -193,52 +194,90 @@ DoPass(Sprite *player, TeamGeneralInfo *team)
     team->passingBall     = 1;
     team->passingToPlayer = 1;
 
-    /* AI failed pass check: only during game in progress, only for CPU team */
-    if (_gameStatePl == ST_GAME_IN_PROGRESS &&
+    /* Original SWOS's skill-dependent failed-pass path, restored when
+     * Improved AI is set to ORIGINAL. It branches into the common speed path. */
+    if (!_careerImprovedAiOption && _gameStatePl == ST_GAME_IN_PROGRESS &&
         team->playerNumber == 0) {
         PlayerInfo *pi = a4;
         int16_t passingSkill = pi->passing;
         int16_t idx = passingSkill * 2;
-        int16_t threshold;
-        int16_t tickVal;
-
-        threshold = *(int16_t *)((uint8_t *)_kAIFailedPassChance + idx);
-        tickVal = (_currentGameTick & 0x1E) >> 1;
-
+        int16_t threshold = *(int16_t *)((uint8_t *)_kAIFailedPassChance + idx);
+        int16_t tickVal = (_currentGameTick & 0x1E) >> 1;
         if (tickVal < threshold) {
-            /* Botch the pass: aim between ball and target */
             ball = &_ballSprite;
             {
                 int16_t dx = targetPlayer->x.s.i - ball->x.s.i;
-                if (!((_currentGameTick >> 5) & 1))  /* btst #5,currentGameTick+1 -> bne */
-                    dx >>= 1;
+                if (!((_currentGameTick >> 5) & 1)) dx >>= 1;
                 dx = M68kShiftLeft16(dx, 5);
-                dx += ball->x.s.i;
-                ball->destX = dx;
+                ball->destX = dx + ball->x.s.i;
             }
             {
                 int16_t dy = targetPlayer->y.s.i - ball->y.s.i;
-                if ((_currentGameTick >> 5) & 1)     /* btst #5,currentGameTick+1 -> beq */
-                    dy >>= 1;
+                if ((_currentGameTick >> 5) & 1) dy >>= 1;
                 dy = M68kShiftLeft16(dy, 5);
-                dy += ball->y.s.i;
-                ball->destY = dy;
+                ball->destY = dy + ball->y.s.i;
             }
-            goto set_pass_speed;
+            goto career_original_pass_speed;
         }
     }
 
+    /* Career+ advanced AI v11: precision passing.
+     * CPU passes should not be deliberately botched after the tactical AI
+     * has chosen a safe receiver. The receiver can still fail to control
+     * the ball, be tackled or have the pass intercepted. Human passes and
+     * set pieces retain the original implementation. */
+
     /* calculate_pass_to_player_delta_x_y */
     {
+        int32_t aimX = targetPlayer->x.s.i;
+        int32_t aimY = targetPlayer->y.s.i;
         ball = &_ballSprite;
-        d1 = targetPlayer->x.s.i - ball->x.s.i;
+
+        if (_careerImprovedAiOption && _gameStatePl == ST_GAME_IN_PROGRESS && team->playerNumber == 0) {
+            /* Career+ v13: lead a moving AI receiver according to how far
+             * the ball must travel.  The old fixed three-frame prediction
+             * made longer passes go behind runners.  This is capped so a
+             * receiver changing direction cannot produce a wild ball. */
+            int32_t distanceX = aimX - ball->x.s.i;
+            int32_t distanceY = aimY - ball->y.s.i;
+            int32_t absX = distanceX < 0 ? -distanceX : distanceX;
+            int32_t absY = distanceY < 0 ? -distanceY : distanceY;
+            int32_t largestDistance = absX > absY ? absX : absY;
+            /* Approximately 2.5-5 world units per update for ordinary
+             * SWOS ground passes. Predict a realistic arrival window,
+             * capped to avoid chasing a teammate's current velocity for
+             * an entire long pass when they may soon turn. */
+            int32_t leadFrames = 3 + largestDistance / 8;
+            if (leadFrames > 24) leadFrames = 24;
+
+            /* Accumulate before shifting, so fractional movement is not
+             * discarded.  No random perturbation is added for CPU passes. */
+            int32_t leadX = (int32_t)(((int64_t)targetPlayer->deltaX.raw * leadFrames) / 65536);
+            int32_t leadY = (int32_t)(((int64_t)targetPlayer->deltaY.raw * leadFrames) / 65536);
+            if (leadX < -52) leadX = -52;
+            if (leadX > 52) leadX = 52;
+            if (leadY < -52) leadY = -52;
+            if (leadY > 52) leadY = 52;
+            aimX += leadX;
+            aimY += leadY;
+
+            /* Aim into the playable field when the intended receiver is
+             * near a touchline or goal line. This corrects the trajectory,
+             * rather than changing the receiver or forbidding wing play. */
+            if (aimX < 100) aimX = 100;
+            if (aimX > 571) aimX = 571;
+            if (aimY < 147) aimY = 147;
+            if (aimY > 751) aimY = 751;
+        }
+
         {
-            int16_t d2 = targetPlayer->y.s.i - ball->y.s.i;
+            int16_t d2;
+            d1 = (int16_t)(aimX - ball->x.s.i);
+            d2 = (int16_t)(aimY - ball->y.s.i);
+            if (d1 == 0 && d2 == 0) d1 = 1;
 
-            if (d1 == 0 && d2 == 0)
-                d1 = 1;
-
-            /* Scale deltas until ball dest is out of pitch bounds */
+            /* Preserve SWOS's directional target projection. The distant
+             * destination specifies travel direction, not a stop point. */
             for (;;) {
                 int16_t testX = ball->x.s.i + d1;
                 if (testX < 0 || testX >= 672)
@@ -251,13 +290,12 @@ DoPass(Sprite *player, TeamGeneralInfo *team)
                 d1 = M68kShiftLeft16(d1, 1);
                 d2 = M68kShiftLeft16(d2, 1);
             }
-
             ball->destX = ball->x.s.i + d1;
             ball->destY = ball->y.s.i + d2;
         }
     }
 
-set_pass_speed:
+career_original_pass_speed:
     /* Determine pass speed based on distance to target */
     ball = &_ballSprite;
     {
@@ -285,6 +323,33 @@ set_pass_speed:
         {
             PlayerInfo *pi = a4;
             speed += _kBallSpeedPassingIncrease[pi->passing];
+        }
+        /* Near a boundary, a slightly softer CPU pass gives the receiver
+         * a better chance to collect it before it rolls out of play.
+         * Leave central passes and every human-controlled pass unchanged. */
+        if (_careerImprovedAiOption && _gameStatePl == ST_GAME_IN_PROGRESS && team->playerNumber == 0 &&
+            (targetPlayer->x.s.i < 155 || targetPlayer->x.s.i > 516 ||
+             targetPlayer->y.s.i < 200 || targetPlayer->y.s.i > 698))
+            speed = (int16_t)(speed * 7 / 8);
+        /* Career+ v14: increase the pace of *targeted* CPU ground passes,
+         * particularly through midfield. The ball still uses SWOS physics
+         * and friction. Near the touchline/goal line retain v11's safer
+         * delivery instead of blasting the ball past the recipient. */
+        if (_careerImprovedAiOption && _gameStatePl == ST_GAME_IN_PROGRESS && team->playerNumber == 0) {
+            int32_t x = (int32_t)targetPlayer->x.s.i - player->x.s.i;
+            int32_t y = (int32_t)targetPlayer->y.s.i - player->y.s.i;
+            int32_t dist2 = x * x + y * y;
+            int32_t boosted = speed;
+            if (dist2 < 10000) boosted = boosted * 110 / 100;
+            else if (dist2 < 62500) boosted = boosted * 118 / 100;
+            else boosted = boosted * 120 / 100;
+            if (targetPlayer->x.s.i < 155 || targetPlayer->x.s.i > 516 ||
+                targetPlayer->y.s.i < 200 || targetPlayer->y.s.i > 698) {
+                /* Keep passes to wide receivers controlled. */
+                boosted = speed + (boosted - speed) / 3;
+            }
+            if (boosted > 3200) boosted = 3200;
+            speed = (int16_t)boosted;
         }
         ball->speed = speed;
     }

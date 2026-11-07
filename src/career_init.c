@@ -8,6 +8,7 @@
  * Chunk 61: 3 functions ported from SWOS2.s.
  */
 
+#include "swos_national_trace.h"
 #include "swos_age_identity_log.h"
 #include "swos_ai_identity_journal.h"
 #include "swos_identity_runtime.h"
@@ -3584,10 +3585,46 @@ void InitCareer(uint16_t teamNo)
  * Otherwise, show chairman opinion, update competitions, recalculate
  * starting balance, then init new season.
  * ================================================================ */
+/* Keep human-picked international footballers only while their permanent
+ * identity survives. Transfer activity does not retire an identity, so a
+ * moved player remains eligible. Invalid source mappings are left alone. */
+extern uint16_t _careerUnavailablePlayerLookupTable[];
+extern unsigned SWOS_IdentityAgeForClub(unsigned club, unsigned slot,
+                                       unsigned *age, unsigned *id);
+extern unsigned SWOS_RetiredIdentityContains(unsigned id);
+extern void Career_RemoveInternationalPlayersByMask(uint32_t mask);
+extern void SWOS_NationalRetirementNewsRecord(const PlayerFile *player, unsigned age);
+
 __attribute__((used, externally_visible))
 void ContinueCareerNextSeason(void)
 {
     extern uint16_t _gameType;
+    unsigned internationalIds[20] = {0};
+    PlayerFile internationalBefore[20];
+    unsigned internationalAges[20] = {0};
+    memset(internationalBefore, 0, sizeof internationalBefore);
+    unsigned trackedInternational = 0;
+    uint16_t oldInternationalTeam = _selTeamNumber;
+    if (_isNationalSelector) {
+        for (unsigned slot = 0; slot < 20; ++slot) {
+            uint16_t club = _careerUnavailablePlayerLookupTable[slot*2u];
+            uint16_t playerSlot = _careerUnavailablePlayerLookupTable[slot*2u+1u];
+            unsigned age = 0, identity = 0;
+            if (club != 0xFFFFu && playerSlot < 16u &&
+                SWOS_IdentityAgeForClub(club, playerSlot, &age, &identity) && identity) {
+                internationalIds[slot] = identity;
+                internationalAges[slot] = age;
+                /* Save the original player before retirement replaces the
+                 * source player in the club. The national slot is indexed
+                 * by the same storage index as the source lookup table. */
+                const PlayerFile *onTeam = (const PlayerFile *)
+                    ((const uint8_t *)&_careerTeam + sizeof(TeamFile) +
+                     slot * sizeof(PlayerFile));
+                memcpy(&internationalBefore[slot], onTeam, sizeof(PlayerFile));
+                trackedInternational++;
+            }
+        }
+    }
     SWOS_AUTOSKIP_LOG("[bug1] ContinueCareerNextSeason ENTER: youreSacked=%u "
                       "teamNoOfferAccepted=0x%04X gameType=%u",
                       (unsigned)_youreSacked,
@@ -3638,6 +3675,32 @@ void ContinueCareerNextSeason(void)
     SWOS_AI_LOG("[SWOS AI AUTO] END season=%u records=%u\n",
                 (unsigned)_careerSeasonsCompleted,
                 (unsigned)_numForeignMarketPlayers2);
+    if (_isNationalSelector && _selTeamNumber == oldInternationalTeam) {
+        uint32_t removedMask = 0;
+        for (unsigned slot = 0; slot < 20; ++slot) {
+            if (internationalIds[slot] &&
+                SWOS_RetiredIdentityContains(internationalIds[slot])) {
+                removedMask |= (uint32_t)1u << slot;
+                if ((uint8_t)internationalBefore[slot].playerName[0] != 0xFFu &&
+                    internationalBefore[slot].playerName[0])
+                    SWOS_NationalRetirementNewsRecord(&internationalBefore[slot],
+                                                     internationalAges[slot]);
+                SWOS_NationalTrace("NATIONAL_RETIRED_PLAYER",
+                    "season=%u identity=%u slot=%u pos=%u name=%.23s",
+                    (unsigned)_careerSeasonsCompleted, internationalIds[slot], slot,
+                    (unsigned)(internationalBefore[slot].positionAndFace >> 5),
+                    (const char *)internationalBefore[slot].playerName);
+            }
+        }
+        if (removedMask) Career_RemoveInternationalPlayersByMask(removedMask);
+        SWOS_NationalTrace("NATIONAL_RETIREMENT_CLEANUP",
+            "season=%u team=%04X tracked=%u removed_mask=%08X remaining=%u",
+            (unsigned)_careerSeasonsCompleted, (unsigned)_selTeamNumber,
+            trackedInternational, (unsigned)removedMask,
+            (unsigned)_careerNumPlayers);
+    }
+    SWOS_NationalTrace("ROSTER_REFRESH_POINT", "completed=%u selected=%04X ages_retirements_transfers_done=1",
+        (unsigned)_careerSeasonsCompleted, (unsigned)_selTeamNumber);
     /* Observe the active worldwide squads after retirement and AI transfers. */
     SWOS_WorldQualitySnapshot((unsigned)_careerSeasonsCompleted);
     SWOS_AUTOSKIP_LOG("[bug1] ContinueCareerNextSeason EXIT");
@@ -4093,12 +4156,18 @@ void InitializeNewSeason(void)
         uint16_t cycle = (_currentSeasonShowing >> 2) % 5u; /* 70-season safe tournament rotation */
         _worldCupQualifyingTeam = _seasonCycleNationalFlagsA[cycle];
         _euroChampionshipQualTeam = _seasonCycleNationalFlagsB[cycle];
+        SWOS_NationalTrace("NATIONAL_SEASON_INIT", "season=%u selected=%04X region=%u flags=%02X cycle=%u wc_team=%04X ec_team=%04X",
+            (unsigned)_currentSeasonShowing, (unsigned)_selTeamNumber,
+            (unsigned)regionIdx, (unsigned)_someTeamFlags, (unsigned)cycle,
+            (unsigned)_worldCupQualifyingTeam, (unsigned)_euroChampionshipQualTeam);
 
         /* Set cup pick list for selected region (param unused, function writes to global) */
         Career_SetCupPickList_ForSelectedRegion(0);
 
         compTablePtr = (void **)&_careerCupPickList;
     } else {
+        SWOS_NationalTrace("CLUB_SEASON_INIT", "season=%u selected=%04X national=0 (no national competition pick list)",
+            (unsigned)_currentSeasonShowing, (unsigned)_selTeamNumber);
         /* Club team */
         _nationalTeamFileCode = (uint8_t)(_selTeamNumber >> 8);  /* move.b — high byte */
 
@@ -4274,6 +4343,15 @@ void InitializeNewSeason(void)
         } else {
             ShowGreetingMessage();
         }
+    }
+
+    /* V3 Phase 2A: seed World Cup qualification in club-managed careers.
+     * Called only by a real new-season transition, NOT by save restoration. */
+    {
+        extern void Career_SeedIndependentWorldCupQualifiers(void);
+        Career_SeedIndependentWorldCupQualifiers();
+        extern void Career_SeedIndependentContinentalCups(void);
+        Career_SeedIndependentContinentalCups();
     }
 
     /* Post-message: trial players and international squad setup */
@@ -4775,6 +4853,9 @@ void Career_ViewOrEditCompetitionSlot(uint8_t *comp, uint16_t sel)
     if (cid == COMPID_worldCup)
         comp = _worldCup2Copy;
 
+    SWOS_NationalTrace("VIEW_REQUEST", "season=%u selected=%04X comp=%u division=%u",
+        (unsigned)_currentSeasonShowing, (unsigned)_selTeamNumber,
+        comp ? (unsigned)comp_id(comp) : 255u, (unsigned)sel);
     /* Step 3: Find which slot owns this competition */
     uint8_t *slotCtx = (uint8_t *)&_primaryCompetitionBuf;
 
@@ -4795,6 +4876,25 @@ void Career_ViewOrEditCompetitionSlot(uint8_t *comp, uint16_t sel)
     if (comp == (uint8_t *)_quaternaryCompetitionPtr)
         goto found_slot;
 
+    /* V3: viewing an inactive international tournament must never play
+     * extra fixtures or mutate the saved qualifying draw. Only active
+     * national-team competitions use the existing read-only slot viewer.
+     * Historical World Cup winners in a club career are handled by
+     * ViewWorldMenu. A dedicated live international browser is future work. */
+    if (comp && comp_id(comp) >= COMPID_worldCup2 &&
+        comp_id(comp) <= COMPID_oceaniaCup) {
+        SWOS_NationalTrace("VIEW_INACTIVE_NATIONAL_BLOCKED",
+            "season=%u comp=%u division=%u",
+            (unsigned)_currentSeasonShowing, (unsigned)comp_id(comp),
+            (unsigned)sel);
+        extern void ShowErrorMenu(uint8_t *);
+        ShowErrorMenu((uint8_t *)"INACTIVE INTERNATIONAL COMPETITION");
+        return;
+    }
+
+    SWOS_NationalTrace("VIEW_INACTIVE_AUTOSIM", "season=%u comp=%u division=%u (view invokes simulation)",
+        (unsigned)_currentSeasonShowing,
+        comp ? (unsigned)comp_id(comp) : 255u, (unsigned)sel);
     /* Not in any active slot. Trace every stage to identify remaining crash. */
     {
         FILE *log = fopen("swos_division_debug.log", "a");
@@ -4836,6 +4936,9 @@ void Career_ViewOrEditCompetitionSlot(uint8_t *comp, uint16_t sel)
     return;
 
 found_slot:
+    SWOS_NationalTrace("VIEW_ACTIVE", "season=%u comp=%u division=%u",
+        (unsigned)_currentSeasonShowing,
+        comp ? (unsigned)comp_id(comp) : 255u, (unsigned)sel);
     Career_LoadCompetitionSlotStateFromBuffer(slotCtx);
     {
         uint8_t compType = slotCtx[1];

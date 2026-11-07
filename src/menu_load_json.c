@@ -688,8 +688,10 @@ int MenuJson_InstallAll(void)
         /* Preserve customised menus whose compiled entries are not present
          * in their original JSON definitions. In particular, overwriting
          * competitionStatsMenu would remove the PAST WINNERS option added
-         * in menu_data.c, while retaining the old three-option menu. */
-        if (strcmp(name, "buyPlayerMenu") == 0 ||
+         * in menu_data.c, while retaining the old three-option menu. Likewise,
+         * optionsMenu must retain the Career+ gameplay switches. */
+        if (strcmp(name, "optionsMenu") == 0 ||
+            strcmp(name, "buyPlayerMenu") == 0 ||
             strcmp(name, "nationalTeamAddPlayerMenu") == 0 ||
             strcmp(name, "jobOffersMenu") == 0 ||
             strcmp(name, "transferMarketMenu") == 0 ||

@@ -436,10 +436,15 @@ int main(int argc, char **argv)
     opts.shadow_shading = 1;
     opts.hair_shading = 1;
     opts.shade_step = 2;
+    opts.improved_ai = 1;       /* Career+ advanced AI default ON */
+    opts.three_button = 0;      /* Classic fire default ON */
     opts.dos_gameplay = 0;        /* default Amiga gameplay */
     opts.stick_deadzone = 25;     /* percent: about what the old per-axis threshold was */
     opts.latch_presses = 1;       /* a short fire press is never lost between two reads */
-    memset(opts.key_bind, 0, sizeof opts.key_bind);   /* no keys of the player's own */
+    memset(opts.key_bind, 0, sizeof opts.key_bind);   /* no classic keys of the player's own */
+    snprintf(opts.key_bind[5], sizeof opts.key_bind[5], "S");
+    snprintf(opts.key_bind[6], sizeof opts.key_bind[6], "D");
+    snprintf(opts.key_bind[7], sizeof opts.key_bind[7], "A");
     opts.fire_hold_lockout = 0;   /* default: the original's fire-hold bug is FIXED */
     opts.contest_own_ratings = 0; /* default: the original's roll, team-mate's rating and all */
     opts.replay_auto_save = 0;    /* default: LATEST.SRP only, no dated copy per match */
@@ -1041,7 +1046,7 @@ int main(int argc, char **argv)
         extern int InputSDL_SetKeyBinding(int which, const char *name);
         int i;
         InputSDL_SetPressLatch(opts.latch_presses);
-        for (i = 0; i < 5; i++)
+        for (i = 0; i < 8; i++)
             InputSDL_SetKeyBinding(i, opts.key_bind[i]);
     }
     /* SWOS_SOUND_STYLE=pc, SWOS_COMMENTARY=on: for the test scripts, which pass no options. */
@@ -1080,6 +1085,9 @@ int main(int argc, char **argv)
     DosMusic_SetMenuRecording(opts.menu_recording);
     DosSound_SetCommentary(opts.commentary);
     { extern int _gArcadeMode; _gArcadeMode = opts.arcade; }
+    { extern uint16_t _careerImprovedAiOption, _careerThreeButtonOption;
+      _careerImprovedAiOption = (uint16_t)(opts.improved_ai != 0);
+      _careerThreeButtonOption = (uint16_t)(opts.three_button != 0); }
     _gDosGameplay = opts.dos_gameplay;
     { extern int _gOriginalFireHoldLockout;
       _gOriginalFireHoldLockout = opts.fire_hold_lockout; }

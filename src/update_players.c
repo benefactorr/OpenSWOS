@@ -1,3 +1,4 @@
+#include "career_plus_options.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
@@ -1529,6 +1530,32 @@ not_in_penalty:
             if (player->playerOrdinal != 1 && !team->ballLessEqual4)
                 goto abort_quick_pass;
 
+            /* Career+ v15: validate the receiver at the LAST possible point
+             * before an AI open-play pass changes ball and game state.
+             * DoPass otherwise falls back to a direction-only kick when
+             * nobody is facing the selected passing direction. Do not apply
+             * to restarts, goalkeeper distribution, or human controls. */
+            if (_careerImprovedAiOption && team->playerNumber == 0 &&
+                _gameStatePl == ST_GAME_IN_PROGRESS &&
+                player->playerOrdinal != 1) {
+                Sprite *receiver = GetClosestNonControlledPlayerInDirection(
+                    (uint16_t)player->direction, team);
+                int32_t dx, dy, distSq;
+                if (!receiver || receiver == (Sprite *)0xFFFFFFFF ||
+                    receiver == player || receiver->sentAway ||
+                    receiver->playerState != PL_NORMAL)
+                    goto abort_quick_pass;
+                dx = (int32_t)receiver->x.s.i - player->x.s.i;
+                dy = (int32_t)receiver->y.s.i - player->y.s.i;
+                distSq = dx * dx + dy * dy;
+                /* Keep long, purposeful passes possible, but avoid tiny
+                 * ricochets and speculative attempts at distant players. */
+                if (distSq < 400 || distSq > 160000 ||
+                    receiver->x.s.i < 94 || receiver->x.s.i > 577 ||
+                    receiver->y.s.i < 149 || receiver->y.s.i > 749)
+                    goto abort_quick_pass;
+            }
+
             /* execute_pass_and_update_context */
             _lastTeamPlayed = team;
             _lastPlayerPlayed = player;
@@ -2351,6 +2378,34 @@ not_in_penalty:
     pass_follow_update_dest:
         player->destX = team->ballX;
         player->destY = team->ballY;
+        /* Career+ v14: CPU pass receivers actively intercept the moving
+         * ball instead of chasing a stale pass destination. The movement
+         * vector is the actual ball velocity, not a guessed kick angle.
+         * Only the nominated receiver is affected; human-controlled
+         * receivers, keepers, aerial passes and restarts are untouched. */
+        if (_careerImprovedAiOption && team->playerNumber == 0 && team->passingToPlayer &&
+            team->passToPlayerPtr == player && player->playerOrdinal > 1 &&
+            _gameStatePl == ST_GAME_IN_PROGRESS && ball->z.s.i <= 3 &&
+            ball->speed >= 384) {
+            int32_t dx = (int32_t)ball->x.s.i - player->x.s.i;
+            int32_t dy = (int32_t)ball->y.s.i - player->y.s.i;
+            int32_t nearDist = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+            int32_t steps = 3 + nearDist / 25;
+            int32_t chaseX, chaseY;
+            if (steps > 10) steps = 10;
+            /* Linear forecast is deliberately short: the ball loses speed
+             * to friction each update, and may be intercepted or deflected. */
+            chaseX = (int32_t)ball->x.s.i +
+                     ((int64_t)ball->deltaX.raw * steps) / 65536;
+            chaseY = (int32_t)ball->y.s.i +
+                     ((int64_t)ball->deltaY.raw * steps) / 65536;
+            if (chaseX < 95) chaseX = 95;
+            if (chaseX > 576) chaseX = 576;
+            if (chaseY < 145) chaseY = 145;
+            if (chaseY > 753) chaseY = 753;
+            player->destX = (int16_t)chaseX;
+            player->destY = (int16_t)chaseY;
+        }
         {
             int16_t px = player->x.s.i;
             int16_t py = player->y.s.i;

@@ -1125,6 +1125,11 @@ typedef struct Menu_Options
    * the same row as CONTROLS, which is SDL only: OptionsMenuBeforeDraw shows one. */
   MenuEntry_Byte_Colors_TextPtr labelPitchStyle;
   MenuEntry_Byte_Nav_Colors_StringTable_OnSelect pitchStyle;
+  /* Career+ PC options: two additional rows below CONTROLS/PITCHES. */
+  MenuEntry_Byte_Colors_TextPtr labelImprovedAi;
+  MenuEntry_Byte_Nav_Colors_StringTable_OnSelect improvedAi;
+  MenuEntry_Byte_Colors_TextPtr labelThreeButton;
+  MenuEntry_Byte_Nav_Colors_StringTable_OnSelect threeButton;
   MenuMark_StartMenu startMenuExit;
   MenuCoords8 exit_rc;
   MenuCmd_Nav exit_nav;

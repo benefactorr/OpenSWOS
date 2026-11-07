@@ -20,7 +20,14 @@
 
 #include "diy_competition.h"
 #include "file_io.h"
+#include "swos_io.h"
+#include <stdlib.h>
+#include <string.h>
 
+
+/* End-of-season second-year team selection trace. */
+#include <stdio.h>
+#define TEAMSEL_TRACE(...) do { FILE *tsf = fopen("swos_division_debug.log", "a"); if (tsf) { fputs("TEAMSELTRACE ", tsf); fprintf(tsf, __VA_ARGS__); fputc('\n', tsf); fclose(tsf); } } while (0)
 /* ---- Constants ---- */
 #define SAVE_SIZE                   0x5582  /* bytes to save: numSelectedTeams + team data */
 
@@ -169,6 +176,506 @@ TeamFileEx *VerifyTeamLoaded(uint16_t teamNum)
 extern void Career_PatchTeamWithForeignMarketPlayers(TeamFileEx *teamPtr);
 static TeamFileEx *findTeamInTmdBuffer(uint16_t teamId);
 
+
+/* Career+ V3: AI-controlled national squads are ephemeral.  A pool of the
+ * current club players is built once per season, then each 16-player national
+ * TEAM record is assembled from it whenever requested.  The 20-player human
+ * international roster is deliberately not changed. */
+#define V3_COUNTRY_TEAMS 93u
+#define V3_POOL_LIMIT 26000u
+#define V3_REPLACEMENT_HASH 131072u
+
+typedef struct V3ClubCandidate {
+    PlayerFile player;
+    uint16_t club;
+    uint8_t slot;
+    uint8_t rating;
+} V3ClubCandidate;
+static V3ClubCandidate v3_club_pool[V3_POOL_LIMIT];
+static unsigned v3_pool_count;
+static uint16_t v3_pool_season=0xFFFFu;
+static uint8_t v3_file_raw[2u + V3_COUNTRY_TEAMS * sizeof(TeamFileEx)];
+static uint8_t v3_file_packed[sizeof(v3_file_raw)];
+static uint32_t v3_repl_keys[V3_REPLACEMENT_HASH];
+static uint16_t v3_repl_indices[V3_REPLACEMENT_HASH];
+static uint8_t v3_repl_used[V3_REPLACEMENT_HASH];
+static uint8_t v3_building_pool;
+typedef struct V3SquadStamp {
+    TeamFileEx *address;
+    uint16_t team;
+    uint16_t season;
+} V3SquadStamp;
+static V3SquadStamp v3_squad_stamps[128];
+
+extern uint8_t _avgTeamValues[];
+extern uint16_t _currentSeasonShowing;
+extern uint16_t _isNationalSelector;
+extern uint16_t _numForeignMarketPlayers2;
+extern MarketPlayer _careerForeignMarketPlayers[];
+extern uint8_t _nationalTeams[];
+extern uint16_t _numNationalTeams;
+extern int DataJson_LoadTeamFileForCountry(int country, unsigned char *dest, int maxTeams);
+extern void RncDecompressV1(uint8_t *src,uint8_t *dst);
+extern void RncDecompressV2(uint8_t *src,uint8_t *dst);
+
+static uint8_t v3_player_rating(const PlayerFile *p)
+{
+    /* Compare players with the same rules irrespective of their country.
+       The attributes are SWOS nibbles, historically from 0 to 7. */
+    unsigned x=(uint8_t)p->passing & 15u;
+    unsigned a=(uint8_t)p->velocityHeading;
+    unsigned b=(uint8_t)p->tacklingControl;
+    unsigned c=(uint8_t)p->speedFinishing;
+    return (uint8_t)(x + (a>>4) + (a&15u) + (b>>4) + (b&15u) + (c>>4) + (c&15u));
+}
+static uint32_t v3_slot_key(uint16_t id,unsigned slot)
+{ return ((uint32_t)id<<4)|(slot&15u); }
+static unsigned v3_slot_hash(uint32_t key)
+{ return (unsigned)((key * 2654435761u) & (V3_REPLACEMENT_HASH-1u)); }
+static void v3_index_market(void)
+{
+    memset(v3_repl_used,0,sizeof(v3_repl_used));
+    unsigned n=_numForeignMarketPlayers2;
+    if(n>65535u)n=65535u;
+    for(unsigned i=0;i<n;i++) {
+        const MarketPlayer *p=&_careerForeignMarketPlayers[i];
+        if(p->playerOrdinal<0 || p->playerOrdinal>=16)continue;
+        const uint8_t *id=(const uint8_t *)&p->teamId;
+        uint32_t key=v3_slot_key(PACK_BE_U16(id[0],id[1]),(unsigned)p->playerOrdinal);
+        unsigned h=v3_slot_hash(key);
+        while(v3_repl_used[h] && v3_repl_keys[h]!=key)
+            h=(h+1u)&(V3_REPLACEMENT_HASH-1u);
+        v3_repl_used[h]=1;v3_repl_keys[h]=key;v3_repl_indices[h]=(uint16_t)i;
+    }
+}
+static const PlayerFile *v3_market_player(uint16_t id,unsigned slot)
+{
+    unsigned h=v3_slot_hash(v3_slot_key(id,slot));
+    while(v3_repl_used[h]) {
+        if(v3_repl_keys[h]==v3_slot_key(id,slot))
+            return &_careerForeignMarketPlayers[v3_repl_indices[h]].player;
+        h=(h+1u)&(V3_REPLACEMENT_HASH-1u);
+    }
+    return NULL;
+}
+static unsigned v3_load_club_country(unsigned country)
+{
+    /* Do not call LoadTeamFile here: it modifies the game's shared TEAM
+       buffer and can invalidate a national-team pointer during a match. */
+    const char *dj=getenv("SWOS_DATA_JSON");
+    if(!(dj && dj[0]=='0' && !dj[1])) {
+        int n=DataJson_LoadTeamFileForCountry((int)country,v3_file_raw,V3_COUNTRY_TEAMS);
+        if(n>0 && (unsigned)n<=V3_COUNTRY_TEAMS)return (unsigned)n;
+    }
+    char rel[32],path[1024];
+    snprintf(rel,sizeof rel,"data/team.%03u",country);
+    const char *resolved=swos_data_path(rel,path,(uint32_t)sizeof path);
+    FILE *f=fopen(resolved,"rb");
+    if(!f)return 0;
+    size_t len=fread(v3_file_packed,1,sizeof v3_file_packed,f);
+    int extra=fgetc(f),err=ferror(f);
+    fclose(f);
+    if(err||extra!=EOF||len<2)return 0;
+    if(len>=18 && v3_file_packed[0]=='R' && v3_file_packed[1]=='N' &&
+       v3_file_packed[2]=='C' &&
+       (v3_file_packed[3]==1||v3_file_packed[3]==2)) {
+        uint32_t size=BE_READ_U32(v3_file_packed+4);
+        uint32_t packed=BE_READ_U32(v3_file_packed+8);
+        if(size<2 || size>sizeof v3_file_raw || packed>len-18)return 0;
+        if(v3_file_packed[3]==1)RncDecompressV1(v3_file_packed,v3_file_raw);
+        else RncDecompressV2(v3_file_packed,v3_file_raw);
+        len=size;
+    } else memcpy(v3_file_raw,v3_file_packed,len);
+    unsigned n=BE_READ_U16(v3_file_raw);
+    return (n<=V3_COUNTRY_TEAMS && len==2u+n*sizeof(TeamFileEx))?n:0;
+}
+static int v3_valid_club_file(unsigned n)
+{
+    return n<80u && n!=9 && n!=52 && n!=53 && n!=54 &&
+        n!=56 && n!=57 && n!=58 && n!=59 && n!=61 && n!=63 &&
+        n!=70 && n!=72 && n!=74;
+}
+static void v3_refresh_pool(void)
+{
+    if(v3_building_pool || v3_pool_season==_currentSeasonShowing)return;
+    v3_building_pool=1;
+    v3_pool_count=0;
+    v3_index_market();
+    for(unsigned country=0;country<80u;country++) {
+        if(!v3_valid_club_file(country))continue;
+        unsigned count=v3_load_club_country(country);
+        for(unsigned t=0;t<count;t++) {
+            TeamFileEx *team=(TeamFileEx *)(v3_file_raw+2u+t*sizeof(TeamFileEx));
+            if(team->team.countryNumber>=80u)continue;
+            uint16_t id=PACK_BE_U16(team->team.countryNumber,team->team.teamOrdinal);
+            for(unsigned slot=0;slot<16u;slot++) {
+                PlayerFile *p=&team->players[slot];
+                const PlayerFile *market=v3_market_player(id,slot);
+                if(market)p=(PlayerFile *)market;
+                if(!p->playerName[0]||(uint8_t)p->playerName[0]==0xFFu)continue;
+                if(v3_pool_count==V3_POOL_LIMIT)break;
+                V3ClubCandidate *item=&v3_club_pool[v3_pool_count++];
+                item->player=*p;item->club=id;item->slot=(uint8_t)slot;
+                item->rating=v3_player_rating(p);
+            }
+        }
+    }
+    /* Keep the currently managed club's live roster in preference to the
+       static file version, so manual transfers are visible immediately. */
+    if(!_isNationalSelector) {
+        uint16_t current=PACK_BE_U16(_careerTeam.team.countryNumber,
+                                     _careerTeam.team.teamOrdinal);
+        if(current==_selTeamNumber)for(unsigned i=0;i<v3_pool_count;i++)
+            if(v3_club_pool[i].club==current && v3_club_pool[i].slot<16u) {
+                const PlayerFile *p=&_careerTeam.players[v3_club_pool[i].slot];
+                v3_club_pool[i].player=*p;
+                v3_club_pool[i].rating=v3_player_rating(p);
+            }
+    }
+    v3_pool_season=_currentSeasonShowing;
+    v3_building_pool=0;
+    FILE *log=fopen("swos_national_squads.log","a");
+    if(log){fprintf(log,"POOL season=%u players=%u\n",
+        (unsigned)v3_pool_season,v3_pool_count);fclose(log);}
+}
+static int v3_nationality_for(uint16_t teamId,uint8_t *nationality)
+{
+    const NationalTeamRecord *table=(const NationalTeamRecord *)_nationalTeams;
+    unsigned limit=_numNationalTeams;
+    if(limit>145u)limit=145u;
+    for(unsigned i=0;i<limit;i++)
+        if(PACK_BE_U16(table[i].countryNumber,table[i].teamOrdinal)==teamId) {
+            *nationality=table[i].nationalityCode;return 1;
+        }
+    return 0;
+}
+static int v3_ambiguous_nationality(uint8_t nationality,uint16_t teamId)
+{
+    const NationalTeamRecord *table=(const NationalTeamRecord *)_nationalTeams;
+    unsigned limit=_numNationalTeams;
+    if(limit>145u)limit=145u;
+    for(unsigned i=0;i<limit;i++) {
+        uint16_t other=PACK_BE_U16(table[i].countryNumber,table[i].teamOrdinal);
+        if(other!=teamId && table[i].nationalityCode==nationality &&
+           other>=0x5000u && other<0x5600u)return 1;
+    }
+    return 0;
+}
+/* Stable, local pseudo-random generation: never changes match RNG. */
+static uint32_t v3_fake_mix(uint32_t n)
+{
+    n^=n>>16;n*=0x7feb352du;n^=n>>15;
+    n*=0x846ca68bu;n^=n>>16;return n;
+}
+static unsigned v3_fake_roll(uint16_t teamId,unsigned slot,unsigned salt,unsigned max)
+{
+    uint32_t key=((uint32_t)teamId<<16)^((uint32_t)_currentSeasonShowing*0x9e3779b9u)
+       ^((uint32_t)(slot+1u)*0x85ebca6bu)^((uint32_t)(salt+1u)*0xc2b2ae35u);
+    return max?(unsigned)(v3_fake_mix(key)%max):0;
+}
+static unsigned v3_fake_clamp(int n,unsigned low,unsigned high)
+{ return (unsigned)(n<(int)low?(int)low:n>(int)high?(int)high:n); }
+/* Read the bundled, user-editable, country-specific CSV. It uses national
+   team IDs, not nationality bytes, which are ambiguous for four pairs. */
+static void v3_fake_name(uint16_t teamId,unsigned slot,char *dest,size_t cap,
+                         const char *teamName)
+{
+    char resolved[1024];
+    const char *path=swos_data_path("data/national_fake_names.csv",
+                                    resolved,(uint32_t)sizeof resolved);
+    FILE *f=fopen(path,"rb");
+    unsigned total=0;
+    char picked[64]={0};
+    if(f) {
+        char line[160];
+        while(fgets(line,sizeof line,f)) {
+            unsigned id=0;
+            char name[64]={0};
+            if(sscanf(line,"%x,%63[^\r\n]",&id,name)==2 &&
+               id==teamId && name[0] && strlen(name)<cap)total++;
+        }
+        if(total) {
+            /* A shared starting offset and consecutive slots ensure that
+               teammates have different names when the country CSV
+               supplies at least sixteen unique options. */
+            unsigned target=(v3_fake_roll(teamId,0,101u,total)+slot)%total;
+            unsigned index=0;
+            rewind(f);
+            while(fgets(line,sizeof line,f)) {
+                unsigned id=0;
+                char name[64]={0};
+                if(sscanf(line,"%x,%63[^\r\n]",&id,name)!=2 ||
+                   id!=teamId || !name[0] || strlen(name)>=cap)continue;
+                if(index++==target) {snprintf(picked,sizeof picked,"%s",name);break;}
+            }
+        }
+        fclose(f);
+    }
+    if(total)snprintf(dest,cap,"%s",picked);
+    else { /* Missing CSV: distinct temporary identity, never overflow. */
+        snprintf(dest,cap,"%.15s %02u",teamName,slot+1u);
+    }
+}
+/* Match the non-career display value mapping used by SWOS. */
+static unsigned v3_national_display_value(const PlayerFile *p)
+{
+    unsigned price=(uint8_t)p->price;
+    unsigned val=(price<128u)?_avgTeamValues[price]:1u;
+    if(val<1u)return 1u;
+    return val>80u?80u:val;
+}
+/* Tactical starting slots (0..10) are demands, not player identities.
+ * Retaining tactics is insufficient if we fill each physical player record
+ * according to the old squad ordering: a side can end up without any RB.
+ * 0 GK, 1 RB, 2 LB, 3 D, 4 RW, 5 LW, 6 M, 7 ATT. */
+static void v3_tactical_roles(unsigned tactic, uint8_t roles[11])
+{
+    /* Exact eleven visible SWOS squad rows, in shirt/formation order.
+     * 0 GK, 1 RB, 2 LB, 3 D, 4 RW, 5 LW, 6 M, 7 ATT.
+     * Do not infer these from the formation digits: e.g. 3-5-2
+     * has three central defenders and RW/M/M/M/LW, whereas 4-4-2
+     * has RB/D/D/LB and RW/M/M/LW.
+     * These entries are in displayed squad-row order, NOT the pitch
+     * order used by _positions352 in player_data.c. In the 3-5-2
+     * squad display, the display rows 4,5,6,7 require M,D,RW,M. */
+    static const uint8_t tacticRoles[12][11] = {
+        /* 4-4-2 */ {0,1,3,3,2,4,6,6,5,7,7},
+        /* 5-4-1 display order: visible 5=D, 6=LB, 7=RW,
+         * 9=M, 10=LW. SWOS rearranges physical slots 5..7 and 9..10
+         * when displaying this tactic (confirmed with San Marino). */
+        /* 5-4-1 */ {0,1,3,3,2,4,3,6,5,6,7},
+        /* 4-5-1: SWOS _positions451 displays physical slots 9 and 10
+         * in reverse order; supply LW to physical row 9 and M to row 10. */
+        /* 4-5-1 */ {0,1,3,3,2,4,6,6,5,6,7},
+        /* 5-3-2: SWOS displays physical rows 5,6,7 as 7,5,6. */
+        /* 5-3-2 */ {0,1,3,3,2,4,3,6,5,7,7},
+        /* 3-5-2 */ {0,3,3,6,3,4,6,6,5,7,7},
+        /* 4-3-3 */ {0,1,3,3,2,4,6,5,7,7,7},
+        /* 4-2-4 */ {0,1,3,3,2,6,6,7,7,7,7},
+        /* 3-4-3 */ {0,3,3,3,4,6,6,5,7,7,7},
+        /* SWEEP: same displayed position requirements as 4-4-2. */
+        /* SWEEP */ {0,1,3,3,2,4,6,6,5,7,7},
+        /* 5-2-3 */ {0,1,3,3,3,2,6,6,7,7,7},
+        /* ATTACK */ {0,3,3,3,4,6,6,5,7,7,7},
+        /* DEFEND */ {0,1,3,3,3,2,4,6,6,5,7}
+    };
+    memcpy(roles,tacticRoles[tactic<12u?tactic:0u],11u);
+}
+/* Score the role actually occupied on the tactics pitch, not the physical
+ * TEAM file slot. Position fidelity has priority; value is maximised
+ * across all eleven positions within those requirements. */
+static int v3_role_assignment_score(const PlayerFile *p, unsigned role,
+                                    unsigned starting)
+{
+    unsigned natural=((uint8_t)p->positionAndFace>>5)&7u;
+    unsigned value=v3_national_display_value(p);
+    if(!starting)return 0;
+    int compatibility;
+    if(natural==role)compatibility=30000;
+    else if(role==0u || natural==0u)compatibility=-30000;
+    else if((role>=1u&&role<=3u&&natural>=1u&&natural<=3u) ||
+            (role>=4u&&role<=6u&&natural>=4u&&natural<=6u))
+        compatibility=10000;
+    else compatibility=-10000;
+    return compatibility+(int)value*64 + (int)v3_player_rating(p);
+}
+/* Max-weight assignment of the 16 available physical players to the eleven
+ * tactical positions and five reserve rows. The Hungarian algorithm avoids
+ * greedy promotions which can steal the only RB for a central-defender slot.
+ * The last five rows carry no role bonus and take the remaining players. */
+static void v3_assign_national_lineup(uint16_t teamId, TeamFileEx *team)
+{
+    uint8_t roles[11];
+    v3_tactical_roles(team->team.tactics,roles);
+    int potentialsRow[17]={0}, potentialsCol[17]={0};
+    int chosenRow[17]={0}, predecessor[17]={0};
+    for(int i=1;i<=16;i++) {
+        chosenRow[0]=i;
+        int minCost[17],used[17]={0};
+        for(int j=0;j<=16;j++){minCost[j]=0x3fffffff;predecessor[j]=0;}
+        int current=0;
+        do {
+            used[current]=1;
+            int row=chosenRow[current],delta=0x3fffffff,next=0;
+            for(int col=1;col<=16;col++)if(!used[col]) {
+                int score=v3_role_assignment_score(&team->players[col-1],
+                              row<=11?roles[row-1]:0u,row<=11);
+                int cost=-score-potentialsRow[row]-potentialsCol[col];
+                if(cost<minCost[col]){minCost[col]=cost;predecessor[col]=current;}
+                if(minCost[col]<delta){delta=minCost[col];next=col;}
+            }
+            for(int col=0;col<=16;col++) {
+                if(used[col]){
+                    potentialsRow[chosenRow[col]]+=delta;
+                    potentialsCol[col]-=delta;
+                } else minCost[col]-=delta;
+            }
+            current=next;
+        } while(chosenRow[current]);
+        do {
+            int old=predecessor[current];
+            chosenRow[current]=chosenRow[old];
+            current=old;
+        } while(current);
+    }
+    uint8_t result[16]={0};
+    for(int col=1;col<=16;col++)if(chosenRow[col])
+        result[chosenRow[col]-1]=(uint8_t)(col-1);
+    /* Materialise the lineup in physical player-record order as well.
+     * Several SWOS paths rebuild playerNumbers from the physical TEAM file
+     * after the national squad is generated. Merely changing playerNumbers
+     * therefore loses the assignment (e.g. England's 3-5-2). By putting the
+     * chosen starting eleven in records 0..10, both identity playerNumbers
+     * and any later reset still produce the same tactical positions.
+     * All 16 players are moved together, including their attributes. */
+    PlayerFile ordered[16];
+    for(unsigned row=0;row<16u;row++) {
+        ordered[row]=team->players[result[row]];
+        ordered[row].shirtNumber=(int8_t)(row+1u);
+    }
+    memcpy(team->players,ordered,sizeof ordered);
+    for(unsigned row=0;row<16u;row++)
+        team->team.playerNumbers[row]=(uint8_t)row;
+    FILE *log=fopen("swos_national_squads.log","a");
+    if(log) {
+        fprintf(log,"LINEUP_ASSIGN season=%u team=%04X tactic=%u",
+                (unsigned)_currentSeasonShowing,(unsigned)teamId,
+                (unsigned)team->team.tactics);
+        for(unsigned row=0;row<11u;row++) {
+            PlayerFile *p=&team->players[row];
+            fprintf(log," %u:%u/%u/%u",row+1u,(unsigned)roles[row],
+                (unsigned)(((uint8_t)p->positionAndFace>>5)&7u),
+                v3_national_display_value(p));
+        }
+        fputc('\n',log);fclose(log);
+    }
+}
+static void v3_build_ai_national_team(uint16_t teamId,TeamFileEx *team)
+{
+    if(!team || _currentSeasonShowing==0xFFFFu ||
+       teamId<0x5000u || teamId>=0x5600u ||
+       (_isNationalSelector && teamId==_selTeamNumber) || v3_building_pool)return;
+    uint8_t nationality;
+    if(!v3_nationality_for(teamId,&nationality))return;
+    /* Avoid rebuilding a cached playing squad on every GetTeamPointer call.
+       File-buffer addresses are reused, so both season and team ID are keys. */
+    unsigned stampSlot=((uintptr_t)team>>3)&127u;
+    V3SquadStamp *stamp=&v3_squad_stamps[stampSlot];
+    if(stamp->address==team && stamp->team==teamId &&
+       stamp->season==_currentSeasonShowing)return;
+    v3_refresh_pool();
+    /* A few legacy nations share one nationality byte.  Do not transfer
+       an unrelated nation's players into either squad.  Those teams
+       receive placeholders until a reliable per-player mapping exists. */
+    int ambiguous=v3_ambiguous_nationality(nationality,teamId);
+    /* Keep the existing 16-slot formation and tactic. A human national
+       team's 20-slot extension is not represented by TeamFileEx. */
+    PlayerFile templatePlayers[16];
+    memcpy(templatePlayers,team->players,sizeof templatePlayers);
+    /* Start from the formation's required positions, not whichever natural
+       positions happened to occupy the previous first eleven. The physical
+       TEAM slots may be in a different order from the visible lineup. */
+    uint8_t roleForSlot[16];
+    uint8_t tacticalRoles[11];
+    v3_tactical_roles(team->team.tactics,tacticalRoles);
+    for(unsigned i=0;i<16u;i++)
+        roleForSlot[i]=((uint8_t)templatePlayers[i].positionAndFace>>5)&7u;
+    uint8_t mapped[16]={0};
+    int validMap=1;
+    for(unsigned i=0;i<16u;i++) {
+        unsigned j=team->team.playerNumbers[i];
+        if(j>=16u||mapped[j]){validMap=0;break;}
+        mapped[j]=1;
+    }
+    if(!validMap)for(unsigned i=0;i<16u;i++)
+        team->team.playerNumbers[i]=(uint8_t)i;
+    for(unsigned i=0;i<11u;i++)
+        roleForSlot[team->team.playerNumbers[i]]=tacticalRoles[i];
+    unsigned strength[7]={0}, samples=0;
+    unsigned avgPrice=0;
+    for(unsigned i=0;i<16u;i++) {
+        const PlayerFile *p=&templatePlayers[i];
+        if((uint8_t)p->playerName[0]==0xFFu||!p->playerName[0])continue;
+        unsigned attrs[7]={(uint8_t)p->passing&15u,
+           ((uint8_t)p->velocityHeading>>4),((uint8_t)p->velocityHeading&15u),
+           ((uint8_t)p->tacklingControl>>4),((uint8_t)p->tacklingControl&15u),
+           ((uint8_t)p->speedFinishing>>4),((uint8_t)p->speedFinishing&15u)};
+        for(unsigned k=0;k<7;k++)strength[k]+=attrs[k]>7u?7u:attrs[k];
+        avgPrice+=(uint8_t)p->price;samples++;
+    }
+    if(!samples){for(unsigned k=0;k<7;k++)strength[k]=3u;samples=1;avgPrice=8;}
+    uint8_t selected[V3_POOL_LIMIT/8+1u];
+    memset(selected,0,sizeof selected);
+    unsigned real=0,fake=0;
+    for(unsigned slot=0;slot<16u;slot++) {
+        unsigned role=roleForSlot[slot];
+        int best=-1;unsigned bestRating=0;
+        for(unsigned i=0;i<v3_pool_count;i++) {
+            const V3ClubCandidate *c=&v3_club_pool[i];
+            if(ambiguous || (uint8_t)c->player.nationality!=nationality ||
+                (((unsigned)c->player.positionAndFace>>5)&7u)!=role ||
+                (selected[i>>3]&(1u<<(i&7u))))continue;
+            /* Rank primarily by the value visible in SWOS, not by a raw
+               sum of skills. That sum can put an expensive forward on the
+               bench while a lower-value forward starts. */
+            unsigned price=(uint8_t)c->player.price;
+            unsigned shown=(price<128u)?_avgTeamValues[price]:1u;
+            unsigned score=shown*64u + c->rating;
+            if(best<0 || score>bestRating) {best=(int)i;bestRating=score;}
+        }
+        if(best>=0) {
+            team->players[slot]=v3_club_pool[best].player;
+            selected[(unsigned)best>>3]|=(uint8_t)(1u<<((unsigned)best&7u));
+            real++;
+        } else {
+            PlayerFile *p=&team->players[slot];
+            memset(p,0,sizeof *p);
+            p->nationality=(int8_t)nationality;
+            p->positionAndFace=(uint8_t)(role<<5);
+            char nationName[sizeof(team->team.teamName)+1u];
+            unsigned j=0;
+            while(j<sizeof(team->team.teamName) && team->team.teamName[j] &&
+                  (uint8_t)team->team.teamName[j]!=0xFFu) {
+                nationName[j]=team->team.teamName[j];j++;
+            }
+            nationName[j]=0;
+            v3_fake_name(teamId,slot,p->playerName,sizeof(p->playerName),nationName);
+            unsigned generated[7];
+            for(unsigned k=0;k<7;k++) {
+                /* Small deviations from original 1996 squad attributes,
+                   clamped to the game's actual 0..7 skill range. */
+                int delta=(int)v3_fake_roll(teamId,slot,k,5u)-2;
+                generated[k]=v3_fake_clamp((int)(strength[k]/samples)+delta,0,7);
+            }
+            p->passing=(int8_t)generated[0];
+            p->velocityHeading=(int8_t)((generated[1]<<4)|generated[2]);
+            p->tacklingControl=(int8_t)((generated[3]<<4)|generated[4]);
+            p->speedFinishing=(int8_t)((generated[5]<<4)|generated[6]);
+            /* Keep prices in the source nation's approximate band. */
+            int price=(int)(avgPrice/samples)+(int)v3_fake_roll(teamId,slot,33u,11u)-5;
+            p->price=(int8_t)v3_fake_clamp(price,1,100);
+            fake++;
+        }
+        team->players[slot].positionAndFace &= 0xF8u;
+        team->players[slot].shirtNumber=templatePlayers[slot].shirtNumber;
+        team->players[slot].cardsInjuries=0;
+        memset(team->players[slot].goalStats,0,sizeof team->players[slot].goalStats);
+        team->players[slot].cachedMatchValue=0;
+    }
+    /* Optimise the complete eleven against actual tactical slot demands.
+       This keeps scarce full-backs/wingers in their roles while maximising
+       the displayed value within each available natural position. */
+    v3_assign_national_lineup(teamId,team);
+    team->team.playerValuesDirty=TEAM_VALUES_DIRTY;
+    stamp->address=team;
+    stamp->team=teamId;
+    stamp->season=_currentSeasonShowing;
+    FILE *log=fopen("swos_national_squads.log","a");
+    if(log){fprintf(log,"SQUAD season=%u team=%04X tactic=%u real=%u temporary=%u\n",
+        (unsigned)_currentSeasonShowing,(unsigned)teamId,
+        (unsigned)team->team.tactics,real,fake);fclose(log);}
+}
+
 __attribute__((used, externally_visible))
 TeamFileEx *GetTeamPointer(uint16_t teamId)
 {
@@ -176,13 +683,17 @@ TeamFileEx *GetTeamPointer(uint16_t teamId)
     uint16_t indexOut;
 
     /* Check cached teams (currentTeam, careerTeam, selTeamsPtr) */
-    if (findTeamInCache(teamId, &teamOut, &indexOut) == 0)
+    if (findTeamInCache(teamId, &teamOut, &indexOut) == 0) {
+        v3_build_ai_national_team(teamId, teamOut);
         return teamOut;
+    }
 
     /* Check TMD file (career team pool) */
     TeamFileEx *tmd = findTeamInTmdBuffer(teamId);
-    if (tmd)
+    if (tmd) {
+        v3_build_ai_national_team(teamId, tmd);
         return tmd;
+    }
 
     /* Load from team file and scan for matching team ID.
      * teamFileBuffer contains TeamFileEx-sized records (684 bytes each).
@@ -195,6 +706,7 @@ TeamFileEx *GetTeamPointer(uint16_t teamId)
 
     /* Apply foreign market player patches */
     Career_PatchTeamWithForeignMarketPlayers(ptr);
+    v3_build_ai_national_team(teamId,ptr);
     return ptr;
 }
 
@@ -802,7 +1314,9 @@ void AppendTeamsToSelectionFromTmdOrTeamFile(uint16_t *out, uint16_t *teamIds, u
 static void fillLeagueTeamSelectionFromFile(uint16_t extNumber, uint16_t leagueFilter,
                                              int16_t expectedCount)
 {
+    TEAMSEL_TRACE("LOAD_BEGIN ext=%u league=%u expected=%d", (unsigned)extNumber, (unsigned)leagueFilter, (int)expectedCount);
     LoadTeamFile(extNumber);
+    TEAMSEL_TRACE("LOAD_END ext=%u", (unsigned)extNumber);
 
     TeamFileEx *tfBase = (TeamFileEx *)(&_teamFileBuffer + 2);
     uint16_t tfCount = *(uint16_t *)&_teamFileBuffer;
@@ -814,7 +1328,26 @@ static void fillLeagueTeamSelectionFromFile(uint16_t extNumber, uint16_t leagueF
         if (tfBase[j].team.league == (uint8_t)leagueFilter)
             actualCount++;
     }
+    TEAMSEL_TRACE("COUNT ext=%u league=%u expected=%d actual=%u tfCount=%u", (unsigned)extNumber, (unsigned)leagueFilter, (int)expectedCount, (unsigned)actualCount, (unsigned)tfCount);
+    /* Algeria is a single-division 16-club competition. In some careers
+     * promoted/relegated team bookkeeping leaves clubs assigned a non-zero
+     * league even though all 16 clubs still exist in TEAM.042. Recover only
+     * this exact case; do not alter the source file or other competitions. */
+    const int algeriaRecover = extNumber == 42 && leagueFilter == 0 &&
+        expectedCount == 16 && tfCount == 16 && actualCount < 16;
+    if (algeriaRecover) {
+        for (j = 0; j < tfCount; j++) {
+            if (tfBase[j].team.league != 0)
+                TEAMSEL_TRACE("ALGERIA_RECOVER ordinal=%u country=%u originalLeague=%u", 
+                    (unsigned)tfBase[j].team.teamOrdinal,
+                    (unsigned)tfBase[j].team.countryNumber,
+                    (unsigned)tfBase[j].team.league);
+        }
+        TEAMSEL_TRACE("ALGERIA_RECOVER count=%u expected=16; selecting all 16", (unsigned)tfCount);
+        actualCount = 16;
+    }
     if ((int16_t)actualCount != expectedCount) {
+        TEAMSEL_TRACE("COUNT_MISMATCH_8885 ext=%u league=%u expected=%d actual=%u", (unsigned)extNumber, (unsigned)leagueFilter, (int)expectedCount, (unsigned)actualCount);
         /* [verify-fill] -O2 makes gdb's `expectedCount=...` value
          * unreliable; print the real values plus what fed them. */
         SWOS_DBG("[verify-fill] panic 0x8885: extNumber=%u leagueFilter=%u "
@@ -836,7 +1369,7 @@ static void fillLeagueTeamSelectionFromFile(uint16_t extNumber, uint16_t leagueF
     uint16_t *idOut = _diyCompetitionStart.matchData.league.leagueTeamIds;
     for (j = 0; j < tfCount; j++) {
         TeamFileEx *src = &tfBase[j];
-        if (src->team.league == (uint8_t)leagueFilter) {
+        if (algeriaRecover || src->team.league == (uint8_t)leagueFilter) {
             uint16_t teamId = PACK_BE_U16(src->team.countryNumber,
                                           src->team.teamOrdinal);
             BE_WRITE_U16(idOut, teamId);
@@ -914,6 +1447,32 @@ static void fillCupTeamSelectionFromFile(uint16_t extNumber, int16_t teamCount)
     uint16_t *idOut = _diyCompetitionStart.cupTeamIds;
 
     LoadTeamFile(extNumber);
+
+    /* Algeria's single-division cup asks for all 16 clubs.  In older
+     * career saves some clubs have been assigned a non-zero league, which
+     * makes region-weighted random selection unable to pick all 16 and
+     * traps the unbounded weighted_pick loop.  Select the complete set
+     * directly only for this exact 16-of-16 case.  Do not change team files. */
+    if (extNumber == 42 && teamCount == 16 && _careerLoadedFlag != 0) {
+        uint16_t tfCount = *(uint16_t *)&_teamFileBuffer;
+        if (tfCount == 16) {
+            TeamFileEx *tfBase = (TeamFileEx *)(&_teamFileBuffer + 2);
+            uint8_t *dst = (uint8_t *)(_selectedTeams + _numSelectedTeams);
+            TEAMSEL_TRACE("ALGERIA_CUP_RECOVER_BEGIN ext=42 required=16 available=%u", (unsigned)tfCount);
+            for (uint16_t j = 0; j < 16; j++) {
+                TeamFileEx *src = &tfBase[j];
+                uint16_t id = PACK_BE_U16(src->team.countryNumber, src->team.teamOrdinal);
+                BE_WRITE_U16(idOut, id);
+                idOut++;
+                TEAMSEL_TRACE("ALGERIA_CUP_RECOVER_TEAM index=%u ordinal=%u league=%u", (unsigned)j, (unsigned)src->team.teamOrdinal, (unsigned)src->team.league);
+                if (isTeamInCache(id) != 0)
+                    dst = appendTeamToSelection(dst, (const uint8_t *)src);
+            }
+            TEAMSEL_TRACE("ALGERIA_CUP_RECOVER_END selected=%u", (unsigned)_numSelectedTeams);
+            return;
+        }
+        TEAMSEL_TRACE("ALGERIA_CUP_RECOVER_NOT_APPLICABLE required=16 available=%u", (unsigned)tfCount);
+    }
 
     /* selDst stays uint8_t * here because tryAddRandomTeamByRegion_Cup
      * takes a uint8_t ** in/out parameter and reassigns it across calls. */
@@ -1141,6 +1700,7 @@ __attribute__((used, externally_visible))
 void Career_InitCompetitionTeamSelectionFromTableEntrySpec(uint8_t *spec, uint16_t idx)
 {
     uint8_t teamIdsOffset = spec[7];
+    TEAMSEL_TRACE("ENTER idx=%u spec=%p ext=%u offset=%u countRaw=%u selected=%u", (unsigned)idx, (void *)spec, (unsigned)spec[2], (unsigned)teamIdsOffset, (unsigned)spec[13 + (teamIdsOffset ? 0 : idx * 6)], (unsigned)_numSelectedTeams);
     if (teamIdsOffset != 0) {
         /* Team IDs embedded in spec at offset 7 + teamIdsOffset.
          * Every CompetitionCup*_2_N struct has a `char *text[2]` pair
@@ -1152,7 +1712,9 @@ void Career_InitCompetitionTeamSelectionFromTableEntrySpec(uint8_t *spec, uint16
         uint16_t idsOff = teamIdsOffset + 2u * (sizeof(char *) - sizeof(uint32_t));
         int16_t count = (int16_t)(int8_t)spec[13];  /* signed ext.w */
         uint16_t *teamIds = (uint16_t *)(spec + 7 + idsOff);
+        TEAMSEL_TRACE("EMBEDDED_BEGIN idx=%u count=%d offset=%u", (unsigned)idx, (int)count, (unsigned)idsOff);
         AppendTeamsToSelectionFromTmdOrTeamFile(_diyCompetitionStart.matchData.league.leagueTeamIds, teamIds, (uint16_t)count);
+        TEAMSEL_TRACE("EMBEDDED_END idx=%u selected=%u", (unsigned)idx, (unsigned)_numSelectedTeams);
     } else {
         /* Load by league from team file */
         uint16_t entryOff = idx * 6;
@@ -1168,8 +1730,11 @@ void Career_InitCompetitionTeamSelectionFromTableEntrySpec(uint8_t *spec, uint16
                 (unsigned)entryOff, (unsigned)spec[13 + entryOff],
                 (int)expectedCount);
         SWOS_DBG_FLUSH();
+        TEAMSEL_TRACE("FILE_BEGIN idx=%u ext=%u expected=%d", (unsigned)idx, (unsigned)extNumber, (int)expectedCount);
         fillLeagueTeamSelectionFromFile(extNumber, idx /* = league filter */, expectedCount);
+        TEAMSEL_TRACE("FILE_END idx=%u selected=%u", (unsigned)idx, (unsigned)_numSelectedTeams);
     }
+    TEAMSEL_TRACE("EXIT idx=%u", (unsigned)idx);
 }
 
 /* ================================================================

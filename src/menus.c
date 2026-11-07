@@ -10,6 +10,7 @@
 #include "swos_identity_runtime.h"
 #endif
 #include "menus.h"
+#include "career_plus_options.h"
 #include "career_season.h"
 #include <stdio.h>
 #include <string.h>  /* managed retirement-news name snapshots */
@@ -48,6 +49,10 @@
 #include <string.h>
 #include <ctype.h>
 #endif
+
+/* These variables back the OPTIONS menu's string tables directly. */
+uint16_t _careerImprovedAiOption = 1;
+uint16_t _careerThreeButtonOption = 0;
 
 /* ---- Constants ---- */
 #define GAME_TYPE_NO_GAME 0
@@ -2448,16 +2453,21 @@ void OptionsMenuBeforeDraw(void)
     _menuEntries[17].isInvisible = 1;
     _menuEntries[18].isInvisible = 1;
 #else
+    _menuEntries[19].isInvisible = 1;
+    _menuEntries[20].isInvisible = 1;
+    _menuEntries[21].isInvisible = 1;
+    _menuEntries[22].isInvisible = 1;
     _menuEntries[15].isInvisible = 1;
     _menuEntries[16].isInvisible = 1;
 #ifdef AGA
     _menuEntries[14].downEntry = 18;
-    _menuEntries[19].upEntry = 18;
+    _menuEntries[18].downEntry = 23;
+    _menuEntries[23].upEntry = 18;
 #else
     _menuEntries[17].isInvisible = 1;
     _menuEntries[18].isInvisible = 1;
-    _menuEntries[14].downEntry = 19;
-    _menuEntries[19].upEntry = 14;
+    _menuEntries[14].downEntry = 23;
+    _menuEntries[23].upEntry = 14;
 #endif
 #endif
 }
@@ -2523,6 +2533,37 @@ __attribute__((used, externally_visible))
 void ChangeAutoSaveHighlights(MenuEntry *entry)
 {
     _autoSaveHighlights ^= 1;
+    CallDrawMenuItem(entry);
+}
+
+/* Both switches are saved to SWOS.ini and apply to the next match input tick. */
+#ifdef SWOS_SDL_BUILD
+static void CareerPlus_SaveOptions(void)
+{
+    extern PlatformInitOptions *g_arcadeOpts;
+    extern const char *g_arcadeIniPath;
+    if (g_arcadeOpts) {
+        g_arcadeOpts->improved_ai = (_careerImprovedAiOption != 0);
+        g_arcadeOpts->three_button = (_careerThreeButtonOption != 0);
+        if (g_arcadeIniPath)
+            Settings_Save(g_arcadeOpts, g_arcadeIniPath);
+    }
+}
+#endif
+void ChangeCareerImprovedAI(MenuEntry *entry)
+{
+#ifdef SWOS_SDL_BUILD
+    _careerImprovedAiOption ^= 1;
+    CareerPlus_SaveOptions();
+#endif
+    CallDrawMenuItem(entry);
+}
+void ChangeCareerThreeButton(MenuEntry *entry)
+{
+#ifdef SWOS_SDL_BUILD
+    _careerThreeButtonOption ^= 1;
+    CareerPlus_SaveOptions();
+#endif
     CallDrawMenuItem(entry);
 }
 
@@ -4082,6 +4123,7 @@ static struct {
 static unsigned s_retirementNewsCount;
 static unsigned s_retirementNewsSeason;
 static unsigned s_retirementNewsPage;
+static uint8_t s_retirementNewsIsNational;
 char _retirementNewsHeading[64] = "PLAYER RETIREMENTS";
 char _retirementNewsRows[10][64];
 char _retirementNewsAction[16] = "CONTINUE";
@@ -4093,6 +4135,7 @@ void SWOS_RetirementNewsClear(unsigned season)
     s_retirementNewsCount = 0;
     s_retirementNewsPage = 0;
     s_retirementNewsSeason = season;
+    s_retirementNewsIsNational = 0;
 }
 
 void SWOS_RetirementNewsRecord(const PlayerFile *player, unsigned age)
@@ -4108,21 +4151,39 @@ void SWOS_RetirementNewsRecord(const PlayerFile *player, unsigned age)
     s_retirementNews[i].position = (player->positionAndFace >> 5) & 7u;
 }
 
+/* Called after the season's retirements are known and before the normal
+ * acknowledgement screen. The original player snapshot comes from the
+ * national team's pre-transition roster; no generated replacements are shown. */
+void SWOS_NationalRetirementNewsRecord(const PlayerFile *player, unsigned age)
+{
+    if (!player) return;
+    s_retirementNewsIsNational = 1;
+    SWOS_RetirementNewsRecord(player, age);
+}
+
 static void SWOS_RetirementNewsPopulate(void)
 {
     static const char *positions[8] = {"GK", "RB", "LB", "D", "RW", "LW", "M", "A"};
     unsigned start = s_retirementNewsPage * SWOS_RETIREMENT_NEWS_PAGE;
     snprintf(_retirementNewsHeading, sizeof(_retirementNewsHeading),
-             "PLAYER RETIREMENTS - SEASON %u", s_retirementNewsSeason);
+             s_retirementNewsIsNational ?
+                 "NATIONAL TEAM RETIREMENTS - %u" :
+                 "PLAYER RETIREMENTS - SEASON %u", s_retirementNewsSeason);
     for (unsigned i = 0; i < SWOS_RETIREMENT_NEWS_PAGE; ++i) {
         _retirementNewsRows[i][0] = 0;
         if (start + i < s_retirementNewsCount) {
             unsigned idx = start + i;
-            snprintf(_retirementNewsRows[i], sizeof(_retirementNewsRows[i]),
-                     "%-23.23s  AGE %2u  %s",
-                     s_retirementNews[idx].name,
-                     (unsigned)s_retirementNews[idx].age,
-                     positions[s_retirementNews[idx].position]);
+            if (s_retirementNewsIsNational)
+                snprintf(_retirementNewsRows[i], sizeof(_retirementNewsRows[i]),
+                         "%-23.23s  %s - REPLACE",
+                         s_retirementNews[idx].name,
+                         positions[s_retirementNews[idx].position]);
+            else
+                snprintf(_retirementNewsRows[i], sizeof(_retirementNewsRows[i]),
+                         "%-23.23s  AGE %2u  %s",
+                         s_retirementNews[idx].name,
+                         (unsigned)s_retirementNews[idx].age,
+                         positions[s_retirementNews[idx].position]);
         }
     }
     snprintf(_retirementNewsAction, sizeof(_retirementNewsAction), "%s",
@@ -4247,18 +4308,182 @@ void PastWinnersNext(void)
     DrawMenu();
 }
 
+/* V3 Phase 2C3: common read-only national-tournament draw viewer.
+ * All entrants are read from saved competition copies, never from templates.
+ * Opening the viewer has no match-simulation side effects. */
+extern CompetitionTournament _worldCup2Copy;
+extern CompetitionTournament _europeanChampionships2Copy;
+extern CompetitionTournament _copaAmericaCopy;
+extern CompetitionTournament _africanNationsCupCopy;
+extern CompetitionTournament _northAmericanCupCopy;
+extern CompetitionTournament _asianCupCopy;
+extern CompetitionCup _oceaniaCupCopy;
+extern uint8_t _v3InternationalDrawMenu[];
+extern void *_careerTeamFlagsByRegionTable[];
+extern uint8_t _someTeamFlags;
+static unsigned s_intPage, s_intCount;
+static uint16_t s_intTeams[32];
+static const char *s_intName;
+static int s_intWinnersRequested;
+char _v3IntHeading[64] = "INTERNATIONAL CUP TEAMS";
+char _v3IntRows[10][64];
+char _v3IntPrev[] = "PREV", _v3IntNext[] = "NEXT";
+char _v3IntWinners[] = "WINNERS", _v3IntExit[] = "EXIT";
+void V3IntDrawPopulate(void);
+void V3IntDrawPrev(void);
+void V3IntDrawNext(void);
+void V3IntDrawWinners(void);
+void V3IntDrawPopulate(void)
+{
+    unsigned start = s_intPage * 10u;
+    snprintf(_v3IntHeading, sizeof(_v3IntHeading), "%s %u/%u",
+             s_intName ? s_intName : "INTERNATIONAL TEAMS",
+             s_intPage + 1u, (s_intCount + 9u) / 10u);
+    for (unsigned i = 0; i < 10; ++i) {
+        _v3IntRows[i][0] = 0;
+        if (start + i >= s_intCount) continue;
+        uint16_t id = s_intTeams[start + i];
+        TeamFileEx *team = GetTeamPointer(id);
+        char safeName[18];
+        if (team) SWOS_CopyTeamName18(safeName, team->team.teamName);
+        else SWOS_CopyTeamName18(safeName, "UNKNOWN");
+        snprintf(_v3IntRows[i], sizeof(_v3IntRows[i]), "%02u  %s",
+                 start + i + 1u, safeName);
+    }
+}
+void V3IntDrawPrev(void)
+{
+    if (s_intPage) --s_intPage;
+    V3IntDrawPopulate();
+    DrawMenu();
+}
+void V3IntDrawNext(void)
+{
+    if ((s_intPage + 1u) * 10u < s_intCount) ++s_intPage;
+    V3IntDrawPopulate();
+    DrawMenu();
+}
+void V3IntDrawWinners(void)
+{
+    s_intWinnersRequested = 1;
+    SetExitMenuFlag();
+}
+/* Return NULL if the selected competition has no saved national draw. */
+static Competition *V3IntSavedCompetition(uint8_t id, unsigned *maxTeams,
+                                         const char **name)
+{
+    switch (id) {
+    case COMPID_worldCup2:
+        *maxTeams = 32; *name = "WORLD CUP FINALISTS";
+        return (Competition *)&_worldCup2Copy;
+    case COMPID_europeanChampionships2:
+        *maxTeams = 16; *name = "EURO CUP FINALISTS";
+        return (Competition *)&_europeanChampionships2Copy;
+    case COMPID_copaAmerica:
+        *maxTeams = 12; *name = "COPA AMERICA TEAMS";
+        return (Competition *)&_copaAmericaCopy;
+    case COMPID_africanNationsCup:
+        *maxTeams = 32; *name = "AFRICA CUP TEAMS";
+        return (Competition *)&_africanNationsCupCopy;
+    case COMPID_northAmericanCup:
+        *maxTeams = 12; *name = "N AMERICA CUP TEAMS";
+        return (Competition *)&_northAmericanCupCopy;
+    case COMPID_asianCup:
+        *maxTeams = 30; *name = "ASIAN CUP TEAMS";
+        return (Competition *)&_asianCupCopy;
+    case COMPID_oceaniaCup:
+        *maxTeams = 4; *name = "OCEANIA CUP TEAMS";
+        return (Competition *)&_oceaniaCupCopy;
+    default: return NULL;
+    }
+}
+static int V3IntDrawOpen(uint8_t id)
+{
+    unsigned maxTeams = 0;
+    const char *name = NULL;
+    Competition *saved = V3IntSavedCompetition(id, &maxTeams, &name);
+    if (!saved) return 0;
+    TeamId *seed = id == COMPID_oceaniaCup
+        ? ((CompetitionCup *)saved)->teamSeedList
+        : comp_team_seed_list(saved);
+    if (!seed) return 0;
+    unsigned count = 0;
+    for (unsigned i = 0; i < maxTeams; ++i) {
+        uint16_t team = TEAMID_PACK(seed[i]);
+        unsigned region = team >> 8;
+        if (region < 0x50u || region > 0x55u) break;
+        for (unsigned j = 0; j < count; ++j)
+            if (s_intTeams[j] == team) return 0;
+        s_intTeams[count++] = team;
+    }
+    /* No incomplete World Cup draw or one-team / garbage continental list. */
+    if (count < 2u || (id == COMPID_worldCup2 && count != 32u)) return 0;
+    s_intCount = count;
+    s_intPage = 0;
+    s_intName = name;
+    s_intWinnersRequested = 0;
+    ShowMenu(_v3InternationalDrawMenu);
+    if (s_intWinnersRequested) PastWinnersOpen();
+    return 1;
+}
+static int WCIsFinalsSeason(void)
+{
+    const uint8_t *flags = (const uint8_t *)_careerTeamFlagsByRegionTable[0];
+    return flags && (flags[_currentSeasonShowing % 20u] & 0x80u) != 0;
+}
+
+/* This scope flag lets View World show the World Cup at the top of the
+ * root competition chooser in every career season. Other selectors retain
+ * SWOS's original career-availability filtering. */
+uint16_t _swosViewWorldChooserActive = 0;
+
 /* ViewWorldMenu — view world competitions (SWOS2.s line 59996) */
 __attribute__((used, externally_visible))
 void ViewWorldMenu(void)
 {
+    _swosViewWorldChooserActive = 1;
     ChooseCompetitionMenu();
+    _swosViewWorldChooserActive = 0;
     if (_chooseTeamsResult == 0)
         return;
 
     s_worldHistoryCompId = comp_id((uint8_t *)_selectedContest);
     s_worldHistoryDivision = (uint8_t)_contestLeagueNumber;
+    /* The chooser may return the original WC template (4), while the
+     * actual finals copy and Past Winners records use ID 3. Keep history
+     * keyed to the played competition, not to its selection template. */
+    if (s_worldHistoryCompId == COMPID_worldCup)
+        s_worldHistoryCompId = COMPID_worldCup2;
+    if (s_worldHistoryCompId == COMPID_europeanChampionships)
+        s_worldHistoryCompId = COMPID_europeanChampionships2;
     /* League winners are stored as kind 0; all cup winners as kind 1. */
     s_worldHistoryKind = ((Competition *)_selectedContest)->type == 0 ? 0 : 1;
+    /* National tournaments are browseable in every career season. The
+     * original slot viewer is used only when the manager is actively playing
+     * that tournament; every other path uses saved lists or Past Winners. */
+    if (_gameType == GAME_TYPE_CAREER &&
+        (s_worldHistoryCompId == COMPID_worldCup2 ||
+         s_worldHistoryCompId == COMPID_europeanChampionships2 ||
+         (s_worldHistoryCompId >= COMPID_copaAmerica &&
+          s_worldHistoryCompId <= COMPID_oceaniaCup))) {
+        s_worldHistoryKind = 1;
+        s_worldHistoryDivision = 0;
+        if (_isNationalSelector && _currentCompetitionPtr &&
+            comp_id(_currentCompetitionPtr) == s_worldHistoryCompId &&
+            (s_worldHistoryCompId != COMPID_worldCup2 || (_someTeamFlags & 0x80u))) {
+            Career_ViewOrEditCompetitionSlot((uint8_t *)_selectedContest,
+                                             _contestLeagueNumber);
+            ContestMenuOnReturn();
+            return;
+        }
+        /* The WC draw is retained outside finals years, but should not
+         * masquerade as the current finals in another season. */
+        if (s_worldHistoryCompId != COMPID_worldCup2 || WCIsFinalsSeason()) {
+            if (V3IntDrawOpen(s_worldHistoryCompId)) return;
+        }
+        PastWinnersOpen();
+        return;
+    }
     Career_ViewOrEditCompetitionSlot((uint8_t *)_selectedContest, _contestLeagueNumber);
     ContestMenuOnReturn();
 }
@@ -6656,13 +6881,17 @@ void ChooseTeamsDialogWithNationality(uint16_t nationality, uint16_t showClub,
 
 extern uint8_t _aSelectTeamToMa[];
 
-/* SelectTeamToManage — show club team selection dialog for career mode.
- * Wraps ChooseTeamsDialog with showClub=1, showNational=0, showOrigCustom=0.
+/* SelectTeamToManage — V3 career start selector: clubs AND national sides.
+ * A selected national side is checked by ChooseTeamAndStartCareer before
+ * entering InitCareer; invalid and undersized teams cannot start careers.
  * Results available in globals: selectedTeamCountryNumber, selectedTeamPtr. */
 __attribute__((used, externally_visible))
 void SelectTeamToManage(void)
 {
-    ChooseTeamsDialog(1, 0, 0, _aSelectTeamToMa, (void *)0);
+    extern uint16_t SWOS_CareerStartFilterNationalTeams;
+    SWOS_CareerStartFilterNationalTeams = 1;
+    ChooseTeamsDialog(1, 1, 0, _aSelectTeamToMa, (void *)0);
+    SWOS_CareerStartFilterNationalTeams = 0;
 }
 
 
@@ -6746,6 +6975,10 @@ void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title)
     uint8_t nat = _nationalTeamNationality;
     uint16_t teamNum = teamEx->team.globalTeamNumber;
 
+    /* A search result must not be selected twice, even across separate
+     * invocations of the worldwide search or through the HOME/ABROAD picker.
+     * The existing lookup holds the original club ID and physical player
+     * slot for each selected international footballer. */
     /* Loop 1: Mark unavailable players with injury flag in cardsInjuries.
      * For each player matching the national team nationality, check if
      * they appear in careerUnavailablePlayerList (4 entries). If found,
@@ -6804,6 +7037,33 @@ void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title)
 
     if (selected < 0)
         return;
+
+    /* Guard every entry route, not just the worldwide search. Also reject
+     * equal visible names from distinct stale source mappings: the manager
+     * should never end up with identical entries on the national team sheet.
+     * An invalid/empty lookup row cannot block a candidate. */
+    for (unsigned existing = 0; existing < 20; ++existing) {
+        uint16_t fromClub = _careerUnavailablePlayerLookupTable[existing * 2u];
+        uint16_t fromSlot = _careerUnavailablePlayerLookupTable[existing * 2u + 1u];
+        if (fromClub == 0xFFFFu || fromSlot >= 16u)
+            continue;
+        if (fromClub == teamNumber && fromSlot == (uint16_t)selected) {
+            _careerAddIntlPlayerResult = 2; /* already in the squad */
+            return;
+        }
+        const PlayerFile *onTeam = (const PlayerFile *)
+            ((const uint8_t *)&_careerTeam + sizeof(TeamFile) +
+             existing * sizeof(PlayerFile));
+        const PlayerFile *candidate = &teamEx->players[selected];
+        if ((uint8_t)onTeam->playerName[0] != 0xFFu &&
+            (uint8_t)onTeam->playerName[0] != 0 &&
+            !strncmp((const char *)onTeam->playerName,
+                     (const char *)candidate->playerName,
+                     sizeof(candidate->playerName))) {
+            _careerAddIntlPlayerResult = 2;
+            return;
+        }
+    }
 
     _careerSquadScreenDidSelectPlayerFlag = 1;
     _careerAddIntlPlayerSelectedPlayerOrdinal = (uint16_t)selected;

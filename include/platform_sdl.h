@@ -117,6 +117,8 @@ typedef struct {
     int                    menu_recording;   /* with music_style 1: 1 = play sound_dos/menu.mp3, 0 = menu.xmi on the emulated chip */
     int                    music_style;      /* the menus' music: 0 = the Amiga's, 1 = the PC game's menu.xmi (dos_music.h) */
     int                    commentary;       /* the PC game's commentary: 0 off, 1 on (over the Amiga's sounds too), 2 auto = with sound_style 1 */
+    int                    improved_ai;      /* Career+: enabled by default */
+    int                    three_button;     /* Career+: disabled by default */
     int                    dos_gameplay;     /* 1 = DOS gameplay tweaks (framerate etc.). PC-only; reserved */
     int                    contest_own_ratings; /* 1 = a contested ball's dice rates each side by the man at the
                                               * ball; 0 (default) = the original's squad-slot lookup
@@ -130,7 +132,7 @@ typedef struct {
                                               * there; empty = a server on this machine. */
     int                    stick_deadzone;   /* [input] stick_deadzone: how far an analog stick must be
                                               * pushed, in percent of its travel, before it counts */
-    char                   key_bind[5][24];  /* [input] key_up/_down/_left/_right/_fire: the player's own
+    char                   key_bind[8][24];  /* [input] key_up/_down/_left/_right/_fire/_pass/_shoot/_high_shot: the player's own
                                               * keys, SDL scancode names, beside the built-in ones.
                                               * Empty = none (input_sdl.c) */
     int                    latch_presses;    /* [input] latch_presses: a fire press that came and went

@@ -46,6 +46,8 @@ typedef struct SearchPlayer {
 
 static SearchPlayer s_players[SEARCH_CAP];
 static int s_count, s_filtered[SEARCH_CAP], s_visible;
+/* Local call-up marks keep successfully added players out of subsequent results. */
+static uint8_t s_calledUp[SEARCH_CAP];
 static int s_filter, s_sort, s_page, s_action, s_selected;
 int16_t _nationalSearchTargetPlayerIndex = -1;
 extern uint8_t _nationalTeamNationality;
@@ -63,6 +65,10 @@ extern void SetExitMenuFlag(void);
 extern void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title);
 extern uint8_t _aAddInternation_0[];
 extern void ShowMenu(uint8_t *menu);
+extern uint16_t _careerNumPlayers;
+extern uint16_t _careerAddIntlPlayerResult;
+extern uint16_t _careerUnavailablePlayerLookupTable[];
+extern TeamFileEx _careerTeam;
 extern uint16_t _numForeignMarketPlayers2;
 extern MarketPlayer _careerForeignMarketPlayers[];
 
@@ -349,9 +355,29 @@ static int compar_player(const void*a,const void*b){
     else d=strcmp(x->name,y->name);
     return d?d:strcmp(x->name,y->name);
 }
+static int already_in_national_squad(const SearchPlayer *p)
+{
+    for (unsigned slot=0;slot<20;++slot) {
+        uint16_t club=_careerUnavailablePlayerLookupTable[slot*2u];
+        uint16_t idx=_careerUnavailablePlayerLookupTable[slot*2u+1u];
+        if (club==0xFFFFu || idx>=16u) continue;
+        if (club==p->team && idx==p->fileIndex) return 1;
+        const PlayerFile *inSquad=(const PlayerFile *)
+            ((const uint8_t *)&_careerTeam+sizeof(TeamFile)+slot*sizeof(PlayerFile));
+        if ((uint8_t)inSquad->playerName[0]!=0xFFu &&
+            (uint8_t)inSquad->playerName[0]!=0 &&
+            !strncmp((const char *)inSquad->playerName,p->name,sizeof(inSquad->playerName)))
+            return 1;
+    }
+    return 0;
+}
+
 static void build_list(void){
     s_visible=0;
-    for(int i=0;i<s_count;i++)if(!s_filter||s_players[i].position==s_filter)s_filtered[s_visible++]=i;
+    for(int i=0;i<s_count;i++)
+        if(!s_calledUp[i] && !already_in_national_squad(&s_players[i]) &&
+           (!s_filter||s_players[i].position==s_filter))
+            s_filtered[s_visible++]=i;
     qsort(s_filtered,s_visible,sizeof(s_filtered[0]),compar_player);
     if(s_page*SEARCH_ROWS>=s_visible)s_page=0;
     int total=(s_visible+SEARCH_ROWS-1)/SEARCH_ROWS;if(!total)total=1;
@@ -375,6 +401,7 @@ void NationalPlayerSearch(void){
     if (s_log) setvbuf(s_log, NULL, _IONBF, 0);
     search_log("SEARCH ENTER log=national_player_search.log");
     scan_world();
+    memset(s_calledUp, 0, sizeof(s_calledUp));
     search_log("SCAN RETURNED count=%d", s_count);
     s_filter=0;s_sort=0;s_page=0;
     /* Packed menu header stores the default selected entry as a 1-based
@@ -398,15 +425,39 @@ void NationalPlayerSearch(void){
         if(s_action==1){
             int n=s_page*SEARCH_ROWS+s_selected;
             if(n>=s_visible)continue;
-            SearchPlayer *p=&s_players[s_filtered[n]];
+            int playerIndex = s_filtered[n];
+            SearchPlayer *p=&s_players[playerIndex];
             uint8_t idBytes[2]={(uint8_t)(p->team>>8),(uint8_t)p->team};
             _nationalSearchTargetPlayerIndex=p->fileIndex;
             search_log("CALLUP ENTER club=%u slot=%u", (unsigned)p->team, (unsigned)p->fileIndex);
             Career_AddInternationalPlayerCommon(idBytes,_aAddInternation_0);
-            search_log("CALLUP RETURN");
+            search_log("CALLUP RETURN result=%u squad=%u/20",
+                       (unsigned)_careerAddIntlPlayerResult,
+                       (unsigned)_careerNumPlayers);
             _nationalSearchTargetPlayerIndex=-1;
-            /* Return after call-up, so the parent handles pending full-squad
-               replacement and maintains the existing national-team state. */
+            /* A successful addition stays in this selector. Do not offer the
+             * same player again, and retain the current filter, sort and page.
+             * The original caller still handles full squads and any pending
+             * player replacement or other non-success result. */
+            if (_careerAddIntlPlayerResult == 2) {
+                s_calledUp[playerIndex] = 1;
+                search_log("CALLUP DUPLICATE REJECTED club=%u slot=%u",
+                           (unsigned)p->team, (unsigned)p->fileIndex);
+                focusEntry = SEARCH_FIRST_ROW_ENTRY;
+                continue;
+            }
+            if (_careerAddIntlPlayerResult == 0) {
+                s_calledUp[playerIndex] = 1;
+                if (_careerNumPlayers < 20) {
+                    focusEntry = SEARCH_FIRST_ROW_ENTRY + s_selected;
+                    search_log("CALLUP CONTINUE squad=%u/20", (unsigned)_careerNumPlayers);
+                    continue;
+                }
+                search_log("CALLUP SQUAD FULL");
+            } else {
+                search_log("CALLUP RETURN TO SQUAD result=%u",
+                           (unsigned)_careerAddIntlPlayerResult);
+            }
             break;
         }
     }

@@ -34,6 +34,9 @@ enum {
     ControlsMenu_leftLabel,  ControlsMenu_left,
     ControlsMenu_rightLabel, ControlsMenu_right,
     ControlsMenu_fireLabel,  ControlsMenu_fire,
+    ControlsMenu_passLabel,  ControlsMenu_pass,
+    ControlsMenu_shootLabel, ControlsMenu_shoot,
+    ControlsMenu_highLabel, ControlsMenu_high,
     ControlsMenu_latchLabel, ControlsMenu_latch,
     ControlsMenu_note,
     ControlsMenu_clear,
@@ -41,7 +44,7 @@ enum {
     ControlsMenu_kNumEntries
 };
 
-enum { kKeys = 5 };     /* up, down, left, right, fire: input_sdl.c's order */
+enum { kKeys = 8 };     /* classic 5 plus pass, shoot, high shot */
 
 /* input_sdl.c */
 extern int         InputSDL_SetKeyBinding(int which, const char *name);
@@ -104,7 +107,10 @@ static void refresh(void)
             upper(s_rowText[i], sizeof s_rowText[i], name);
         else
             snprintf(s_rowText[i], sizeof s_rowText[i], "NOT SET");
-        entry_at(ControlsMenu_up + 2 * i)->fg = (uintptr_t)s_rowText[i];
+        const int indices[kKeys] = { ControlsMenu_up, ControlsMenu_down, ControlsMenu_left,
+            ControlsMenu_right, ControlsMenu_fire, ControlsMenu_pass, ControlsMenu_shoot,
+            ControlsMenu_high };
+        entry_at(indices[i])->fg = (uintptr_t)s_rowText[i];
     }
     entry_at(ControlsMenu_latch)->fg = (uintptr_t)(InputSDL_PressLatch() ? "ALWAYS COUNT" : "CAN BE MISSED");
     entry_at(ControlsMenu_note)->fg = (uintptr_t)s_note;
@@ -123,7 +129,10 @@ static int32_t built_in(SDL_Scancode sc)
  * again, leaves it as it was; BACKSPACE or DELETE takes the player's key away. */
 static void choose(int32_t which)
 {
-    MenuEntry   *e = entry_at(ControlsMenu_up + 2 * which);
+    const int indices[kKeys] = { ControlsMenu_up, ControlsMenu_down, ControlsMenu_left,
+        ControlsMenu_right, ControlsMenu_fire, ControlsMenu_pass, ControlsMenu_shoot,
+        ControlsMenu_high };
+    MenuEntry   *e = entry_at(indices[which]);
     SDL_Scancode sc;
     char         name[24];
     int32_t      i;
@@ -202,6 +211,9 @@ static void controlsMenu_down_OnSelect(void)  { choose(1); }
 static void controlsMenu_left_OnSelect(void)  { choose(2); }
 static void controlsMenu_right_OnSelect(void) { choose(3); }
 static void controlsMenu_fire_OnSelect(void)  { choose(4); }
+static void controlsMenu_pass_OnSelect(void)  { choose(5); }
+static void controlsMenu_shoot_OnSelect(void) { choose(6); }
+static void controlsMenu_high_OnSelect(void)  { choose(7); }
 
 /* SHORT PRESSES: [input] latch_presses. */
 static void controlsMenu_latch_OnSelect(void)
@@ -238,6 +250,9 @@ static const MenuSymbol k_handlers[] = {
     HANDLER(controlsMenu_left_OnSelect),
     HANDLER(controlsMenu_right_OnSelect),
     HANDLER(controlsMenu_fire_OnSelect),
+    HANDLER(controlsMenu_pass_OnSelect),
+    HANDLER(controlsMenu_shoot_OnSelect),
+    HANDLER(controlsMenu_high_OnSelect),
     HANDLER(controlsMenu_latch_OnSelect),
     HANDLER(controlsMenu_clear_OnSelect),
     HANDLER(controlsMenu_exit_OnSelect),

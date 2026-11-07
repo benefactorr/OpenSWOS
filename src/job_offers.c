@@ -64,6 +64,33 @@ static const uint16_t s_nationalClubPlayerCount[256] = {
     0, 0, 0, 0, 0, 0, 0, 0,
 };
 
+/* V3: Validate a national side before allowing it as the starting career team.
+ * Reuse the minimum pool requirement from national-team job offers, and
+ * require the same valid nationality/team-file mapping.  Starting with an
+ * unmapped side can otherwise load Albania players or crash later. */
+int SWOS_NationalCareerStartEligible(uint16_t teamId)
+{
+    uint8_t region = (uint8_t)(teamId >> 8);
+    uint8_t ordinal = (uint8_t)teamId;
+    if (region < 0x50 || region > 0x55)
+        return 0;
+
+    extern uint8_t _nationalTeams[];
+    const NationalTeamRecord *teams = (const NationalTeamRecord *)_nationalTeams;
+    for (unsigned i = 0; i < 145u; ++i) {
+        const NationalTeamRecord *rec = teams + i;
+        if (rec->countryNumber != region || rec->teamOrdinal != ordinal)
+            continue;
+        if (i == 79u) /* duplicate Surinam record */
+            continue;
+        if ((rec->nationalityCode == 0 || rec->teamFileId == 0) &&
+            !(region == 0x50 && ordinal == 0))
+            continue;
+        return s_nationalClubPlayerCount[rec->nationalityCode] >= MIN_NATIONAL_JOB_PLAYERS;
+    }
+    return 0;
+}
+
 /* ---- ASM externs ---- */
 static unsigned s_offerPage;  /* 0..3, five visible rows per page */
 extern uint16_t _numJobOffers;

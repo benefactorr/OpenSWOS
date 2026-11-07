@@ -56,6 +56,8 @@ extern void ChangeAutoReplays(void);
 extern void ChangeAutoSaveHighlights(void);
 extern void ChangeGameLength(void);
 extern void ChangeMenuMusic(void);
+extern void ChangeCareerImprovedAI(void);
+extern void ChangeCareerThreeButton(void);
 extern void ChangeGameplayStyle(void);
 extern void ShowControlsMenu(void);
 extern void ChangePitchStyle(void);
@@ -2790,8 +2792,20 @@ Menu_DIYCup _diyCupMenu = {
     MENU_CMD_END,
     MENU_MARK_END_MENU
 };
+/* Career+ OPTIONS switches: original Amiga menu table layout, PC-only rows. */
+extern uint16_t _careerImprovedAiOption, _careerThreeButtonOption;
+static char careerAiLabel[] = "IMPROVED AI";
+static char careerButtonsLabel[] = "THREE BUTTONS";
+static char careerAiOn[] = "ON";
+static char careerAiOriginal[] = "ORIGINAL";
+static char careerButtonsOff[] = "OFF";
+static char careerButtonsOn[] = "ON";
+static struct __attribute__((packed)) {
+    void *indexPtr; uint16_t base; void *entries[2];
+} careerAiTable = { &_careerImprovedAiOption, 0, { careerAiOriginal, careerAiOn } },
+  careerButtonsTable = { &_careerThreeButtonOption, 0, { careerButtonsOff, careerButtonsOn } };
 Menu_Options _optionsMenu = {
-    { OptionsMenuBeforeDraw, 0, 0, 19 },
+    { OptionsMenuBeforeDraw, 0, 0, 23 },
     MENU_MARK_BYTE_COORDS,
     {
         { 92, 0, 120, 15 },
@@ -2906,7 +2920,7 @@ Menu_Options _optionsMenu = {
     },
     {
         { -102, 148, -116, 11 },
-        { MENU_CMD_NAV, -1, -1, 14, 19 },
+        { MENU_CMD_NAV, -1, -1, 14, 20 },
         { MENU_CMD_COLORS, 0xD },
         { MENU_CMD_TEXT_PTR, 0x0, _aRedefineKeys },
         { MENU_CMD_ONSELECT_FIRE, ShowControlsMenu },
@@ -2920,15 +2934,44 @@ Menu_Options _optionsMenu = {
     },
     {
         { -102, 148, -116, 11 },
-        { MENU_CMD_NAV, -1, -1, 14, 19 },
+        { MENU_CMD_NAV, -1, -1, 14, 20 },
         { MENU_CMD_COLORS, 0xD },
         { MENU_CMD_STRING_TABLE, 0x0, _pitchStyleStrTable },
         { MENU_CMD_ONSELECT_FIRE, ChangePitchStyle },
         MENU_CMD_END
     },
+    /* Career+ configurable gameplay, below CONTROLS/PITCHES. */
+    {
+        { 10, 160, -116, 11 },
+        { MENU_CMD_COLORS, 0x9 },
+        { MENU_CMD_TEXT_PTR, 0x0, careerAiLabel },
+        MENU_CMD_END
+    },
+    {
+        { -102, 160, -116, 11 },
+        { MENU_CMD_NAV, -1, -1, 16, 22 },
+        { MENU_CMD_COLORS, 0xD },
+        { MENU_CMD_STRING_TABLE, 0x0, &careerAiTable },
+        { MENU_CMD_ONSELECT_FIRE, ChangeCareerImprovedAI },
+        MENU_CMD_END
+    },
+    {
+        { 10, 172, -116, 11 },
+        { MENU_CMD_COLORS, 0x9 },
+        { MENU_CMD_TEXT_PTR, 0x0, careerButtonsLabel },
+        MENU_CMD_END
+    },
+    {
+        { -102, 172, -116, 11 },
+        { MENU_CMD_NAV, -1, -1, 20, 23 },
+        { MENU_CMD_COLORS, 0xD },
+        { MENU_CMD_STRING_TABLE, 0x0, &careerButtonsTable },
+        { MENU_CMD_ONSELECT_FIRE, ChangeCareerThreeButton },
+        MENU_CMD_END
+    },
     { MENU_MARK_START_MENU, 0, 0 },
     { 102, -71, 100, 15 },
-    { MENU_CMD_NAV, -1, -1, 16, -1 },
+    { MENU_CMD_NAV, -1, -1, 22, -1 },
     { MENU_CMD_COLORS, 0xC },
     { MENU_CMD_TEXT_PTR, 0x0, _aExit },
     { MENU_CMD_INPUT_FUNC, 0x30, ExitOptions },
@@ -5034,6 +5077,67 @@ extern char _pastWinnerPrevLabel[];
 extern char _pastWinnerNextLabel[];
 extern char _pastWinnerExitLabel[];
 extern char _pastWinnersLabel[];
+
+/* V3 Phase 2C3: one read-only viewer for all national cup draws, with
+ * a dedicated WINNERS action. Four buttons require a four-entry menu type. */
+extern void V3IntDrawPopulate(void);
+extern void V3IntDrawPrev(void);
+extern void V3IntDrawNext(void);
+extern void V3IntDrawWinners(void);
+extern char _v3IntHeading[];
+extern char _v3IntRows[10][64];
+extern char _v3IntPrev[], _v3IntNext[], _v3IntWinners[], _v3IntExit[];
+#pragma pack(push, 1)
+typedef struct V3InternationalDrawMenu {
+    MenuHeader hdr;
+    MenuMark mark;
+    MenuEntry_Byte_Colors_TextPtr heading;
+    MenuEntry_Byte_Colors_TextPtr rows[10];
+    MenuEntry_Byte_Nav_Colors_TextPtr_OnSelect prev, next, winners, exit;
+    MenuMark end;
+} V3InternationalDrawMenu;
+#pragma pack(pop)
+V3InternationalDrawMenu _v3InternationalDrawMenu = {
+    { V3IntDrawPopulate, 0, 0, 11 },
+    MENU_MARK_BYTE_COORDS,
+    { { 22, 3, -44, 13 }, { MENU_CMD_COLORS, 0x17 },
+      { MENU_CMD_TEXT_PTR, 0, _v3IntHeading }, MENU_CMD_END },
+    {
+    { { 25, 22, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
+      { MENU_CMD_TEXT_PTR, 0x8000, _v3IntRows[0] }, MENU_CMD_END },
+    { { 25, 33, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
+      { MENU_CMD_TEXT_PTR, 0x8000, _v3IntRows[1] }, MENU_CMD_END },
+    { { 25, 44, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
+      { MENU_CMD_TEXT_PTR, 0x8000, _v3IntRows[2] }, MENU_CMD_END },
+    { { 25, 55, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
+      { MENU_CMD_TEXT_PTR, 0x8000, _v3IntRows[3] }, MENU_CMD_END },
+    { { 25, 66, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
+      { MENU_CMD_TEXT_PTR, 0x8000, _v3IntRows[4] }, MENU_CMD_END },
+    { { 25, 77, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
+      { MENU_CMD_TEXT_PTR, 0x8000, _v3IntRows[5] }, MENU_CMD_END },
+    { { 25, 88, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
+      { MENU_CMD_TEXT_PTR, 0x8000, _v3IntRows[6] }, MENU_CMD_END },
+    { { 25, 99, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
+      { MENU_CMD_TEXT_PTR, 0x8000, _v3IntRows[7] }, MENU_CMD_END },
+    { { 25, 110, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
+      { MENU_CMD_TEXT_PTR, 0x8000, _v3IntRows[8] }, MENU_CMD_END },
+    { { 25, 121, -50, 10 }, { MENU_CMD_COLORS, 0x79 },
+      { MENU_CMD_TEXT_PTR, 0x8000, _v3IntRows[9] }, MENU_CMD_END },
+    },
+    { { 8, -33, 68, 13 }, { MENU_CMD_NAV, -1, 12, -1, 12 },
+      { MENU_CMD_COLORS, 0xE }, { MENU_CMD_TEXT_PTR, 0, _v3IntPrev },
+      { MENU_CMD_ONSELECT_FIRE, V3IntDrawPrev }, MENU_CMD_END },
+    { { 85, -33, 68, 13 }, { MENU_CMD_NAV, 11, 13, 11, 13 },
+      { MENU_CMD_COLORS, 0xE }, { MENU_CMD_TEXT_PTR, 0, _v3IntNext },
+      { MENU_CMD_ONSELECT_FIRE, V3IntDrawNext }, MENU_CMD_END },
+    { { 162, -33, 74, 13 }, { MENU_CMD_NAV, 12, 14, 12, 14 },
+      { MENU_CMD_COLORS, 0xE }, { MENU_CMD_TEXT_PTR, 0, _v3IntWinners },
+      { MENU_CMD_ONSELECT_FIRE, V3IntDrawWinners }, MENU_CMD_END },
+    { { 245, -33, 66, 13 }, { MENU_CMD_NAV, 13, -1, 13, -1 },
+      { MENU_CMD_COLORS, 0xC }, { MENU_CMD_TEXT_PTR, 0, _v3IntExit },
+      { MENU_CMD_ONSELECT_FIRE, SetExitMenuFlag }, MENU_CMD_END },
+    MENU_MARK_END_MENU
+};
 
 Menu_PastWinners _pastWinnersMenu = {
     { PastWinnersInit, 0, 0, 11 },
