@@ -1,4 +1,9 @@
 #
+
+## 🌍 V3.1: Macedonia and Bosnia!
+
+- **Fully playable leagues and national teams!** First leagues for Bosnia and Macedonia are fully reconstructed for 1996/97 season. Considering the mess with historical data, this is a major achievment!
+
 ## 🌍 V3: International Football Overhaul
 
 - **Start your career as a national team manager!** You can now manage a national team from the very beginning of your career.

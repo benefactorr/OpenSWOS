@@ -202,7 +202,7 @@ static int valid_country(int n){
      * TEAM.072 contains special/custom teams (including SENSIBLE FC),
      * not normal career clubs. Other excluded slots are likewise not
      * ordinary career-club data. Do not exclude TEAM.000 (Albania). */
-    return n>=0 && n<80 && n!=9 && n!=52 && n!=53 && n!=54 &&
+    return n>=0 && n<80 && n!=52 && n!=53 && n!=54 &&
            n!=56 && n!=57 && n!=58 && n!=59 && n!=61 && n!=63 &&
            n!=70 && n!=72 && n!=74;
 }

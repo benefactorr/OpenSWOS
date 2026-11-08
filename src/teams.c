@@ -19,6 +19,7 @@
 #include "career_status.h"
 #include "play_match_menu.h"
 #include "career_init.h"
+#include <string.h>
 #ifdef SWOS_SDL_BUILD
 #include <stdlib.h>            /* getenv — SWOS_DATA_JSON team-load wire-in */
 #endif
@@ -310,6 +311,62 @@ void byteswap_team_file_to_disk(void)
 }
 #endif
 
+/* Career+ Bosnia: TEAM.080 may come from original assets without a Bosnia
+ * record. Nationality 42 is registered as national side 50:0C, so
+ * supply a selectable TEAM record when missing. The V3 seasonal squad builder
+ * subsequently replaces the placeholder players with active BOS nationals.
+ * This is a runtime addition: do not overwrite the user's TEAM.080 on disk. */
+static void EnsureBosniaNationalTeamRecord(void)
+{
+    const uint16_t count = *(const uint16_t *)_teamFileBuffer;
+    if (!count || count > 93u) return;
+    TeamFileEx *teams = (TeamFileEx *)(_teamFileBuffer + 2);
+
+    /* A number of original/edited TEAM.080 files already contain slot 50:0C,
+     * but place it in an unusable league. The national-team choice screen only
+     * enumerates league zero, so fix this *even when the record exists*. */
+    for (uint16_t i = 0; i < count; ++i) {
+        if (teams[i].team.countryNumber == CN_EUROPE &&
+            teams[i].team.teamOrdinal == 0x0Cu) {
+            TeamFileEx *bos = &teams[i];
+            bos->team.league = 0;
+            memset(bos->team.teamName, 0, sizeof bos->team.teamName);
+            memcpy(bos->team.teamName, "BOSNIA", 6);
+            HLOG("BOSNIA_NT: repaired existing TEAM.080 index=%u league=0\n", (unsigned)i);
+            return;
+        }
+    }
+
+    if (count >= 93u) {
+        HLOG("BOSNIA_NT: cannot append, TEAM.080 already has 93 records\n");
+        return;
+    }
+
+    /* Use an existing European team solely as a valid layout template. */
+    uint16_t donor = 0;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (teams[i].team.countryNumber == CN_EUROPE) {
+            donor = i;
+            break;
+        }
+    }
+    TeamFileEx *bos = &teams[count];
+    *bos = teams[donor];
+    bos->team.countryNumber = CN_EUROPE;
+    bos->team.teamOrdinal = 0x0Cu;
+    bos->team.league = 0;  /* essential: national menu only lists league 0 */
+    memset(bos->team.teamName, 0, sizeof bos->team.teamName);
+    memcpy(bos->team.teamName, "BOSNIA", 6);
+    memset(bos->team.coachName, 0, sizeof bos->team.coachName);
+    bos->team.tactics = 0;
+    for (unsigned i = 0; i < 16u; ++i) {
+        bos->players[i].nationality = 42; /* Original SWOS player nationality: BOS */
+        memset(bos->players[i].playerName, 0, sizeof bos->players[i].playerName);
+    }
+    *(uint16_t *)_teamFileBuffer = (uint16_t)(count + 1u);
+    HLOG("BOSNIA_NT: appended new TEAM.080 record index=%u league=0\n", (unsigned)count);
+}
+
 __attribute__((used, externally_visible))
 int16_t LoadTeamFile(uint16_t extNumber)
 {
@@ -358,7 +415,10 @@ int16_t LoadTeamFile(uint16_t extNumber)
          * teamFileBuffer host-native, so it SKIPS the BE byteswap. */
         /* SWOS_DATA_JSON default-ON; SWOS_DATA_JSON=0 disables. */
         const char *djv = getenv("SWOS_DATA_JSON");
-        if (!(djv && djv[0] == '0' && djv[1] == '\0')) {
+        /* V4: Macedonia's historical roster is provided as TEAM.047.
+         * Prefer this explicit binary file to any older JSON country dataset,
+         * so editor changes always appear in a new career. */
+        if (ext8 != CN_MACEDONIA && ext8 != CN_BOSNIA && !(djv && djv[0] == '0' && djv[1] == '\0')) {
             extern int DataJson_LoadTeamFileForCountry(int, uint8_t *, int);
             /* teamFileBuffer is 0xFA0E bytes → (0xFA0E-2)/sizeof(TeamFileEx) ≈ 93 */
             if (DataJson_LoadTeamFileForCountry((int)ext8, _teamFileBuffer, 93) > 0)
@@ -398,6 +458,11 @@ int16_t LoadTeamFile(uint16_t extNumber)
             byteswap_loaded_team_file();
 #endif
         }
+
+        /* Bosnia can be missing from old TEAM.080 assets. Add it after
+         * endian conversion, before global numbering and menu enumeration. */
+        if (ext8 == CN_EUROPE)
+            EnsureBosniaNationalTeamRecord();
 
         /* Shared post-load processing (binary OR json source). */
         setLoadedTeamsGlobalNumbers();

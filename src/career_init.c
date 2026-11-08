@@ -781,7 +781,7 @@ static void SWOS_AIStressTest(void)
          * database has gaps at these country codes. Calling LoadTeamFile on a
          * missing entry invokes PanicHaltLoop; do NOT use fopen relative to
          * the process working directory because the assets can be JSON-backed. */
-        if (country == 9 || (country >= 52 && country <= 54) ||
+        if ((country >= 52 && country <= 54) ||
             country == 56 || country == 58 || country == 61 || country == 63) {
             SWOS_AI_LOG("[SWOS AI P2.5] skip known missing country=%u\n", (unsigned)country);
             continue;
@@ -1913,6 +1913,7 @@ void SWOS_IdentityClear(void)
     s_identity_next_id=1;s_identity_faults=0;
     memset(s_identity_club_sources,0,sizeof(s_identity_club_sources));
 }
+static void SWOS_IdentityApplyCsvOverrides(void);
 unsigned SWOS_IdentitySeed(void)
 {
     if(s_identity_records)return 1;
@@ -2313,7 +2314,7 @@ static int SWOS_AI_P3MissingCountry(unsigned c)
     /* TEAM.072 contains custom/joke preset teams, not career clubs.
      * TEAM.080--085 are national-team continents and are excluded by
      * the collector's country <= 79 loop bound. Keep both outside AI swaps. */
-    return c == 9 || (c >= 52 && c <= 54) || c == 56 ||
+    return (c >= 52 && c <= 54) || c == 56 ||
            c == 58 || c == 61 || c == 63 || c == 74 ||
            c == 57 || c == 59 || c == 70 || c == 72;
 }
@@ -2416,6 +2417,49 @@ static int SWOS_AI_P3ReadCountry(unsigned country, uint8_t *buf, size_t cap,
     *(uint16_t *)buf = (uint16_t)count;
     *outCount = (uint16_t)count;
     return 1;
+}
+
+/* At the start of a NEW career, apply the user-editable ages CSV to the
+ * canonical identity registry. Previously swos_identity_seed.h held older
+ * compiled ages and took precedence over the CSV in the squad renderer,
+ * transfer lists and retirement system. Existing saved careers deliberately
+ * keep their persisted identity ages and never call this function. */
+static void SWOS_IdentityApplyCsvOverrides(void)
+{
+    extern int SWOS_AgesLookupExact(const char *name, unsigned *age);
+    if (!s_identity_records) return;
+    size_t cap = 2u + 93u * sizeof(TeamFileEx);
+    uint8_t *snapshot = (uint8_t *)malloc(cap);
+    if (!snapshot) return;
+    unsigned updated = 0, matched = 0, examined = 0;
+    for (unsigned country = 0; country < 80u; ++country) {
+        uint16_t count = 0;
+        if (!SWOS_AI_P3ReadCountry(country, snapshot, cap, &count)) continue;
+        const TeamFileEx *teams = (const TeamFileEx *)(snapshot + 2);
+        for (unsigned record = 0; record < count; ++record) {
+            for (unsigned slot = 0; slot < 16u; ++slot) {
+                uint32_t key = (country << 12) | (record << 4) | slot;
+                int index = SWOS_IdentityFind(key);
+                if (index < 0) continue;
+                ++examined;
+                const char *name = (const char *)teams[record].players[slot].playerName;
+                unsigned csvAge = 0;
+                if (!SWOS_AgesLookupExact(name, &csvAge)) continue;
+                ++matched;
+                if (s_identity_records[index].age != csvAge) {
+                    unsigned oldAge = s_identity_records[index].age;
+                    s_identity_records[index].age = (uint8_t)csvAge;
+                    ++updated;
+                    swos_age_log("IDENTITY_CSV_AGE_OVERRIDE",
+                        "file=%u record=%u slot=%u name=%.22s old=%u new=%u",
+                        country, record, slot, name, oldAge, csvAge);
+                }
+            }
+        }
+    }
+    free(snapshot);
+    swos_age_log("IDENTITY_CSV_AGE_SYNC",
+        "examined=%u matched=%u updated=%u", examined, matched, updated);
 }
 
 /* Resolve one club on demand before its first manual transfer.
@@ -3477,6 +3521,7 @@ void InitCareer(uint16_t teamNo)
     SWOS_IdentityClear();
     SWOS_AI_IdentityJournalClear();
     SWOS_IdentitySeed();
+    SWOS_IdentityApplyCsvOverrides();
     /* The cooldown belongs to this career session, not the previous one. */
     SWOS_AI_P3ResetHistory();
     _worldCupHostTeam = 20994;

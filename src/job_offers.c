@@ -31,11 +31,11 @@
 #define MIN_NATIONAL_JOB_PLAYERS 30u
 static const uint16_t s_nationalClubPlayerCount[256] = {
     271, 128, 235, 282, 265, 187, 270, 213,
-    1243, 222, 187, 187, 636, 612, 332, 328,
+    1243, 478, 187, 187, 636, 612, 332, 328,
     210, 228, 751, 159, 196, 210, 215, 575,
     250, 353, 489, 273, 403, 430, 191, 652,
     279, 311, 328, 331, 406, 333, 299, 217,
-    648, 4, 57, 3, 12, 204, 296, 16,
+    648, 4, 57, 3, 12, 204, 296, 221, /* 47 Macedonia: TEAM.047 */
     0, 1, 2, 0, 737, 0, 4, 0,
     565, 3, 257, 0, 1, 2, 3, 7,
     11, 1, 2, 0, 754, 205, 618, 260,
@@ -1481,6 +1481,10 @@ searchNational:
                     idx = 144; /* Yugoslavia: 50:30, historical missing entry */
                 else if ((rnd & 15u) == 1u)
                     idx = 70;  /* Canada: 53:01 (83:1 decimal) */
+                else if ((rnd & 15u) == 2u)
+                    idx = 67;  /* Macedonia: 50:1C, nationality 47 */
+                else if ((rnd & 15u) == 3u)
+                    idx = 5;   /* Bosnia: 50:0C, nationality 9 */
                 NationalTeamRecord *rec = (NationalTeamRecord *)_nationalTeams + (uint32_t)idx;
                 if (rec->countryNumber < 0x50 || rec->countryNumber > 0x55)
                     continue;
@@ -1524,7 +1528,10 @@ searchNational:
                  * accept a lower-rated national side; keep the upper bound
                  * and all other national offer eligibility checks. */
                 if (skill > repHigh ||
-                    (skill < repLow && teamId != PACK_BE_U16(0x50, 0x30)))
+                    (skill < repLow &&
+                     teamId != PACK_BE_U16(0x50, 0x30) &&
+                     teamId != PACK_BE_U16(0x50, 0x1C) &&
+                     teamId != PACK_BE_U16(0x50, 0x0C)))
                     continue;
                 if (teamId == _selTeamNumber)
                     continue;

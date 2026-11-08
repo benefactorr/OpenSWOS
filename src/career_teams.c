@@ -260,38 +260,48 @@ static const PlayerFile *v3_market_player(uint16_t id,unsigned slot)
 }
 static unsigned v3_load_club_country(unsigned country)
 {
-    /* Do not call LoadTeamFile here: it modifies the game's shared TEAM
-       buffer and can invalidate a national-team pointer during a match. */
+    /* Read the edited SWOS TEAM files first for the V3 nationality pool.
+       The generic data_json corpus may be stale or omit players in the
+       original abroad squads (for example BOS internationals in Spain).
+       Always fall back to JSON if an actual TEAM file is absent/invalid. */
+    char rel[32],path[1024];
+    snprintf(rel,sizeof rel,"data/team.%03u",country);
+    const char *resolved=swos_data_path(rel,path,(uint32_t)sizeof path);
+    FILE *f=fopen(resolved,"rb");
+    if(f) {
+        size_t len=fread(v3_file_packed,1,sizeof v3_file_packed,f);
+        int extra=fgetc(f),err=ferror(f);
+        fclose(f);
+        if(!err && extra==EOF && len>=2) {
+            int valid=1;
+            if(len>=18 && v3_file_packed[0]=='R' && v3_file_packed[1]=='N' &&
+               v3_file_packed[2]=='C' &&
+               (v3_file_packed[3]==1||v3_file_packed[3]==2)) {
+                uint32_t size=BE_READ_U32(v3_file_packed+4);
+                uint32_t packed=BE_READ_U32(v3_file_packed+8);
+                if(size<2 || size>sizeof v3_file_raw || packed>len-18)valid=0;
+                else {
+                    if(v3_file_packed[3]==1)RncDecompressV1(v3_file_packed,v3_file_raw);
+                    else RncDecompressV2(v3_file_packed,v3_file_raw);
+                    len=size;
+                }
+            } else memcpy(v3_file_raw,v3_file_packed,len);
+            if(valid) {
+                unsigned n=BE_READ_U16(v3_file_raw);
+                if(n<=V3_COUNTRY_TEAMS && len==2u+n*sizeof(TeamFileEx))return n;
+            }
+        }
+    }
     const char *dj=getenv("SWOS_DATA_JSON");
     if(!(dj && dj[0]=='0' && !dj[1])) {
         int n=DataJson_LoadTeamFileForCountry((int)country,v3_file_raw,V3_COUNTRY_TEAMS);
         if(n>0 && (unsigned)n<=V3_COUNTRY_TEAMS)return (unsigned)n;
     }
-    char rel[32],path[1024];
-    snprintf(rel,sizeof rel,"data/team.%03u",country);
-    const char *resolved=swos_data_path(rel,path,(uint32_t)sizeof path);
-    FILE *f=fopen(resolved,"rb");
-    if(!f)return 0;
-    size_t len=fread(v3_file_packed,1,sizeof v3_file_packed,f);
-    int extra=fgetc(f),err=ferror(f);
-    fclose(f);
-    if(err||extra!=EOF||len<2)return 0;
-    if(len>=18 && v3_file_packed[0]=='R' && v3_file_packed[1]=='N' &&
-       v3_file_packed[2]=='C' &&
-       (v3_file_packed[3]==1||v3_file_packed[3]==2)) {
-        uint32_t size=BE_READ_U32(v3_file_packed+4);
-        uint32_t packed=BE_READ_U32(v3_file_packed+8);
-        if(size<2 || size>sizeof v3_file_raw || packed>len-18)return 0;
-        if(v3_file_packed[3]==1)RncDecompressV1(v3_file_packed,v3_file_raw);
-        else RncDecompressV2(v3_file_packed,v3_file_raw);
-        len=size;
-    } else memcpy(v3_file_raw,v3_file_packed,len);
-    unsigned n=BE_READ_U16(v3_file_raw);
-    return (n<=V3_COUNTRY_TEAMS && len==2u+n*sizeof(TeamFileEx))?n:0;
+    return 0;
 }
 static int v3_valid_club_file(unsigned n)
 {
-    return n<80u && n!=9 && n!=52 && n!=53 && n!=54 &&
+    return n<80u && n!=52 && n!=53 && n!=54 &&
         n!=56 && n!=57 && n!=58 && n!=59 && n!=61 && n!=63 &&
         n!=70 && n!=72 && n!=74;
 }
@@ -334,6 +344,35 @@ static void v3_refresh_pool(void)
     }
     v3_pool_season=_currentSeasonShowing;
     v3_building_pool=0;
+    /* Diagnose the BOS pool by club. This also tells us whether a player
+       such as Kodro has been loaded but lost the positional selection. */
+    {
+        FILE *bosLog=fopen("swos_bosnia_national_pool.log","a");
+        if(bosLog) {
+            unsigned domestic=0,abroad=0;
+            fprintf(bosLog,"SEASON %u BOS nationality=%u\n",
+                (unsigned)_currentSeasonShowing,42u);
+            for(unsigned i=0;i<v3_pool_count;i++) {
+                const V3ClubCandidate *c=&v3_club_pool[i];
+                if((uint8_t)c->player.nationality!=42u)continue;
+                char playerName[sizeof(c->player.playerName)+1u];
+                unsigned n=0;
+                while(n<sizeof(c->player.playerName) && c->player.playerName[n] &&
+                      (uint8_t)c->player.playerName[n]!=0xFFu) {
+                    playerName[n]=c->player.playerName[n];n++;
+                }
+                playerName[n]=0;
+                unsigned clubCountry=c->club>>8;
+                if(clubCountry==CN_BOSNIA)domestic++;else abroad++;
+                fprintf(bosLog,"BOS club=%04X country=%u slot=%u role=%u value=%u name=%s\n",
+                    (unsigned)c->club,clubCountry,(unsigned)c->slot,
+                    (unsigned)(((uint8_t)c->player.positionAndFace>>5)&7u),
+                    (unsigned)((uint8_t)c->player.price),playerName);
+            }
+            fprintf(bosLog,"TOTAL domestic=%u abroad=%u\n",domestic,abroad);
+            fclose(bosLog);
+        }
+    }
     FILE *log=fopen("swos_national_squads.log","a");
     if(log){fprintf(log,"POOL season=%u players=%u\n",
         (unsigned)v3_pool_season,v3_pool_count);fclose(log);}
@@ -345,7 +384,11 @@ static int v3_nationality_for(uint16_t teamId,uint8_t *nationality)
     if(limit>145u)limit=145u;
     for(unsigned i=0;i<limit;i++)
         if(PACK_BE_U16(table[i].countryNumber,table[i].teamOrdinal)==teamId) {
-            *nationality=table[i].nationalityCode;return 1;
+            /* Bosnia's domestic club file is TEAM.009, but original SWOS
+               players at home and abroad use nationality 42 (BOS).
+               Accept only real BOS 42, not the previous, incorrect 9. */
+            *nationality=(teamId==0x500Cu)?42u:table[i].nationalityCode;
+            return 1;
         }
     return 0;
 }

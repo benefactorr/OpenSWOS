@@ -1680,6 +1680,29 @@ int SWOS_AgesGet(size_t i, const char **name, unsigned *age)
     *age = s_squadAges[i].age;
     return 1;
 }
+/* Exact CSV lookup for the original-player identity registry. Keep the
+ * canonical name lookup in one place so new careers use the same CSV as
+ * the squad screen and market fallback. */
+int SWOS_AgesLookupExact(const char *rawName, unsigned *outAge)
+{
+    SquadAgeRecord key;
+    SquadAgeRecord *found;
+    size_t i = 0;
+    if (!rawName || !outAge) return 0;
+    memset(&key, 0, sizeof key);
+    while (i < sizeof key.name - 1u && i < 22u && rawName[i]) {
+        key.name[i] = (char)toupper((unsigned char)rawName[i]);
+        ++i;
+    }
+    while (i && key.name[i - 1] == ' ') key.name[--i] = 0;
+    if (!i) return 0;
+    SquadAgeLoad();
+    found = (SquadAgeRecord *)bsearch(&key, s_squadAges,
+                  s_squadAgeCount, sizeof *s_squadAges, SquadAgeCompare);
+    if (!found) return 0;
+    *outAge = found->age;
+    return 1;
+}
 /* Used by save loading and, later, by the seasonal-ageing mechanism.
  * Only explicit ages 15..60 are accepted. */
 int SWOS_AgesSet(const char *name, unsigned age)
@@ -1750,6 +1773,8 @@ static uint8_t SquadAgeForPlayer(const PlayerFile *pf)
     return found ? found->age : 25;
 }
 #else
+int SWOS_AgesLookupExact(const char *name, unsigned *age)
+{ (void)name; (void)age; return 0; }
 void SWOS_AgesAdvanceOneSeason(void) {}
 void SWOS_AgesResetCareer(void) {}
 void SWOS_AgesBeginRestore(void) {}
@@ -8029,21 +8054,15 @@ pastTeamLoad:
             d4 += 8;
 
             /* Get division/competition name string */
-            uint8_t strTableOff = compInfo[5];
-            if (strTableOff == 0) {
-                namePtr = (uint8_t *)_divStringTable[_currentDivisionIndex];
-            } else {
-                /* Embedded char *[] name table — 2 entries per
-                 * division (full name + abbreviation). Amiga stride
-                 * was divIdx * 8 (= 2 × 4-byte slots), reading the
-                 * second slot via base+4. On 64-bit each entry is 8
-                 * bytes, so use typed `char **` indexing with
-                 * `divIdx * 2 + 1` to get the abbreviation. Same fix
-                 * as in SelectTeamsFinalMenu (teams.c). */
-                int16_t off = (int8_t)strTableOff;
-                char **nameTbl = (char **)(compInfo + 5 + off);
-                namePtr = (uint8_t *)nameTbl[_currentDivisionIndex * 2 + 1];
-            }
+            /* Access the real name[] table. The old offset byte may be
+             * zero even when a data-driven competition has custom names,
+             * and its historic byte offset is not reliable across layouts. */
+            char **nameTbl = compInfo ? comp_name_table((Competition *)compInfo) : NULL;
+            namePtr = (nameTbl && _currentDivisionIndex >= 0 &&
+                       _currentDivisionIndex < 4 &&
+                       nameTbl[_currentDivisionIndex * 2 + 1])
+                      ? (uint8_t *)nameTbl[_currentDivisionIndex * 2 + 1]
+                      : (uint8_t *)_divStringTable[_currentDivisionIndex];
 
             a5->fg = (uintptr_t)namePtr;
             a5->isInvisible = 0;

@@ -823,6 +823,23 @@ CompetitionLeague _slovakianLeague = {
     0,
     {  }
 };
+/* V4: 14 clubs, one 26-round division, no promotion or relegation links.
+ * competition ID 200 is reserved for Macedonia; cup ID 201. */
+/* Bosnia 1996/97: 16 clubs, 30 league matches, one division. */
+CompetitionLeague _bosnianLeague = {
+    { { -54, 0, 9, 56, 40, 0, 0, 0, 0 }, 1, 2, 3, 53 },
+    { { 16, 0, 0, 0, 0, 0 } },
+    0,
+    { 0 }
+};
+
+CompetitionLeague _macedonianLeague = {
+    { { -56, 0, 47, 56, 40, 0, 0, 0, 0 }, 1, 2, 3, 53 },
+    { { 14, 0, 0, 0, 0, 0 } },
+    0,
+    { 0 }
+};
+
 CompetitionLeague _slovenianLeague = {
     { { 77, 0, 34, 56, 40, 0, 0, 0, 0 }, 1, 2, 2, 53 },
     { { 16, 0, 0, 0, 0, 0 } },
@@ -865,11 +882,19 @@ CompetitionLeague _welshLeague = {
  * four-leg schedule, which was intended for the ten-club league.
  * Direct promotion/relegation: two clubs per division boundary.
  * This changes the competition template, NOT existing career saves. */
+/* Yugoslav division labels: long menu name followed by short name.
+ * Keep these local so no changes to the global string tables are needed. */
+static char _yugoslavDivision1ALong[] = "1A LEAGUE";
+static char _yugoslavDivision1AShort[] = "1A";
+static char _yugoslavDivision1BLong[] = "1B LEAGUE";
+static char _yugoslavDivision1BShort[] = "1B";
+
 CompetitionLeague _yugoslavianLeague = {
-    { { 85, 0, 41, 64, 40, 0, 0, 0, 0 }, 2, 2, 3, 53 },
+    { { 85, 0, 41, 64, 40, 0, 0, 0, 0 }, 2, 3, 3, 53 },
     { { 12, 0, 0, 2, 0, 0 }, { 12, 2, 0, 0, 0, 0 } },
     0,
-    {  }
+    { _yugoslavDivision1ALong, _yugoslavDivision1AShort,
+      _yugoslavDivision1BLong, _yugoslavDivision1BShort }
 };
 
 /* Non-European 1-division leagues */
@@ -1341,6 +1366,25 @@ CompetitionCup _slovakianCup = {
     {  },
     { }
 };
+/* V4 Macedonia cup: first-stage eight-club knockout, 3 rounds.
+ * The SWOS knockout engine assumes a power-of-two participant count.
+ * Do not set this to 14: a 14-team cup needs a preliminary/byes system.
+ * Country prefix is provided by the regular competition name renderer. */
+/* Sixteen participants, four knockout rounds (no byes needed). */
+CompetitionCup _bosnianCup = {
+    { { -53, 1, 9, 120, -120, 0, 0, 0, 0 }, 0, 16, 0, 53, 1 },
+    { 84, 84, 84, 20 },
+    { 0 },
+    { }
+};
+
+CompetitionCup _macedonianCup = {
+    { { -55, 1, 47, 120, -120, 0, 0, 0, 0 }, 0, 8, 0, 53, 1 },
+    { 84, 84, 20 },
+    { 0 },
+    { }
+};
+
 CompetitionCup _slovenianCup = {
     { { -108, 1, 34, 120, -120, 0, 0, 0, 0 }, 0, 16, 0, 53, 2 },
     { 84, 84, 84, 20 },
@@ -1717,7 +1761,7 @@ QualifyingGroup _worldTable = {
 
 QualifyingGroup _europeTable = {
     { (Competition *)252, (Competition *)&_europeanChampionships, (Competition *)&_euroCup, (Competition *)&_cupWinnersCup, (Competition *)&_uefaCup, (Competition *)-1 },
-    { 0, 1, 76, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 25, 16, 17, 19, 20, 21, 22, 23, 24, 26, 27, 28, 29, 18, 30, 31, 32, 33, 78, 34, 35, 36, 37, 38, 39, 40, 41, 255 }
+    { 0, 1, 76, 2, 9, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 25, 16, 17, 19, 20, 21, 22, 23, 47, 24, 26, 27, 28, 29, 18, 30, 31, 32, 33, 78, 34, 35, 36, 37, 38, 39, 40, 41, 255 }
 };
 
 QualifyingGroup _africaTable = {
@@ -1784,6 +1828,8 @@ Competition *_russiaTable[4] = { (Competition *)&_russianLeague, (Competition *)
 Competition *_sanMarinoTable[4] = { (Competition *)&_sanMarinoLeague, (Competition *)-2, (Competition *)&_sanMarinoCup, (Competition *)-1 };
 Competition *_scotlandTable[5] = { (Competition *)&_scottishLeague, (Competition *)-2, (Competition *)&_scottishCup, (Competition *)&_scottishLeagueCup, (Competition *)-1 };
 Competition *_slovakiaTable[4] = { (Competition *)&_slovakianLeague, (Competition *)-2, (Competition *)&_slovakianCup, (Competition *)-1 };
+Competition *_bosniaTable[4] = { (Competition *)&_bosnianLeague, (Competition *)-2, (Competition *)&_bosnianCup, (Competition *)-1 };
+Competition *_macedoniaTable[4] = { (Competition *)&_macedonianLeague, (Competition *)-2, (Competition *)&_macedonianCup, (Competition *)-1 };
 Competition *_sloveniaTable[4] = { (Competition *)&_slovenianLeague, (Competition *)-2, (Competition *)&_slovenianCup, (Competition *)-1 };
 Competition *_spainTable[4] = { (Competition *)&_spanishLeague, (Competition *)-2, (Competition *)&_spanishCup, (Competition *)-1 };
 Competition *_swedenTable[4] = { (Competition *)&_swedishLeague, (Competition *)-2, (Competition *)&_swedishCup, (Competition *)-1 };
@@ -1832,24 +1878,25 @@ uint32_t _nationalSelectorSeasonMaskB = 0x2EEEE;
  * Countries list and career remap
  * ====================================================================== */
 
-CountryNumbers _allCountriesList[66] = {
-    CN_BRAZIL, CN_ALBANIA, CN_AUSTRIA, CN_BELGIUM, CN_BELARUS, CN_BULGARIA,
-    CN_CROATIA, CN_CYPRUS, CN_CZECH_REPUBLIC, CN_DENMARK, CN_ENGLAND, CN_ESTONIA,
-    CN_FAROE_ISLANDS, CN_FINLAND, CN_FRANCE, CN_GERMANY, CN_GREECE, CN_HUNGARY,
-    CN_ICELAND, CN_REPUBLIC_IRELAND, CN_ISRAEL, CN_ITALY, CN_LATVIA, CN_LITHUANIA,
-    CN_LUXEMBOURG, CN_MALTA, CN_HOLLAND, CN_NORTHERN_IRELAND, CN_NORWAY, CN_POLAND,
-    CN_PORTUGAL, CN_ROMANIA, CN_RUSSIA, CN_SAN_MARINO, CN_SCOTLAND, CN_SLOVAKIA,
-    CN_SLOVENIA, CN_SPAIN, CN_SWEDEN, CN_SWITZERLAND, CN_TURKEY, CN_UKRAINE,
-    CN_WALES, CN_YUGOSLAVIA, CN_ALGERIA, CN_SOUTH_AFRICA, CN_GHANA, CN_ARGENTINA,
-    CN_BOLIVIA, CN_BRAZIL, CN_CHILE, CN_COLOMBIA, CN_ECUADOR, CN_PARAGUAY,
-    CN_PERU, CN_SURINAM, CN_URUGUAY, CN_VENEZUELA, CN_EL_SALVADOR, CN_MEXICO,
-    CN_USA, CN_JAPAN, CN_TAIWAN, CN_INDIA, CN_AUSTRALIA, CN_NEW_ZEALAND
+CountryNumbers _allCountriesList[68] = {
+    CN_BRAZIL, CN_ALBANIA, CN_AUSTRIA, CN_BELGIUM, CN_BOSNIA, CN_BELARUS,
+    CN_BULGARIA, CN_CROATIA, CN_CYPRUS, CN_CZECH_REPUBLIC, CN_DENMARK, CN_ENGLAND,
+    CN_ESTONIA, CN_FAROE_ISLANDS, CN_FINLAND, CN_FRANCE, CN_GERMANY, CN_GREECE,
+    CN_HUNGARY, CN_ICELAND, CN_REPUBLIC_IRELAND, CN_ISRAEL, CN_ITALY, CN_LATVIA,
+    CN_LITHUANIA, CN_LUXEMBOURG, CN_MACEDONIA, CN_MALTA, CN_HOLLAND, CN_NORTHERN_IRELAND,
+    CN_NORWAY, CN_POLAND, CN_PORTUGAL, CN_ROMANIA, CN_RUSSIA, CN_SAN_MARINO,
+    CN_SCOTLAND, CN_SLOVAKIA, CN_SLOVENIA, CN_SPAIN, CN_SWEDEN, CN_SWITZERLAND,
+    CN_TURKEY, CN_UKRAINE, CN_WALES, CN_YUGOSLAVIA, CN_ALGERIA, CN_SOUTH_AFRICA,
+    CN_GHANA, CN_ARGENTINA, CN_BOLIVIA, CN_BRAZIL, CN_CHILE, CN_COLOMBIA,
+    CN_ECUADOR, CN_PARAGUAY, CN_PERU, CN_SURINAM, CN_URUGUAY, CN_VENEZUELA,
+    CN_EL_SALVADOR, CN_MEXICO, CN_USA, CN_JAPAN, CN_TAIWAN, CN_INDIA,
+    CN_AUSTRALIA, CN_NEW_ZEALAND
 };
 
-uint8_t _careerCompetitionIdRemapTable[66] = {
-    0, 1, 76, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15,
+uint8_t _careerCompetitionIdRemapTable[68] = {
+    0, 1, 76, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-    32, 33, 78, 34, 35, 36, 37, 38, 39, 40, 41, 42, 79, 69, 43, 45,
+    32, 33, 78, 34, 47, 35, 36, 37, 38, 39, 40, 41, 42, 79, 69, 43, 45,
     46, 48, 49, 50, 64, 65, 66, 71, 77, 51, 60, 73, 75, 55, 67, 44,
     62, 255
 };
@@ -1996,6 +2043,7 @@ void *_competitionsTable[256] = {
     [6] = _czechRepublicTable,
     [7] = _denmarkTable,
     [8] = _englandTable,
+    [9] = _bosniaTable,
     [10] = _estoniaTable,
     [11] = _faroeIslandsTable,
     [12] = _finlandTable,
@@ -2033,6 +2081,7 @@ void *_competitionsTable[256] = {
     [44] = _australiaTable,
     [45] = _boliviaTable,
     [46] = _brasilTable,
+    [47] = _macedoniaTable,
     [48] = _chileTable,
     [49] = _colombiaTable,
     [50] = _ecuadorTable,

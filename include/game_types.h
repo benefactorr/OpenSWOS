@@ -1524,6 +1524,8 @@ typedef uint8_t CountryNumbers;
 #define CN_AUSTRALIA        44
 #define CN_BOLIVIA          45
 #define CN_BRAZIL           46
+#define CN_BOSNIA           9  /* Bosnia and Herzegovina, TEAM.009 */
+#define CN_MACEDONIA        47  /* V4: new playable domestic league */
 #define CN_CHILE            48
 #define CN_COLOMBIA         49
 #define CN_ECUADOR          50
@@ -1968,7 +1970,7 @@ typedef struct __attribute__((packed)) {
 /* ==================================================================
  * QualifyingGroup — merged QualifyingGroup_3/_9_2/_2_8/_6_44/_3_4/_3_12
  * (consolidation, docs/STRUCT_CONSOLIDATE.md §4d). Arrays sized to the observed
- * maxima (compCup 9, countries 44). compCup[] is -1 (0xFFFFFFFF)-terminated with
+ * maxima (compCup 9, countries 46). compCup[] is -1 (0xFFFFFFFF)-terminated with
  * -2/0xFC in-band markers; countries[] is 0xFF-terminated. Padded slots are zero.
  *
  * compCup holds a MIXED cup/cup2 list (e.g. europeTable carries
@@ -1979,7 +1981,7 @@ typedef struct __attribute__((packed)) {
 
 typedef struct __attribute__((packed)) {
     Competition *compCup[9];     /* region competitions; -1-terminated */
-    CountryNumbers  countries[44];  /* region countries; 0xFF-terminated */
+    CountryNumbers  countries[46];  /* region countries; 0xFF-terminated */
 } QualifyingGroup;
 
 /* ==================================================================

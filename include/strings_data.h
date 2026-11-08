@@ -128,6 +128,8 @@ extern const char _aSanMarino[23];
 extern const char _aScotland[19];
 extern const char _aSlovakia[20];
 extern const char _aSlovenia[20];
+extern const char _aMacedonia[22];
+extern const char _aBosnia[16];
 extern const char _aSouthAfrica[28];
 extern const char _aSpain[15];
 extern const char _aSurinam[17];

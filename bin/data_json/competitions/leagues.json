@@ -1,6 +1,6 @@
 {
   "type": "competition_leagues",
-  "count": 66,
+  "count": 68,
   "leagues": [
     {
       "id": "_customsLeague",
@@ -1178,7 +1178,12 @@
         }
       ],
       "reserved1": 0,
-      "name": []
+      "name": [
+        "1A LEAGUE",
+        "1A",
+        "1B LEAGUE",
+        "1B"
+      ]
     },
     {
       "id": "_algerianLeague",
@@ -2435,6 +2440,72 @@
         -1,
         1,
         0
+      ]
+    },
+    {
+      "id": "_macedonianLeague",
+      "comp": {
+        "comp_id": -56,
+        "type": 0,
+        "team_number": 47,
+        "begin_month": 56,
+        "end_month": 40,
+        "name_table_offset": 0,
+        "reserved": 0,
+        "team_list_offset": 0,
+        "seed_reorder_flag": 0
+      },
+      "divisions_count": 1,
+      "rounds": 2,
+      "points_for_win": 3,
+      "substitutes": 3,
+      "max_subs": 5,
+      "divisions": [
+        {
+          "teams": 14,
+          "promoted": 0,
+          "promoted_po": 0,
+          "relegated": 0,
+          "relegated_po": 0,
+          "qualifier_link_offset": 0
+        }
+      ],
+      "reserved1": 0,
+      "name": [
+        null
+      ]
+    },
+    {
+      "id": "_bosnianLeague",
+      "comp": {
+        "comp_id": -54,
+        "type": 0,
+        "team_number": 9,
+        "begin_month": 56,
+        "end_month": 40,
+        "name_table_offset": 0,
+        "reserved": 0,
+        "team_list_offset": 0,
+        "seed_reorder_flag": 0
+      },
+      "divisions_count": 1,
+      "rounds": 2,
+      "points_for_win": 3,
+      "substitutes": 3,
+      "max_subs": 5,
+      "divisions": [
+        {
+          "teams": 16,
+          "promoted": 0,
+          "promoted_po": 0,
+          "relegated": 0,
+          "relegated_po": 0,
+          "qualifier_link_offset": 0
+        }
+      ],
+      "reserved1": 0,
+      "name": [
+        null
       ]
     }
   ]
