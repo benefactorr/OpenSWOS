@@ -6027,9 +6027,33 @@ int16_t SaveJson_WriteCareer(uint8_t *filename)
         unsigned count=SWOS_IdentityCount(),next_id=SWOS_IdentityNextId();
         int valid=count && SWOS_IdentityCheck();
         unsigned rec[4];
+        /* An inactive canonical registry may leave next_id at 1, even
+         * though generated/manual/retired IDs are already in use.  A
+         * freshly written career must always carry a usable upper ID
+         * bound or the strict generated-identity loader rejects it. */
+        if (!valid) {
+            if (next_id <= SWOS_IDENTITY_EXPECTED_COUNT)
+                next_id = SWOS_IDENTITY_EXPECTED_COUNT + 1u;
+            for (unsigned i = 0; i < SWOS_GeneratedIdentityCount(); ++i) {
+                if (SWOS_GeneratedIdentityGet(i, rec) && rec[2] >= next_id)
+                    next_id = rec[2] + 1u;
+            }
+            {
+                unsigned manual[5];
+                for (unsigned i = 0; i < SWOS_ManualIdentityCount(); ++i)
+                    if (SWOS_ManualIdentityGet(i, manual) && manual[2] >= next_id)
+                        next_id = manual[2] + 1u;
+            }
+            {
+                unsigned retired[5];
+                for (unsigned i = 0; i < SWOS_RetiredIdentityCount(); ++i)
+                    if (SWOS_RetiredIdentityGet(i, retired) && retired[0] >= next_id)
+                        next_id = retired[0] + 1u;
+            }
+        }
         mjson_printf(json_out_emit,&out,",\n  %Q:%u,\n  %Q:%u,\n  %Q:[",
                      "ai_identity_registry_version",valid?1u:0u,
-                     "ai_identity_registry_next_id",valid?next_id:1u,
+                     "ai_identity_registry_next_id",next_id,
                      "ai_identity_registry_v4");
         if(valid)for(unsigned i=0;i<count;i++){
             if(!SWOS_IdentityGet(i,rec)){out.oom=1;break;}
@@ -6526,6 +6550,11 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
      * larger than careerFileBuffer can hold as a destination — so
      * we ignore the legacy in-place `src` buffer and read the file
      * fresh from disk into a heap allocation sized to the file. */
+    /* Diagnostic build: record the exact rejected validation line. */
+#define CAREER_LOAD_REJECT() do { \
+    swos_age_log("CAREER_LOAD_REJECT", "source_line=%u", (unsigned)__LINE__); \
+    return 1; \
+} while (0)
     (void)src_unused; (void)src_size_unused;
 
     PROF_START(total);
@@ -6534,7 +6563,7 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
     uint8_t *src = NULL;
     uint32_t src_size = 0;
     if (read_save_file_heap(filename, &src, &src_size) != 0)
-        return 1;
+        CAREER_LOAD_REJECT();
     PROF_END(read_file, "career-load");
 #ifdef SWOS_SAVE_FORMAT_JSON_PROFILE
     SWOS_DBG("[json-prof-career-load] file_size: %u bytes\n",
@@ -6547,11 +6576,11 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
     if (mjson_get_long((const char *)src, (int)src_size,
                          "$.schema_version", &version) <= 0) {
         swos_io_free(src);
-        return 1;
+        CAREER_LOAD_REJECT();
     }
     if ((int)version != SAVE_JSON_CAREER_VERSION) {
         swos_io_free(src);
-        return 1;
+        CAREER_LOAD_REJECT();
     }
 
     /* Verify file_kind. */
@@ -6559,11 +6588,11 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
     if (mjson_get_string((const char *)src, (int)src_size,
                          "$.file_kind", kind, sizeof(kind)) <= 0) {
         swos_io_free(src);
-        return 1;
+        CAREER_LOAD_REJECT();
     }
     if (strcmp(kind, KIND_CAREER) != 0) {
         swos_io_free(src);
-        return 1;
+        CAREER_LOAD_REJECT();
     }
 
     /* CAR v4 requires the extension header and an age snapshot. Reject
@@ -6581,7 +6610,7 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
                        "$.career_age_snapshot_v4", &age_array,
                        &age_array_len) != MJSON_TOK_ARRAY) {
             swos_io_free(src);
-            return 1;
+            CAREER_LOAD_REJECT();
         }
     }
 
@@ -6637,12 +6666,12 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
             mjson_get_long((const char *)src, (int)src_size,
                            "$.ai_identity_journal_version", &version) <= 0 ||
             version != 1) {
-            swos_io_free(src); return 1;
+            swos_io_free(src); CAREER_LOAD_REJECT();
         }
         SWOS_AI_IdentityJournalClear();
         int pos = 0, off, len, typ;
         while ((pos = fast_array_next(arr, alen, pos, &off, &len, &typ)) != 0) {
-            if (typ != MJSON_TOK_ARRAY) { swos_io_free(src); return 1; }
+            if (typ != MJSON_TOK_ARRAY) { swos_io_free(src); CAREER_LOAD_REJECT(); }
             const char *row = arr + off;
             unsigned vals[6];
             int p = 0, xoff, xlen, xtyp;
@@ -6652,20 +6681,21 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
                 if (!p || xtyp != MJSON_TOK_NUMBER ||
                     mjson_get_long(row+xoff, xlen, "$", &num) <= 0 ||
                     num < 0 || num > 255) {
-                    swos_io_free(src); return 1;
+                    swos_io_free(src); CAREER_LOAD_REJECT();
                 }
                 vals[k] = (unsigned)num;
             }
             if (fast_array_next(row, len, p, &xoff, &xlen, &xtyp) != 0 ||
                 !SWOS_AI_IdentityJournalAdd(vals[0], vals[1], vals[2],
                                             vals[3], vals[4], vals[5])) {
-                swos_io_free(src); return 1;
+                swos_io_free(src); CAREER_LOAD_REJECT();
             }
         }
         swos_age_log("AI_ID_JOURNAL_LOAD", "moves=%u",
                      SWOS_AI_IdentityJournalCount());
     }
 
+    unsigned recovered_identity_next_id=0;
     /* Optional in older CAR v4 saves: restore complete canonical registry.
      * All rows validated transactionally prior to activating any record. */
     {
@@ -6679,11 +6709,11 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
                              "$.ai_identity_registry_version",&ver)<=0||
                mjson_get_long((const char*)src,(int)src_size,
                              "$.ai_identity_registry_next_id",&next_id)<=0||
-               next_id<1){swos_io_free(src);return 1;}
+               next_id<1){swos_io_free(src);CAREER_LOAD_REJECT();}
             if(ver==1){
                 unsigned capacity=SWOS_IDENTITY_EXPECTED_COUNT;
                 unsigned *records=malloc((size_t)capacity*4*sizeof(unsigned));
-                if(!records){swos_io_free(src);return 1;}
+                if(!records){swos_io_free(src);CAREER_LOAD_REJECT();}
                 unsigned count=0;int pos=0,off,len,typ,valid=1;
                 while((pos=fast_array_next(arr,alen,pos,&off,&len,&typ))!=0){
                     if(typ!=MJSON_TOK_ARRAY||count>=capacity){valid=0;break;}
@@ -6702,8 +6732,47 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
                 if(valid)valid=SWOS_IdentityRestore(records,count,(unsigned)next_id);
                 free(records);
                 swos_age_log("IDENTITY_REGISTRY_LOAD","count=%u valid=%d next_id=%ld",count,valid,next_id);
-                if(!valid){swos_io_free(src);return 1;}
-            }else if(ver!=0){swos_io_free(src);return 1;}
+                if(!valid){swos_io_free(src);CAREER_LOAD_REJECT();}
+            }else if(ver==0){
+                /* No canonical registry is active. The writer could have
+                 * stored next_id=1 (or any stale value) while supplementary
+                 * ledgers contained real IDs. Derive a safe upper bound from
+                 * every ledger, even when all three are empty. */
+                static const struct {const char *path;unsigned id_col;}
+                    identity_sections[]={
+                        {"$.generated_identities_v4",2},
+                        {"$.manual_identities_v4",2},
+                        {"$.retired_identities_v4",0}
+                    };
+                unsigned highest=(unsigned)SWOS_IDENTITY_EXPECTED_COUNT;
+                for(unsigned section=0;section<sizeof(identity_sections)/sizeof(identity_sections[0]);section++){
+                    const char *entries=NULL;int entries_len=0;
+                    if(mjson_find((const char*)src,(int)src_size,
+                                  identity_sections[section].path,&entries,&entries_len)!=MJSON_TOK_ARRAY)
+                        continue;
+                    int pos=0,off,len,typ;
+                    while((pos=fast_array_next(entries,entries_len,pos,&off,&len,&typ))!=0){
+                        if(typ!=MJSON_TOK_ARRAY)continue;
+                        const char *record=entries+off;
+                        int rp=0,voff,vlen,vtyp;
+                        for(unsigned col=0;col<=identity_sections[section].id_col;col++){
+                            rp=fast_array_next(record,len,rp,&voff,&vlen,&vtyp);
+                            if(!rp||vtyp!=MJSON_TOK_NUMBER)break;
+                        }
+                        if(!rp||vtyp!=MJSON_TOK_NUMBER)continue;
+                        long id=0;
+                        if(mjson_get_long(record+voff,vlen,"$",&id)>0 &&
+                           id>0 && id<4000000 && (unsigned)id>highest)
+                            highest=(unsigned)id;
+                    }
+                }
+                if(next_id <= (long)highest){
+                    next_id=(long)highest+1;
+                    swos_age_log("IDENTITY_NEXT_ID_RECOVER",
+                                 "next_id=%ld reason=inactive_registry",next_id);
+                }
+            }else{swos_io_free(src);CAREER_LOAD_REJECT();}
+            recovered_identity_next_id=(unsigned)next_id;
         }
     }
 
@@ -6715,9 +6784,10 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
         if(token==MJSON_TOK_ARRAY){
             long ver=0,next=0;
             if(mjson_get_long((const char*)src,(int)src_size,"$.generated_identity_version",&ver)<=0||ver!=1||
-               mjson_get_long((const char*)src,(int)src_size,"$.ai_identity_registry_next_id",&next)<=0){swos_io_free(src);return 1;}
+               mjson_get_long((const char*)src,(int)src_size,"$.ai_identity_registry_next_id",&next)<=0){swos_io_free(src);CAREER_LOAD_REJECT();}
+            if(recovered_identity_next_id)next=(long)recovered_identity_next_id;
             unsigned cap=64,count=0;unsigned *rows=malloc((size_t)cap*4*sizeof(unsigned));
-            if(!rows){swos_io_free(src);return 1;}
+            if(!rows){swos_io_free(src);CAREER_LOAD_REJECT();}
             int pos=0,off,len,typ,valid=1;
             while((pos=fast_array_next(arr,alen,pos,&off,&len,&typ))!=0){
                 if(typ!=MJSON_TOK_ARRAY||count>=65536){valid=0;break;}
@@ -6735,7 +6805,7 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
             if(valid)valid=SWOS_GeneratedIdentityRestore(rows,count,(unsigned)next);
             free(rows);
             swos_age_log("GENERATED_ID_LOAD","count=%u valid=%d",count,valid);
-            if(!valid){swos_io_free(src);return 1;}
+            if(!valid){swos_io_free(src);CAREER_LOAD_REJECT();}
         }
     }
 
@@ -6745,9 +6815,9 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
         int token=mjson_find((const char*)src,(int)src_size,"$.manual_identities_v4",&arr,&alen);
         if(token==MJSON_TOK_ARRAY){
             long ver=0;
-            if(mjson_get_long((const char*)src,(int)src_size,"$.manual_identity_version",&ver)<=0||ver!=1){swos_io_free(src);return 1;}
+            if(mjson_get_long((const char*)src,(int)src_size,"$.manual_identity_version",&ver)<=0||ver!=1){swos_io_free(src);CAREER_LOAD_REJECT();}
             unsigned cap=32,count=0;unsigned *rows=malloc((size_t)cap*5*sizeof(unsigned));
-            if(!rows){swos_io_free(src);return 1;}
+            if(!rows){swos_io_free(src);CAREER_LOAD_REJECT();}
             int pos=0,off,len,typ,valid=1;
             while((pos=fast_array_next(arr,alen,pos,&off,&len,&typ))!=0){
                 if(typ!=MJSON_TOK_ARRAY||count>=65536u){valid=0;break;}
@@ -6763,7 +6833,7 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
             }
             if(valid)valid=SWOS_ManualIdentityRestore(rows,count);
             free(rows);
-            if(!valid){swos_io_free(src);return 1;}
+            if(!valid){swos_io_free(src);CAREER_LOAD_REJECT();}
         }
     }
 
@@ -6782,10 +6852,10 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
             long ver=0;
             if(mjson_get_long((const char*)src,(int)src_size,
                              "$.retired_identity_version",&ver)<=0||ver!=1){
-                swos_io_free(src);return 1;
+                swos_io_free(src);CAREER_LOAD_REJECT();
             }
             unsigned cap=64,count=0;unsigned *rows=malloc((size_t)cap*5*sizeof(unsigned));
-            if(!rows){swos_io_free(src);return 1;}
+            if(!rows){swos_io_free(src);CAREER_LOAD_REJECT();}
             int pos=0,off,len,typ,valid=1;
             while((pos=fast_array_next(arr,alen,pos,&off,&len,&typ))!=0){
                 if(typ!=MJSON_TOK_ARRAY||count>=100000u){valid=0;break;}
@@ -6805,7 +6875,7 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
             if(valid)valid=SWOS_RetiredIdentityRestore(rows,count);
             free(rows);
             swos_age_log("RETIRE_HISTORY_LOAD","count=%u valid=%d",count,valid);
-            if(!valid){swos_io_free(src);return 1;}
+            if(!valid){swos_io_free(src);CAREER_LOAD_REJECT();}
         }
     }
 
@@ -6880,6 +6950,7 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
     swos_io_free(src);
     PROF_END(total, "career-load");
     return 0;
+#undef CAREER_LOAD_REJECT
 }
 
 /* ---------- .SEA / .PRE / .DIY (preset / DIY competition) ----------

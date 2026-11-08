@@ -1,6 +1,6 @@
 #ifndef SWOS_IDENTITY_RUNTIME_H
 #define SWOS_IDENTITY_RUNTIME_H
-#define SWOS_IDENTITY_EXPECTED_COUNT 23264u
+#define SWOS_IDENTITY_EXPECTED_COUNT 23520u
 /* AI-only shadow registry. Does not yet cover ordinary transfers or generated players. */
 unsigned SWOS_IdentitySeed(void);
 void SWOS_IdentityClear(void);
