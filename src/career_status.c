@@ -1233,6 +1233,13 @@ league_match:
         uint64_t numerator = (uint64_t)baseReceipts * (uint64_t)product;
         uint64_t denominator = (uint64_t)avgPrice * 100u;
         uint32_t adjusted = (uint32_t)(numerator / denominator);
+        /* With small clubs the fixed-point result may truncate below one,
+         * leaving a legitimate home match with no gate income at all.
+         * Preserve existing scaling, but grant the smallest nonzero unit
+         * when a home match has attendance and positive gross receipts. */
+        if (team == &_careerTeam && baseReceipts && crowdFactor > 0 &&
+            product && !adjusted)
+            adjusted = 1u;
         if (adjusted > 0xffffu)
             adjusted = 0xffffu;
         _gateReceiptsFactor = (int16_t)(uint16_t)adjusted;

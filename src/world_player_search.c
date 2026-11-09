@@ -281,8 +281,18 @@ static FILE *open_country_file(int country, char *chosen, size_t cap) {
     return f;
 }
 
-/* Use the career's permanent identities, including post-retirement players. */
-static unsigned world_player_age(uint16_t club, unsigned slot) {
+/* World search must use the restored career age table, just like the squad
+ * screen.  The original club-to-identity lookup is not always available for
+ * offline TEAM records (especially after transfers / season transitions),
+ * and previously caused every such player to display the default age 25.
+ *
+ * Explicit generated and manually transferred identities remain authoritative.
+ * For original players, prefer the active name-based career age snapshot,
+ * falling back to the canonical identity when the name is not in that table.
+ * This is read-only and never changes any identity or saved age. */
+extern int SWOS_AgesLookupExact(const char *name, unsigned *age);
+static unsigned world_player_age(uint16_t club, unsigned slot,
+                                 const char *player_name) {
     unsigned age=0, id=0;
     for (unsigned i=0, count=SWOS_GeneratedIdentityCount(); i<count; ++i) {
         unsigned g[4];
@@ -291,11 +301,21 @@ static unsigned world_player_age(uint16_t club, unsigned slot) {
             return g[3];
     }
     if (SWOS_ManualIdentityIsTouched(club,slot)) {
-        if (SWOS_ManualIdentityAge(club,slot,&age,&id) && id && age>=15 && age<=60)
+        if (SWOS_ManualIdentityAge(club,slot,&age,&id) && id &&
+            age>=15 && age<=60)
+            return age;
+        /* A cleared manual slot is a tombstone, not an age-25 player.
+         * Do not resurrect its old canonical identity. */
+        if (player_name && SWOS_AgesLookupExact(player_name,&age) &&
+            age>=15 && age<=60)
             return age;
         return 25;
     }
-    if (SWOS_IdentityAgeForClub(club,slot,&age,&id) && id && age>=15 && age<=60)
+    if (player_name && SWOS_AgesLookupExact(player_name,&age) &&
+        age>=15 && age<=60)
+        return age;
+    if (SWOS_IdentityAgeForClub(club,slot,&age,&id) && id &&
+        age>=15 && age<=60)
         return age;
     return 25;
 }
@@ -419,8 +439,8 @@ static void scan_world(void){
                 uint16_t val=GetDisplayedPlayerValue((uint8_t*)team+i*sizeof(PlayerFile));
                 if (val>80)val=80;
                 dst->valueK=_avgTeamValueBases[val];
-                dst->age=(uint8_t)world_player_age(id,i);
                 safe_copy(dst->name,sizeof(dst->name),(const char*)p->playerName,sizeof(p->playerName));
+                dst->age=(uint8_t)world_player_age(id,i,dst->name);
                 safe_copy(dst->club,sizeof(dst->club),(const char*)team->team.teamName,sizeof(team->team.teamName));
             }
         }

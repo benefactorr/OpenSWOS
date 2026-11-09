@@ -1350,6 +1350,9 @@ static unsigned s_identity_faults;
 typedef struct { uint32_t id,season,age,club,nationality; } SWOS_RetiredId;
 static SWOS_RetiredId *s_retired_ids;
 static unsigned s_retired_count,s_retired_capacity;
+/* A retired ID must never remain claimed by an active manual roster slot.
+ * Defined after the manual identity array, but used by retirement restore. */
+static unsigned SWOS_ManualIdentityClearRetired(unsigned id, const char *phase);
 unsigned SWOS_RetiredIdentityCount(void){return s_retired_count;}
 unsigned SWOS_RetiredIdentityGet(unsigned i,unsigned out[5]){
     if(!out||i>=s_retired_count)return 0;
@@ -1375,6 +1378,9 @@ static unsigned SWOS_RetiredIdentityAppend(unsigned id,unsigned season,unsigned 
         s_retired_ids=tmp;s_retired_capacity=cap;
     }
     s_retired_ids[s_retired_count++]=(SWOS_RetiredId){id,season,age,club,nationality};
+    /* Retirements must atomically invalidate any obsolete manual claim.
+     * Canonical shadows are deliberately retained. */
+    SWOS_ManualIdentityClearRetired(id,"retirement");
     return 1;
 }
 unsigned SWOS_RetiredIdentityRestore(const unsigned *rows,unsigned count){
@@ -1395,15 +1401,20 @@ unsigned SWOS_RetiredIdentityRestore(const unsigned *rows,unsigned count){
             unsigned g[4];
             if(SWOS_GeneratedIdentityGet(k,g)&&g[2]==id){valid=0;break;}
         }
-        for(unsigned k=0;valid&&k<SWOS_ManualIdentityCount();k++){
-            unsigned m[5];
-            if(SWOS_ManualIdentityGet(k,m)&&m[2]==id){valid=0;break;}
-        }
+        /* Previously saved careers may contain obsolete manual claims for
+         * retirees. Validate the retirement ledger here, then tombstone the
+         * conflicting claims after the entire ledger is accepted. This
+         * preserves the historical retirement and every actual squad record. */
         if(!valid)break;
         items[i]=(SWOS_RetiredId){id,season,age,club,nat};
     }
     if(!valid){free(items);return 0;}
     free(s_retired_ids);s_retired_ids=items;s_retired_count=s_retired_capacity=count;
+    unsigned cleared=0;
+    for(unsigned i=0;i<count;i++)
+        cleared+=SWOS_ManualIdentityClearRetired(items[i].id,"load");
+    if(cleared)swos_age_log("RETIRE_MANUAL_LOAD_RECOVERY",
+                            "retired=%u cleared_claims=%u",count,cleared);
     return 1;
 }
 
@@ -1412,6 +1423,8 @@ unsigned SWOS_RetiredIdentityRestore(const unsigned *rows,unsigned count){
  * A missing mapping must NEVER be guessed from team ordinal. */
 static int SWOS_IdentityFind(uint32_t key);
 static void SWOS_IdentityResolveClub(unsigned club);
+static void SWOS_IdentityEnsureExtension(unsigned club,unsigned file,unsigned record);
+static void SWOS_IdentityBootstrapExpandedTeams(void);
 unsigned SWOS_ManualIdentityIsTouched(unsigned,unsigned);
 unsigned SWOS_ManualIdentityAge(unsigned,unsigned,unsigned*,unsigned*);
 static uint16_t s_identity_club_sources[65536];
@@ -1426,6 +1439,7 @@ void SWOS_IdentityRegisterClub(unsigned club,unsigned file,unsigned record)
         return;
     }
     s_identity_club_sources[club]=value;
+    SWOS_IdentityEnsureExtension(club,file,record);
 }
 /* A manual transfer changes live squad records without moving original IDs.
  * Never display a canonical-slot age for an affected club in this session. */
@@ -1523,6 +1537,55 @@ static int SWOS_ManualPut(unsigned club,unsigned slot,unsigned id,unsigned age,u
     }
     s_manual_ids[s_manual_count++]=(SWOS_ManualIdentity){club,slot,id,age,source};return 1;
 }
+/* Expanded TEAM files can have real original players which were added after
+ * the 1996 canonical identity seed was generated. The seed's key ordering
+ * and original ID range MUST stay unchanged, otherwise existing CAR files
+ * fail schema-4 validation. Store missing source slots as persistent manual
+ * identities, using the existing CAR manual registry instead.
+ *
+ * Do not overwrite transferred/manual slots, tombstones or generated youths.
+ * In old careers the original age is unknowable without a matching age CSV;
+ * use a deterministic baseline 18..30 + seasons completed. In a new career
+ * this establishes a stable initial age and all subsequent seasons increment
+ * it via SWOS_IdentityAdvanceSeason(). */
+unsigned SWOS_GeneratedIdentityCount(void);
+unsigned SWOS_GeneratedIdentityGet(unsigned index,unsigned values[4]);
+static void SWOS_IdentityEnsureExtension(unsigned club,unsigned file,unsigned record)
+{
+    if (!s_identity_records || file > 79u || club > 65535u) return;
+    unsigned added=0,covered=0,conflicts=0;
+    for (unsigned slot=0;slot<16u;slot++) {
+        uint32_t key=((uint32_t)file<<12)|((uint32_t)record<<4)|slot;
+        if (SWOS_IdentityFind(key)>=0) { covered++; continue; }
+        /* Currently TEAM.047 is the only documented extension. Skip other
+         * files until their roster layout and canonical mapping are audited. */
+        if (file!=47u) continue;
+        if (SWOS_ManualFind(club,slot)>=0) continue;
+        /* Existing generated replacements already own their physical slot. */
+        unsigned occupied=0;
+        unsigned generated[4];
+        for (unsigned g=0;g<SWOS_GeneratedIdentityCount();g++)
+            if (SWOS_GeneratedIdentityGet(g,generated) &&
+                generated[0]==club && generated[1]==slot) {
+                occupied=1;break;
+            }
+        if (occupied) { conflicts++;continue; }
+        if (s_identity_next_id>=4000000u) { conflicts++;continue; }
+        unsigned baseline=18u+((file*131u+record*37u+slot*17u)%13u);
+        unsigned age=baseline+(unsigned)_careerSeasonsCompleted;
+        if (age>60u) age=60u;
+        unsigned id=s_identity_next_id;
+        if (!SWOS_ManualPut(club,slot,id,age,0u)) {
+            conflicts++;continue;
+        }
+        s_identity_next_id++;
+        added++;
+    }
+    if (added || conflicts)
+        swos_age_log("IDENTITY_EXTENSION",
+            "club=%04X file=%u record=%u seeded=%u added=%u skipped=%u next_id=%u",
+            club,file,record,covered,added,conflicts,s_identity_next_id);
+}
 /* Human purchases create a new AI trialist in the vacated physical slot.
  * The purchased footballer's ID has already moved to the human roster.
  * Replace the source slot's tombstone with a fresh, persistent 17-year-old ID. */
@@ -1536,6 +1599,24 @@ unsigned SWOS_ManualIdentityCreateYouth(unsigned club,unsigned slot){
                  club,slot,id);
     return id;
 }
+/* Tombstone only the stale identity metadata, not the footballer or its
+ * attributes. Keep the slot marked 'touched' so the canonical age fallback
+ * cannot resurrect the retired identity. No player ID is ever reused here. */
+static unsigned SWOS_ManualIdentityClearRetired(unsigned id,const char *phase){
+    unsigned cleared=0;
+    if(!id)return 0;
+    for(unsigned i=0;i<s_manual_count;i++){
+        SWOS_ManualIdentity *m=&s_manual_ids[i];
+        if(m->id!=id)continue;
+        swos_age_log("RETIRE_MANUAL_TOMBSTONE",
+            "phase=%s id=%u club=%04X slot=%u previous_age=%u",
+            phase?phase:"unknown",id,m->club,m->slot,m->age);
+        m->id=0;m->age=0;m->source=0;
+        cleared++;
+    }
+    return cleared;
+}
+
 /* Step 4Q: the JSON loader rejects the same nonzero manual ID in two slots.
  * Old AI exchanges and roster-copy paths may leave a stale claim behind.
  * Only tombstone the obsolete identity claim, never touch the player record.
@@ -1543,6 +1624,10 @@ unsigned SWOS_ManualIdentityCreateYouth(unsigned club,unsigned slot){
  * Keep the first active claim, as in the successfully recovered BUDALE save.
  * Diagnose all changes so an incorrect underlying transfer remains visible. */
 unsigned SWOS_ManualIdentityPrepareSave(void){
+    unsigned retiredClaims=0;
+    for(unsigned i=0;i<s_manual_count;i++)
+        if(s_manual_ids[i].id && SWOS_RetiredIdentityContains(s_manual_ids[i].id))
+            retiredClaims+=SWOS_ManualIdentityClearRetired(s_manual_ids[i].id,"save");
     unsigned duplicates=0;
     for(unsigned i=0;i<s_manual_count;i++){
         unsigned id=s_manual_ids[i].id;
@@ -1561,8 +1646,9 @@ unsigned SWOS_ManualIdentityPrepareSave(void){
         }
     }
     swos_age_log("MANUAL_ID_SAVE_VALIDATE",
-                 "rows=%u removed_duplicate_claims=%u",s_manual_count,duplicates);
-    return duplicates;
+        "rows=%u removed_duplicate_claims=%u removed_retired_claims=%u",
+        s_manual_count,duplicates,retiredClaims);
+    return duplicates + retiredClaims;
 }
 unsigned SWOS_ManualIdentityCount(void){return s_manual_count;}
 unsigned SWOS_ManualIdentityGet(unsigned idx,unsigned out[5]){
@@ -1801,6 +1887,185 @@ static void SWOS_GeneratedIdentityAISwap(unsigned teamA,unsigned slotA,
         "team_a=%04X slot_a=%u team_b=%04X slot_b=%u generated_a=%u generated_b=%u",
         teamA,slotA,teamB,slotB,(unsigned)(a>=0),(unsigned)(b>=0));
 }
+/* Reconcile historical shadow-identity claims before writing a career.
+ * The separate registries were introduced at different times and a move can
+ * leave an obsolete generated entry or a manual zero-ID placeholder behind.
+ * Only identity metadata is changed, never a PlayerFile or its attributes. */
+unsigned SWOS_IdentityPrepareSave(void)
+{
+    unsigned changes=0;
+    unsigned highest=SWOS_IDENTITY_SEED_COUNT;
+    for(unsigned i=0;i<SWOS_IDENTITY_SEED_COUNT && s_identity_records;i++)
+        if(s_identity_records[i].id>highest)highest=s_identity_records[i].id;
+    for(unsigned i=0;i<s_manual_count;i++)
+        if(s_manual_ids[i].id>highest)highest=s_manual_ids[i].id;
+    for(unsigned i=0;i<s_generated_count;i++)
+        if(s_generated[i].id>highest)highest=s_generated[i].id;
+    for(unsigned i=0;i<s_retired_count;i++)
+        if(s_retired_ids[i].id>highest)highest=s_retired_ids[i].id;
+    if(s_identity_next_id<=highest)s_identity_next_id=highest+1u;
+    if(s_identity_next_id>4000000u)return 0;
+
+    /* An identity in the immutable retirement history cannot also be a
+     * live generated identity. This is the generated counterpart of the
+     * manual tombstone repair. Remove only the stale metadata claim and
+     * retain the roster and historical retirement entry unchanged. */
+    for (unsigned i=0; i<s_generated_count;) {
+        if (SWOS_RetiredIdentityContains(s_generated[i].id)) {
+            swos_age_log("IDENTITY_SAVE_RETIRED_GENERATED",
+                "club=%04X slot=%u retired_id=%u",
+                s_generated[i].team, s_generated[i].slot, s_generated[i].id);
+            memmove(&s_generated[i], &s_generated[i+1],
+                (size_t)(s_generated_count-i-1)*sizeof(*s_generated));
+            --s_generated_count;
+            ++changes;
+            continue;
+        }
+        ++i;
+    }
+    /* A live manual claim wins if the same physical slot also has a
+     * generated claim. The latter is a stale snapshot after a transfer. */
+    for(unsigned i=0;i<s_generated_count;){
+        int mi=SWOS_ManualFind(s_generated[i].team,s_generated[i].slot);
+        if(mi>=0 && s_manual_ids[mi].id){
+            swos_age_log("IDENTITY_SAVE_STALE_GENERATED",
+                "club=%04X slot=%u old_id=%u manual_id=%u",
+                s_generated[i].team,s_generated[i].slot,s_generated[i].id,
+                s_manual_ids[mi].id);
+            memmove(&s_generated[i],&s_generated[i+1],
+                (size_t)(s_generated_count-i-1)*sizeof(*s_generated));
+            s_generated_count--;changes++;continue;
+        }
+        i++;
+    }
+    /* Generated players supersede zero-ID manual tombstones in the same
+     * physical slot. Remove the obsolete placeholder, not the player. */
+    for(unsigned i=0;i<s_manual_count;){
+        unsigned matched=0;
+        if(!s_manual_ids[i].id)
+            for(unsigned j=0;j<s_generated_count;j++)
+                if(s_manual_ids[i].club==s_generated[j].team &&
+                   s_manual_ids[i].slot==s_generated[j].slot){matched=1;break;}
+        if(matched){
+            memmove(&s_manual_ids[i],&s_manual_ids[i+1],
+                (size_t)(s_manual_count-i-1)*sizeof(*s_manual_ids));
+            s_manual_count--;changes++;continue;
+        }
+        i++;
+    }
+    /* Never preserve duplicate generated IDs or an active manual/generated
+     * clash. Allocate a new identity while keeping its existing age. */
+    for(unsigned i=0;i<s_generated_count;i++){
+        unsigned conflict=0;
+        for(unsigned j=0;j<i;j++)
+            if(s_generated[j].id==s_generated[i].id){conflict=1;break;}
+        for(unsigned j=0;j<s_manual_count && !conflict;j++)
+            if(s_manual_ids[j].id &&
+               s_manual_ids[j].id==s_generated[i].id)conflict=1;
+        if(conflict){
+            if(s_identity_next_id>=4000000u)return changes;
+            unsigned old=s_generated[i].id;
+            s_generated[i].id=s_identity_next_id++;
+            swos_age_log("IDENTITY_SAVE_REASSIGN",
+                "club=%04X slot=%u old_id=%u new_id=%u age=%u",
+                s_generated[i].team,s_generated[i].slot,old,
+                s_generated[i].id,s_generated[i].age);
+            changes++;
+        }
+    }
+    if(changes)swos_age_log("IDENTITY_SAVE_RECONCILE",
+        "changes=%u next_id=%u generated=%u manual=%u",
+        changes,s_identity_next_id,s_generated_count,s_manual_count);
+    return changes;
+}
+
+/* Career+ integrity checkpoint. Run after seasonal player moves and before
+ * ANY career serialisation. Repair only identity metadata that the existing
+ * reconciliation code can resolve deterministically; never edit PlayerFiles,
+ * ages, results or historical retirement records. Return false on a remaining
+ * problem so a known-good save is not overwritten. */
+unsigned SWOS_CareerIntegrityCheck(const char *phase, unsigned season)
+{
+    const char *where = phase ? phase : "unknown";
+    unsigned before_manual = s_manual_count, before_generated = s_generated_count;
+    unsigned before_next = s_identity_next_id;
+    unsigned repairs = 0, errors = 0;
+    unsigned retired_manual = 0, retired_generated = 0;
+    unsigned duplicate_manual = 0, duplicate_generated = 0, conflicting_slots = 0;
+    unsigned highest = SWOS_IDENTITY_SEED_COUNT;
+
+    /* The identity seed is initialised on entering career mode. Do not
+     * destructively guess identities if this routine is called too early. */
+    if (!s_identity_records && !SWOS_IdentitySeed()) {
+        swos_age_log("INTEGRITY_SKIP", "phase=%s season=%u seed_unavailable=1", where, season);
+        return 1;
+    }
+    SWOS_IdentityBootstrapExpandedTeams();
+    repairs += SWOS_IdentityPrepareSave();
+    repairs += SWOS_ManualIdentityPrepareSave();
+
+    for (unsigned i = 0; i < SWOS_IDENTITY_SEED_COUNT; ++i)
+        if (s_identity_records[i].id > highest) highest = s_identity_records[i].id;
+    for (unsigned i = 0; i < s_generated_count; ++i) {
+        const SWOS_GeneratedIdentity *g = &s_generated[i];
+        if (g->id > highest) highest = g->id;
+        if (!g->id || g->id <= SWOS_IDENTITY_SEED_COUNT ||
+            g->slot > SWOS_GENERATED_ID_MAX_SLOT || g->age < 15u || g->age > 255u)
+            ++errors;
+        if (SWOS_RetiredIdentityContains(g->id)) { ++retired_generated; ++errors; }
+        for (unsigned j = 0; j < i; ++j)
+            if (s_generated[j].id == g->id ||
+                (s_generated[j].team == g->team && s_generated[j].slot == g->slot)) {
+                ++duplicate_generated; ++errors;
+            }
+    }
+    for (unsigned i = 0; i < s_manual_count; ++i) {
+        const SWOS_ManualIdentity *m = &s_manual_ids[i];
+        if (!m->id) continue; /* tombstone: intentionally non-active */
+        if (m->id > highest) highest = m->id;
+        if (m->slot > 31u || m->age < 15u || m->age > 255u) ++errors;
+        if (SWOS_RetiredIdentityContains(m->id)) { ++retired_manual; ++errors; }
+        for (unsigned j = 0; j < i; ++j)
+            if (s_manual_ids[j].id == m->id) { ++duplicate_manual; ++errors; }
+        for (unsigned j = 0; j < s_generated_count; ++j)
+            if ((s_generated[j].team == m->club && s_generated[j].slot == m->slot) ||
+                s_generated[j].id == m->id) { ++conflicting_slots; ++errors; }
+    }
+    for (unsigned i = 0; i < s_retired_count; ++i)
+        if (s_retired_ids[i].id > highest) highest = s_retired_ids[i].id;
+    if (highest >= 4000000u || s_identity_next_id <= highest ||
+        s_identity_next_id > 4000000u) ++errors;
+    /* The identity structure, rather than failed-but-atomic swap attempts,
+     * determines whether saving is safe. */
+    unsigned canonical_valid = SWOS_IdentityCheck();
+    if (!canonical_valid) ++errors;
+
+    swos_age_log("CAREER_INTEGRITY_DETAIL",
+        "phase=%s season=%u canonical_valid=%u swap_rejections=%u highest_id=%u next_id=%u",
+        where, season, canonical_valid, s_identity_faults, highest,
+        s_identity_next_id);
+
+    swos_age_log("CAREER_INTEGRITY",
+        "phase=%s season=%u repaired=%u errors=%u manual=%u->%u generated=%u->%u next=%u->%u retired_manual=%u retired_generated=%u duplicate_manual=%u duplicate_generated=%u conflicts=%u",
+        where, season, repairs, errors, before_manual, s_manual_count,
+        before_generated, s_generated_count, before_next, s_identity_next_id,
+        retired_manual, retired_generated, duplicate_manual, duplicate_generated, conflicting_slots);
+    /* Separate compact log for multi-season stress tests. */
+    {
+        FILE *f = fopen("swos_career_integrity.log", "a");
+        if (f) {
+            fprintf(f, "INTEGRITY phase=%s season=%u repairs=%u errors=%u original=%u generated=%u manual=%u retired=%u next_id=%u retired_active=%u duplicates=%u conflicts=%u result=%s\n",
+                where, season, repairs, errors, (unsigned)SWOS_IDENTITY_SEED_COUNT,
+                s_generated_count, s_manual_count, s_retired_count, s_identity_next_id,
+                retired_manual + retired_generated,
+                duplicate_manual + duplicate_generated, conflicting_slots,
+                errors ? "BLOCK" : "OK");
+            fclose(f);
+        }
+    }
+    return errors == 0u;
+}
+
 unsigned SWOS_GeneratedIdentityRestore(const unsigned *rows,unsigned count,unsigned next_id){
     if(count>65536||next_id<SWOS_IDENTITY_SEED_COUNT+1||(!rows&&count))return 0;
     SWOS_GeneratedIdentity *candidate=count?malloc((size_t)count*sizeof(*candidate)):NULL;
@@ -2056,7 +2321,11 @@ unsigned SWOS_IdentitySwap(unsigned fa,unsigned ta,unsigned sa,unsigned fb,unsig
 }
 unsigned SWOS_IdentityCheck(void)
 {
-    if(!s_identity_records||s_identity_faults)return 0;
+    /* A failed swap leaves the canonical records unchanged. It is a rejected
+     * operation, not evidence of a corrupt registry. In particular, AI
+     * optimiser attempts against unmapped slots must not permanently poison
+     * every later career save. Validate actual records below instead. */
+    if(!s_identity_records)return 0;
     const unsigned n=(unsigned)SWOS_IDENTITY_SEED_COUNT;
     /* Retirement replacements receive fresh IDs above the original seed range.
      * The canonical locations remain fixed, but the occupants need not be a
@@ -2122,6 +2391,19 @@ unsigned SWOS_IdentityReplaceCanonical(unsigned file,unsigned record,
     return fresh;
 }
 
+/* Until AI-generated youths have an atomic cross-registry exchange,
+ * never swap their physical record with a canonical/manual footballer.
+ * The old sequence moved generated IDs before resolving manual overlays,
+ * creating ambiguous double claims. This guard prevents corrupt saves. */
+static int SWOS_AI_P3HasGeneratedSlot(unsigned club,unsigned slot)
+{
+    unsigned row[4];
+    for (unsigned g=0;g<SWOS_GeneratedIdentityCount();g++)
+        if (SWOS_GeneratedIdentityGet(g,row) && row[0]==club && row[1]==slot)
+            return 1;
+    return 0;
+}
+
 static int SWOS_AI_P3Swap(SWOS_AI_P3Club *a, unsigned sa,
                           SWOS_AI_P3Club *b, unsigned sb)
 {
@@ -2131,8 +2413,37 @@ static int SWOS_AI_P3Swap(SWOS_AI_P3Club *a, unsigned sa,
                       (ib == _numForeignMarketPlayers2);
     if (_numForeignMarketPlayers2 + needed > SWOS_AI_CAREER_POOL_CAPACITY)
         return 0;
-    /* Initialise ID records before any source-player exchange. */
-    SWOS_IdentitySeed();
+    /* A physical player swap must never precede a failed canonical identity
+     * swap. Some expanded TEAM data files (notably TEAM.047) are absent from
+     * the compiled canonical seed. Earlier code exchanged the PlayerFiles,
+     * recorded an exchange journal entry, then discovered that the canonical
+     * identities could not be exchanged. This left ages and retirements tied
+     * to the wrong player and could eventually poison the save. Until those
+     * files receive a compatible identity migration, decline the exchange
+     * atomically rather than corrupting either squad. */
+    if (SWOS_AI_P3HasGeneratedSlot(a->id,sa) ||
+        SWOS_AI_P3HasGeneratedSlot(b->id,sb)) {
+        swos_age_log("AI_SWAP_GENERATED_DEFER",
+            "club_a=%04X slot_a=%u club_b=%04X slot_b=%u",
+            a->id,sa,b->id,sb);
+        return 0;
+    }
+    unsigned ageA=0,idA=0,ageB=0,idB=0;
+    if (!SWOS_IdentitySeed() ||
+        !SWOS_IdentityAgeForClub(a->id,sa,&ageA,&idA) ||
+        !SWOS_IdentityAgeForClub(b->id,sb,&ageB,&idB) || !idA || !idB || idA==idB) {
+        swos_age_log("AI_SWAP_UNMAPPED_REJECT",
+            "club_a=%04X file_a=%u rec_a=%u slot_a=%u club_b=%04X file_b=%u rec_b=%u slot_b=%u",
+            a->id, a->sourceFile, a->sourceRecord, sa,
+            b->id, b->sourceFile, b->sourceRecord, sb);
+        return 0;
+    }
+    if (!SWOS_ManualIdentityAISwap(a->id,sa,b->id,sb)) {
+        swos_age_log("AI_SWAP_IDENTITY_ABORT",
+            "club_a=%04X slot_a=%u club_b=%04X slot_b=%u",
+            a->id,sa,b->id,sb);
+        return 0;
+    }
     PlayerFile pa = a->players[sa];
     PlayerFile pb = b->players[sb];
     /* After appending first entry the next new slot is one index later. */
@@ -2148,10 +2459,15 @@ static int SWOS_AI_P3Swap(SWOS_AI_P3Club *a, unsigned sa,
     a->cooldownKeys[sa] = b->cooldownKeys[sb];
     b->cooldownKeys[sb] = cooldown;
     SWOS_GeneratedIdentityAISwap(a->id,sa,b->id,sb);
-    if (!SWOS_ManualIdentityAISwap(a->id,sa,b->id,sb))
-        swos_age_log("MANUAL_ID_AI_SWAP_FAIL","club_a=%04X club_b=%04X",a->id,b->id);
-    if (!SWOS_IdentitySwap(a->sourceFile,a->sourceRecord,sa,
-                           b->sourceFile,b->sourceRecord,sb))
+
+    /* Canonical-to-canonical swaps update the fixed seed. Any swap involving
+     * TEAM.047 uses the existing persistent manual overlay instead. */
+    int bothCanonical=SWOS_IdentityFind(((uint32_t)a->sourceFile<<12)|
+                     ((uint32_t)a->sourceRecord<<4)|sa)>=0 &&
+                      SWOS_IdentityFind(((uint32_t)b->sourceFile<<12)|
+                     ((uint32_t)b->sourceRecord<<4)|sb)>=0;
+    if (bothCanonical && !SWOS_IdentitySwap(a->sourceFile,a->sourceRecord,sa,
+                                             b->sourceFile,b->sourceRecord,sb))
         swos_age_log("IDENTITY_AI_SWAP_ERROR","id_a=%04X id_b=%04X",a->id,b->id);
     /* Record only an exchange that was successfully applied. The source
      * coordinates distinguish clubs with colliding global team numbers. */
@@ -2202,18 +2518,40 @@ static int SWOS_AI_P3PromoteSubstitute(SWOS_AI_P3Club *club,
     unsigned count = _numForeignMarketPlayers2;
     unsigned needed = (firstIndex == count) + (benchIndex == count);
     if (count + needed > SWOS_AI_CAREER_POOL_CAPACITY) return 0;
-    SWOS_IdentitySeed();
+    /* As with international AI exchanges, do not physically reorder a
+     * line-up unless BOTH source slots exist in the canonical seed. A
+     * missing slot would leave its player age at the previous position. */
+    if (SWOS_AI_P3HasGeneratedSlot(club->id,starter) ||
+        SWOS_AI_P3HasGeneratedSlot(club->id,substitute)) return 0;
+    unsigned ageStart=0,idStart=0,ageSub=0,idSub=0;
+    if (!SWOS_IdentitySeed() ||
+        !SWOS_IdentityAgeForClub(club->id,starter,&ageStart,&idStart) ||
+        !SWOS_IdentityAgeForClub(club->id,substitute,&ageSub,&idSub) ||
+        !idStart || !idSub || idStart==idSub) {
+        swos_age_log("LINEUP_SWAP_UNMAPPED_REJECT",
+            "club=%04X file=%u rec=%u start=%u bench=%u",
+            club->id, club->sourceFile, club->sourceRecord, starter, substitute);
+        return 0;
+    }
+    if (!SWOS_ManualIdentityAISwap(club->id,starter,club->id,substitute)) {
+        swos_age_log("LINEUP_SWAP_IDENTITY_ABORT",
+            "club=%04X starter=%u substitute=%u",
+            club->id,starter,substitute);
+        return 0;
+    }
     if (firstIndex == count && benchIndex == count) ++benchIndex;
     SWOS_AI_P3WriteOverrideAt(club->id, starter, bench, firstIndex);
     SWOS_AI_P3WriteOverrideAt(club->id, substitute, first, benchIndex);
     club->players[starter] = bench;
     club->players[substitute] = first;
     SWOS_GeneratedIdentityAISwap(club->id, starter, club->id, substitute);
-    if (!SWOS_ManualIdentityAISwap(club->id, starter, club->id, substitute))
-        swos_age_log("MANUAL_ID_LINEUP_SWAP_FAIL", "club=%04X start=%u bench=%u",
-                     club->id, starter, substitute);
-    if (!SWOS_IdentitySwap(club->sourceFile, club->sourceRecord, starter,
-                           club->sourceFile, club->sourceRecord, substitute))
+
+    int bothCanonical=SWOS_IdentityFind(((uint32_t)club->sourceFile<<12)|
+                      ((uint32_t)club->sourceRecord<<4)|starter)>=0 &&
+                      SWOS_IdentityFind(((uint32_t)club->sourceFile<<12)|
+                      ((uint32_t)club->sourceRecord<<4)|substitute)>=0;
+    if (bothCanonical && !SWOS_IdentitySwap(club->sourceFile, club->sourceRecord, starter,
+                                             club->sourceFile, club->sourceRecord, substitute))
         swos_age_log("IDENTITY_LINEUP_SWAP_FAIL", "club=%04X start=%u bench=%u",
                      club->id, starter, substitute);
     if (!SWOS_AI_IdentityJournalAdd(club->sourceFile, club->sourceRecord, starter,
@@ -2480,6 +2818,45 @@ static void SWOS_IdentityResolveClub(unsigned club)
             unsigned id=(country<<8)|(uint8_t)teams[i].team.teamOrdinal;
             if(id==club){SWOS_IdentityRegisterClub(id,country,i);break;}
         }
+    }
+    free(snapshot);
+}
+
+/* Ensure the two manually expanded TEAM files are registered even before
+ * AI transfers or the world-player search touch them. TEAM.009 is already
+ * fully canonical; TEAM.047 uses persistent manual IDs for its 224 original
+ * slots. Source mapping always uses verified TEAM record numbers, never team
+ * ordinals. This also covers loading older careers which lack the extensions. */
+static void SWOS_IdentityBootstrapExpandedTeams(void)
+{
+    if (!s_identity_records) return;
+    const unsigned countries[2]={9u,47u};
+    const size_t cap=2u+93u*sizeof(TeamFileEx);
+    uint8_t *snapshot=malloc(cap);
+    if (!snapshot) return;
+    for (unsigned f=0;f<2u;f++) {
+        unsigned country=countries[f],mapped=0,canonical=0,missing=0;
+        uint16_t count=0;
+        if (!SWOS_AI_P3ReadCountry(country,snapshot,cap,&count)) {
+            swos_age_log("IDENTITY_EXPANSION_ASSET_MISSING","file=%u",country);
+            continue;
+        }
+        const TeamFileEx *teams=(const TeamFileEx *)(snapshot+2);
+        for (unsigned record=0;record<count;record++) {
+            if (teams[record].team.countryNumber!=country) continue;
+            unsigned club=(country<<8)|(uint8_t)teams[record].team.teamOrdinal;
+            SWOS_IdentityRegisterClub(club,country,record);
+            mapped++;
+            for (unsigned slot=0;slot<16u;slot++) {
+                uint32_t key=((uint32_t)country<<12)|
+                             ((uint32_t)record<<4)|slot;
+                if (SWOS_IdentityFind(key)>=0) canonical++;
+                else missing++;
+            }
+        }
+        swos_age_log("IDENTITY_EXPANSION_AUDIT",
+            "file=%u clubs=%u canonical_slots=%u extension_slots=%u",
+            country,mapped,canonical,missing);
     }
     free(snapshot);
 }
@@ -2942,11 +3319,15 @@ static void SWOS_RetirementLiveManaged(unsigned season,
             }
         unsigned age=0,oldId=0;
         int ix=-1;
-        if(tracked && generatedIndex>=0){
-            /* Two registries claim the same physical player: fail closed. */
+        if(tracked && generatedIndex>=0 &&
+           SWOS_ManualFind(team,slot)>=0 &&
+           s_manual_ids[SWOS_ManualFind(team,slot)].id){
+            /* Two ACTIVE registries claim one player. An obsolete zero-ID
+             * tombstone is not a competing claim and must not suppress a
+             * perfectly valid generated youth's retirement eligibility. */
             skipped++;
             swos_age_log("RETIRE_LIVE_MANAGED_SKIP",
-                "club=%04X slot=%u reason=manual_generated_overlap",team,slot);
+                "club=%04X slot=%u reason=active_manual_generated_overlap",team,slot);
             continue;
         }
         if(generatedIndex>=0){
@@ -3069,41 +3450,50 @@ static void SWOS_RetirementLiveAI(unsigned season)
     SWOS_RetirementLiveManaged(season,clubs,n,&seed);
     if(!aiOn){SWOS_RetirementBalanceFlush(season);free(clubs);return;}
     unsigned inspected=0,eligible=0,retired=0,skipped=0,capacity=0,generatedRetired=0,manualRetired=0,manualTombstones=0,overlaps=0;
+    unsigned recoveredGenerated=0, staleTombstoneGenerated=0, missingIdentity=0, mirroredClaims=0;
+    unsigned eligibleByAge[6]={0},retiredByAge[6]={0};
     for(unsigned c=0;c<n;c++){
         SWOS_AI_P3Club *club=&clubs[c];
         for(unsigned slot=0;slot<16;slot++){
-            /* Resolve the physical player's authoritative identity. An active
-             * manual record wins over the canonical shadow after a manual
-             * transfer. Tombstones remain unknown and must never be retired. */
             int manualIndex=SWOS_ManualFind(club->id,slot);
-            if(manualIndex>=0 && !s_manual_ids[manualIndex].id){
-                manualTombstones++;skipped++;continue;
-            }
             int generatedIndex=-1;
             for(unsigned gi=0;gi<s_generated_count;gi++)
                 if(s_generated[gi].team==club->id&&s_generated[gi].slot==slot){
                     generatedIndex=(int)gi;break;
                 }
+            /* A zero-ID manual entry is a tombstone, not a competing player.
+             * A legitimate generated identity at that slot remains usable.
+             * Keep the tombstone untouched unless this youth actually retires. */
+            if(manualIndex>=0 && !s_manual_ids[manualIndex].id){
+                if(generatedIndex>=0){
+                    staleTombstoneGenerated++;
+                    manualIndex=-1;
+                }else{
+                    manualTombstones++;skipped++;continue;
+                }
+            }
             if(manualIndex>=0&&generatedIndex>=0){
-                /* Concurrent claims to the same live slot must be resolved
-                 * before retirement, not silently given a third identity. */
                 overlaps++;skipped++;continue;
             }
             uint32_t key=((uint32_t)club->sourceFile<<12)|
                          ((uint32_t)club->sourceRecord<<4)|slot;
             int ix=SWOS_IdentityFind(key);
-            if((manualIndex<0&&ix<0)||!SWOS_AI_P3IsValid(club->players[slot])){
+            /* Generated and manually tracked players do not need a canonical
+             * source slot. Previously a missing ix excluded even a valid
+             * generated footballer from ageing-based retirement forever. */
+            if((manualIndex<0&&generatedIndex<0&&ix<0)||
+               !SWOS_AI_P3IsValid(club->players[slot])){
+                if(ix<0&&manualIndex<0&&generatedIndex<0)missingIdentity++;
                 skipped++;continue;
             }
-            /* A canonical ID mirrored by a manual transfer elsewhere is not
-             * the footballer in this slot, even if the roster seems valid. */
             unsigned trackedId=manualIndex>=0?s_manual_ids[manualIndex].id:
                 generatedIndex>=0?s_generated[generatedIndex].id:s_identity_records[ix].id;
+            if(generatedIndex>=0 && ix<0)recoveredGenerated++;
             if(manualIndex<0&&generatedIndex<0){
                 int mirrored=0;
                 for(unsigned m=0;m<s_manual_count;m++)
                     if(s_manual_ids[m].id==trackedId){mirrored=1;break;}
-                if(mirrored){skipped++;continue;}
+                if(mirrored){mirroredClaims++;skipped++;continue;}
             }
             unsigned age=manualIndex>=0?s_manual_ids[manualIndex].age:
                 generatedIndex>=0?s_generated[generatedIndex].age:s_identity_records[ix].age;
@@ -3111,6 +3501,8 @@ static void SWOS_RetirementLiveAI(unsigned season)
             unsigned chance=SWOS_RetirementChance(age);
             if(!chance)continue;
             eligible++;
+            unsigned ageBand=age>=40u?5u:age-35u;
+            eligibleByAge[ageBand]++;
             unsigned roll=SWOS_RetirementRandom(&seed)%100u;
             if(roll>=chance)continue;
             unsigned override=SWOS_AI_P3OverrideIndex(club->id,slot);
@@ -3148,6 +3540,7 @@ static void SWOS_RetirementLiveAI(unsigned season)
             SWOS_RetirementBalanceRecord(season,0,club->id,slot,old,fresh,age,
                                         &retiringPlayer,&youth);
             retired++;
+            retiredByAge[ageBand]++;
             if(generatedIndex>=0)generatedRetired++;
             if(manualIndex>=0)manualRetired++;
             if(retired<=20u)swos_age_log("RETIRE_LIVE_REPLACED",
@@ -3158,9 +3551,15 @@ static void SWOS_RetirementLiveAI(unsigned season)
         }
     }
     swos_age_log("RETIRE_LIVE_AI",
-        "season=%u clubs=%u inspected=%u eligible=%u retired=%u replacements=%u generated=%u manual=%u tombstones=%u overlaps=%u skipped=%u capacity_skips=%u registry_valid=%u mode=opt_in_ai_only",
+        "season=%u clubs=%u inspected=%u eligible=%u retired=%u replacements=%u generated=%u manual=%u tombstones=%u overlaps=%u skipped=%u capacity_skips=%u registry_valid=%u recovered_generated=%u generated_with_tombstone=%u missing_identity=%u mirrored_claims=%u",
         season,n,inspected,eligible,retired,retired,generatedRetired,manualRetired,
-        manualTombstones,overlaps,skipped,capacity,SWOS_IdentityCheck());
+        manualTombstones,overlaps,skipped,capacity,SWOS_IdentityCheck(),
+        recoveredGenerated,staleTombstoneGenerated,missingIdentity,mirroredClaims);
+    swos_age_log("RETIRE_ELIGIBILITY_BY_AGE",
+        "season=%u age35=%u/%u age36=%u/%u age37=%u/%u age38=%u/%u age39=%u/%u age40plus=%u/%u",
+        season,retiredByAge[0],eligibleByAge[0],retiredByAge[1],eligibleByAge[1],
+        retiredByAge[2],eligibleByAge[2],retiredByAge[3],eligibleByAge[3],
+        retiredByAge[4],eligibleByAge[4],retiredByAge[5],eligibleByAge[5]);
     swos_age_log("RETIRE_HISTORY","season=%u total=%u",season,s_retired_count);
     SWOS_RetirementBalanceFlush(season);
     free(clubs);
@@ -3617,6 +4016,7 @@ void InitCareer(uint16_t teamNo)
     _currentSeasonShowing = 0xFFFF;
     _seasonPlaying--;
     InitializeNewSeason();
+    SWOS_IdentityBootstrapExpandedTeams();
     /* AI transfers are strictly manual. No P1/P2 smoke or stress tests
      * may run during career creation, regardless of environment variables. */
     _careerLoadedFlag = 0;
@@ -3744,6 +4144,12 @@ void ContinueCareerNextSeason(void)
             trackedInternational, (unsigned)removedMask,
             (unsigned)_careerNumPlayers);
     }
+    /* Post-season repair after retirements and AI transfers. A failed check
+     * is logged and never silently destroys any footballer or save data. */
+    if (!SWOS_CareerIntegrityCheck("season_end", (unsigned)_careerSeasonsCompleted))
+        swos_age_log("CAREER_INTEGRITY_UNRESOLVED",
+                     "season=%u save_preflight_will_recheck=1",
+                     (unsigned)_careerSeasonsCompleted);
     SWOS_NationalTrace("ROSTER_REFRESH_POINT", "completed=%u selected=%04X ages_retirements_transfers_done=1",
         (unsigned)_careerSeasonsCompleted, (unsigned)_selTeamNumber);
     /* Observe the active worldwide squads after retirement and AI transfers. */

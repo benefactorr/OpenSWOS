@@ -14,6 +14,8 @@ unsigned SWOS_IdentityNextId(void);
 unsigned SWOS_IdentityCheck(void);
 /* Non-mutating cross-registry audit. Canonical/manual mirrors are expected. */
 unsigned SWOS_IdentityAudit(void);
+/* Validates and safely reconciles career identities at season end / before save. */
+unsigned SWOS_CareerIntegrityCheck(const char *phase, unsigned season);
 /* Experimental, checked club-to-canonical-slot lookup. Returns zero on an unmapped club. */
 void SWOS_IdentityRegisterClub(unsigned club,unsigned file,unsigned record);
 void SWOS_IdentityInvalidateClub(unsigned club);

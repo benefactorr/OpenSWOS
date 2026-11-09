@@ -5684,6 +5684,25 @@ static void emit_career_winners(mjson_print_fn_t fn, void *fnd)
 
 int16_t SaveJson_WriteCareer(uint8_t *filename)
 {
+    /* All identity repairs MUST precede canonical, generated and manual
+     * serialisation. Previously reconciliation happened too late, leaving
+     * the next-ID field stale in otherwise well-formed CAR files. */
+    extern unsigned SWOS_CareerIntegrityCheck(const char *, unsigned);
+    if (!SWOS_CareerIntegrityCheck("pre_save", (unsigned)_careerSeasonsCompleted)) {
+        swos_age_log("CAREER_SAVE_BLOCKED", "reason=unresolved_identity_conflict season=%u",
+                     (unsigned)_careerSeasonsCompleted);
+        return 1; /* Do not overwrite the previously saved career. */
+    }
+    /* Preserve existing saves if the age snapshot unexpectedly disappears.
+     * Otherwise every missing name silently displays the default age 25. */
+    {
+        size_t age_count = SWOS_AgesCount();
+        if (age_count < 1000u) {
+            swos_age_log("CAREER_SAVE_BLOCKED", "reason=missing_age_snapshot entries=%zu", age_count);
+            return 1;
+        }
+        swos_age_log("CAREER_AGE_PREFLIGHT", "phase=save entries=%zu", age_count);
+    }
     JsonOutBuf out = { NULL, 0, 0, 0 };
 
     /* Reset string pool — emit_str_pool_field consumers (the four
@@ -6084,7 +6103,7 @@ int16_t SaveJson_WriteCareer(uint8_t *filename)
      * Repair stale duplicate claims before serialising: the strict loader
      * rejects two manual records with the same nonzero permanent ID. */
     {
-        unsigned deduplicated=SWOS_ManualIdentityPrepareSave();
+        unsigned deduplicated=0; /* already reconciled before all fields */
         unsigned count=SWOS_ManualIdentityCount(),values[5];
         if(deduplicated)
             swos_age_log("MANUAL_ID_SAVE_RECOVERY", "duplicate_claims=%u",deduplicated);
@@ -6614,6 +6633,29 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
         }
     }
 
+    /* Reject a missing or incomplete age snapshot before clearing the live
+     * age map. CAR v4 stores roughly 21,000 original-name entries; accepting
+     * an empty array otherwise makes every age appear as fallback 25. */
+    {
+        const char *arr = NULL;
+        int alen = 0, pos = 0, off = 0, len = 0, typ = 0;
+        unsigned entries = 0;
+        if (mjson_find((const char *)src, (int)src_size,
+                       "$.career_age_snapshot_v4", &arr, &alen) != MJSON_TOK_ARRAY) {
+            swos_age_log("CAREER_AGE_REJECT", "phase=load reason=missing_array");
+            swos_io_free(src); CAREER_LOAD_REJECT();
+        }
+        while ((pos = fast_array_next(arr, alen, pos, &off, &len, &typ)) != 0) {
+            if (typ != MJSON_TOK_ARRAY) break;
+            ++entries;
+        }
+        swos_age_log("CAREER_AGE_PREFLIGHT", "phase=load snapshot_entries=%u", entries);
+        if (entries < 1000u || typ != MJSON_TOK_ARRAY) {
+            swos_age_log("CAREER_AGE_REJECT", "phase=load reason=incomplete_snapshot entries=%u", entries);
+            swos_io_free(src); CAREER_LOAD_REJECT();
+        }
+    }
+
     /* Clear the two surviving careerFileBuffer scalars before the typed load
      * repopulates them. The 256 KB careerFileBufferBuf overlay (which the
      * legacy load memset cleared whole) is RETIRED — every career field is now
@@ -6652,6 +6694,14 @@ int16_t SaveJson_LoadCareer(uint8_t *filename, const uint8_t *src_unused,
                 SWOS_AgesSet(name, age);
             }
             SWOS_AgesEndRestore();
+            {
+                size_t restored = SWOS_AgesCount();
+                swos_age_log("CAREER_AGE_RESTORE_CHECK", "entries=%zu", restored);
+                if (restored < 1000u) {
+                    swos_age_log("CAREER_AGE_REJECT", "phase=load reason=restore_failed entries=%zu", restored);
+                    swos_io_free(src); CAREER_LOAD_REJECT();
+                }
+            }
         }
     }
 
