@@ -4202,8 +4202,12 @@ void Career_AutoAdvanceLeagueFixtures(void)
     DIYCompetition *base = &_diyCompetitionStart.base;
     uint8_t *lastMatchSlots = _careerLastMatchIndexByCompetitionSlot;
     uint8_t slotIdx = base->field_2E;
-    uint8_t *lastMatchPtr = lastMatchSlots + (uint16_t)slotIdx;
-    if (slotIdx >= 162) { DIVTRACE("INVALID COMPETITION SLOT %u; abort", (unsigned)slotIdx); return; }
+    if (slotIdx >= 162u) {
+        DIVTRACE("LEAGUE_UNMAPPED_COMPETITION_SLOT slot=%u comp=%04X; skip unsafe advance",
+                 (unsigned)slotIdx, (unsigned)*(uint16_t *)&base->compSlot);
+        return;
+    }
+    uint8_t *lastMatchPtr = lastMatchSlots + slotIdx;
     uint8_t lastMatch = *lastMatchPtr;
     DIVTRACE("PHASE current=%u next=%u slot=%u last=%u view=%u leagueCurrent=%u progress=%u", (unsigned)currentPhase, (unsigned)nextPhase, (unsigned)slotIdx, (unsigned)lastMatch, (unsigned)base->viewRandomPhase, (unsigned)_diyCompetitionStart.leagueCurrentSlot, (unsigned)_diyCompetitionStart.leagueMatchProgress);
 
@@ -4368,7 +4372,20 @@ void Career_AutoAdvanceCupMatches(void)
     DIYCompetition *base = &_diyCompetitionStart.base;
     uint8_t *lastMatchSlots = _careerLastMatchIndexByCompetitionSlot;
     uint8_t slotIdx = base->field_2E;
-    uint8_t *lastMatchPtr = lastMatchSlots + (uint16_t)slotIdx;
+    /* This 162-byte saved-state array is not extended to cover custom
+     * competition slots 200/202. A raw index here could corrupt nearby
+     * career state. Do not invent an alias with a different competition. */
+    if (slotIdx >= 162u) {
+        FILE *cupLog = fopen("swos_division_debug.log", "a");
+        if (cupLog) {
+            fprintf(cupLog,
+                    "CUP_UNMAPPED_COMPETITION_SLOT slot=%u comp=%04X; skip unsafe advance\n",
+                    (unsigned)slotIdx, (unsigned)*(uint16_t *)&base->compSlot);
+            fclose(cupLog);
+        }
+        return;
+    }
+    uint8_t *lastMatchPtr = lastMatchSlots + slotIdx;
     uint8_t lastMatch = *lastMatchPtr;
 
 #ifdef SWOS_DEBUG_AUTOSKIP

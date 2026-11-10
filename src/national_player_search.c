@@ -72,6 +72,42 @@ extern TeamFileEx _careerTeam;
 extern uint16_t _numForeignMarketPlayers2;
 extern MarketPlayer _careerForeignMarketPlayers[];
 
+/* Prefer active career rosters. Raw TEAM files are only a fallback for clubs
+ * which have not been loaded into the running career's team caches. This is
+ * the same order as World Player Search and GetTeamPointer. */
+extern uint16_t _currentTeamNumber, _selTeamNumber;
+extern uint8_t _currentTeam[];
+extern uint16_t _numSelectedTeams, _careerFileBuffer;
+extern TeamFileEx _selectedTeams[];
+extern uint8_t _tmdFileBuffer[];
+extern uint16_t _careerAutoAdvanceInProgress;
+extern void SWOS_IdentityRegisterClub(unsigned club,unsigned file,unsigned record);
+extern unsigned SWOS_IdentityAgeForClub(unsigned club,unsigned slot,unsigned *age,unsigned *id);
+static const TeamFileEx *national_live_team(uint16_t id)
+{
+    if (id == _currentTeamNumber) {
+        const TeamFileEx *t=(const TeamFileEx *)_currentTeam;
+        if (PACK_BE_U16(t->team.countryNumber,t->team.teamOrdinal)==id) return t;
+    }
+    if (id==_selTeamNumber || _careerAutoAdvanceInProgress) {
+        if (PACK_BE_U16(_careerTeam.team.countryNumber,
+                        _careerTeam.team.teamOrdinal)==id) return &_careerTeam;
+    }
+    unsigned n=_numSelectedTeams;
+    if (n>100u) n=100u;
+    for(unsigned i=0;i<n;i++) {
+        const TeamFileEx *t=&_selectedTeams[i];
+        if(PACK_BE_U16(t->team.countryNumber,t->team.teamOrdinal)==id) return t;
+    }
+    n=_careerFileBuffer;
+    if(n>128u)n=128u;
+    const TeamFileEx *tmd=(const TeamFileEx *)_tmdFileBuffer;
+    for(unsigned i=0;i<n;i++)
+        if(PACK_BE_U16(tmd[i].team.countryNumber,tmd[i].team.teamOrdinal)==id)
+            return &tmd[i];
+    return NULL;
+}
+
 /* Fast index: team ID + physical player slot -> newest career replacement.
  * Avoid GetTeamPointer(), which reloads the country file and loops over
  * the entire replacement pool for every individual club. */
@@ -320,10 +356,16 @@ static void scan_world(void){
             if (team->team.countryNumber >= CN_EUROPE &&
                 team->team.countryNumber <= CN_OCEANIA) continue;
             uint16_t id=PACK_BE_U16(team->team.countryNumber,team->team.teamOrdinal);
-            /* Overlay current career players (including AI exchanges). */
-            for (unsigned slot=0;slot<16;slot++) {
-                const PlayerFile *patch=replacement_for(id,slot);
-                if (patch) memcpy(&team->players[slot],patch,sizeof(PlayerFile));
+            SWOS_IdentityRegisterClub(id,(unsigned)c,t);
+            const TeamFileEx *live=national_live_team(id);
+            if(live) {
+                memcpy(team->players,live->players,sizeof(team->players));
+                search_log("LIVE_ROSTER club=%04X source=career_cache",(unsigned)id);
+            } else {
+                for(unsigned slot=0;slot<16;slot++) {
+                    const PlayerFile *patch=replacement_for(id,slot);
+                    if(patch) memcpy(&team->players[slot],patch,sizeof(PlayerFile));
+                }
             }
             for (unsigned i=0;i<16;i++) {
                 PlayerFile *p=&team->players[i];
@@ -429,7 +471,11 @@ void NationalPlayerSearch(void){
             SearchPlayer *p=&s_players[playerIndex];
             uint8_t idBytes[2]={(uint8_t)(p->team>>8),(uint8_t)p->team};
             _nationalSearchTargetPlayerIndex=p->fileIndex;
-            search_log("CALLUP ENTER club=%u slot=%u", (unsigned)p->team, (unsigned)p->fileIndex);
+            unsigned sourceAge=0,sourceId=0;
+            unsigned ageResolved=SWOS_IdentityAgeForClub(p->team,p->fileIndex,&sourceAge,&sourceId);
+            search_log("CALLUP ENTER club=%04X slot=%u name=%s source_age=%u source_id=%u age_resolved=%u",
+                       (unsigned)p->team,(unsigned)p->fileIndex,p->name,
+                       sourceAge,sourceId,ageResolved);
             Career_AddInternationalPlayerCommon(idBytes,_aAddInternation_0);
             search_log("CALLUP RETURN result=%u squad=%u/20",
                        (unsigned)_careerAddIntlPlayerResult,

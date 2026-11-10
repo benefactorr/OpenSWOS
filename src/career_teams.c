@@ -15,6 +15,7 @@
 #include "endian_helpers.h"
 #include "game_types.h"
 #include "auto_skip_debug.h"
+#include "swos_national_trace.h"
 #include "panic.h"
 #include "teams.h"
 
@@ -193,6 +194,7 @@ typedef struct V3ClubCandidate {
 } V3ClubCandidate;
 static V3ClubCandidate v3_club_pool[V3_POOL_LIMIT];
 static unsigned v3_pool_count;
+static uint8_t v3_pool_country_loaded[80];
 static uint16_t v3_pool_season=0xFFFFu;
 static uint8_t v3_file_raw[2u + V3_COUNTRY_TEAMS * sizeof(TeamFileEx)];
 static uint8_t v3_file_packed[sizeof(v3_file_raw)];
@@ -310,18 +312,33 @@ static void v3_refresh_pool(void)
     if(v3_building_pool || v3_pool_season==_currentSeasonShowing)return;
     v3_building_pool=1;
     v3_pool_count=0;
+    memset(v3_pool_country_loaded,0,sizeof v3_pool_country_loaded);
     v3_index_market();
     for(unsigned country=0;country<80u;country++) {
         if(!v3_valid_club_file(country))continue;
         unsigned count=v3_load_club_country(country);
+        if(count)v3_pool_country_loaded[country]=1;
         for(unsigned t=0;t<count;t++) {
             TeamFileEx *team=(TeamFileEx *)(v3_file_raw+2u+t*sizeof(TeamFileEx));
             if(team->team.countryNumber>=80u)continue;
             uint16_t id=PACK_BE_U16(team->team.countryNumber,team->team.teamOrdinal);
+            /* National call-up eligibility must use the same club roster that
+             * the manager sees. The raw TEAM file and market override pool can
+             * lag a live current/selected/TMD roster after a transfer or
+             * retirement. Never reinstate an obsolete player from that file. */
+            TeamFileEx *cached=0;
+            uint16_t cacheIndex=0;
+            if(findTeamInCache(id,&cached,&cacheIndex))
+                cached=findTeamInTmdBuffer(id);
+            if(cached && PACK_BE_U16(cached->team.countryNumber,
+                                     cached->team.teamOrdinal)!=id)
+                cached=0;
             for(unsigned slot=0;slot<16u;slot++) {
-                PlayerFile *p=&team->players[slot];
-                const PlayerFile *market=v3_market_player(id,slot);
-                if(market)p=(PlayerFile *)market;
+                const PlayerFile *p=cached ? &cached->players[slot] : &team->players[slot];
+                if(!cached) {
+                    const PlayerFile *market=v3_market_player(id,slot);
+                    if(market)p=market;
+                }
                 if(!p->playerName[0]||(uint8_t)p->playerName[0]==0xFFu)continue;
                 if(v3_pool_count==V3_POOL_LIMIT)break;
                 V3ClubCandidate *item=&v3_club_pool[v3_pool_count++];
@@ -3170,6 +3187,103 @@ void Career_UpdateRemovePlayersMenuEntry(void)
     if (count != 1) {
         _menuEntries[6].fg = (uintptr_t)_aRemovePlayers;  /* plural */
     }
+}
+
+extern uint8_t _careerUnavailablePlayerLookupTable[];
+extern void Career_RemoveInternationalPlayersByMask(uint32_t mask);
+
+/* Career+ national roster reconciliation after the annual club retirement
+ * and transfer pass. A national PlayerFile is only a copy: its original
+ * club/slot can be replaced by a youngster, or the footballer can move.
+ * Retired identity checks alone cannot detect a stale national copy when
+ * its original lookup now resolves to the replacement's identity.
+ *
+ * Use the same LIVE club-only pool as dynamic national selection. Match the
+ * full stored player name and nationality; do not compare display slots,
+ * which are reordered independently from the 20 physical file slots.
+ * A unique relocated player gets a corrected source lookup. A player not
+ * present at any live club is removed. Ambiguous or incomplete lookups are
+ * kept, never guessed, to prevent deleting a legitimate footballer.
+ * Existing .CAR structure and identity numbering remain unchanged. */
+__attribute__((used, externally_visible))
+void SWOS_NationalReconcileAfterSeason(void)
+{
+    if (!_isNationalSelector || _selTeamNumber < 0x5000u ||
+        _selTeamNumber >= 0x5600u) return;
+
+    /* The pool may have been built earlier in the season; the annual AI
+     * transfers and retirements changed the live rosters since then. */
+    v3_pool_season = 0xFFFFu;
+    v3_refresh_pool();
+    uint16_t *lookup=(uint16_t *)_careerUnavailablePlayerLookupTable;
+    uint32_t removeMask=0;
+    unsigned considered=0, kept=0, relinked=0, missing=0, ambiguous=0;
+    for (unsigned slot=0;slot<20u;slot++) {
+        const PlayerFile *national=&_careerTeam.players[slot];
+        if (!national->playerName[0] ||
+            (uint8_t)national->playerName[0]==0xFFu ||
+            lookup[slot*2u]==0xFFFFu) continue;
+        considered++;
+        unsigned matching=0;
+        uint16_t matchClub=0;
+        uint8_t matchSlot=0;
+        /* Prefer exact current club+slot when still occupied by the same
+         * footballer. A name appearing in two unrelated clubs is otherwise
+         * ambiguous; never relocate on the basis of one of those copies. */
+        unsigned currentMatch=0;
+        for(unsigned i=0;i<v3_pool_count;i++) {
+            const V3ClubCandidate *c=&v3_club_pool[i];
+            if(c->player.nationality!=national->nationality ||
+               memcmp(c->player.playerName,national->playerName,
+                      sizeof national->playerName)) continue;
+            if(c->club==lookup[slot*2u] && c->slot==lookup[slot*2u+1u])
+                currentMatch=1;
+            matchClub=c->club;
+            matchSlot=c->slot;
+            matching++;
+        }
+        if(currentMatch) {kept++;continue;}
+        if(matching==1u) {
+            unsigned oldClub=lookup[slot*2u],oldSlot=lookup[slot*2u+1u];
+            lookup[slot*2u]=matchClub;
+            lookup[slot*2u+1u]=matchSlot;
+            relinked++;
+            SWOS_NationalTrace("NATIONAL_SOURCE_RELINK","season=%u team=%04X slot=%u old=%04X:%u new=%04X:%u name=%.23s",
+                 (unsigned)_currentSeasonShowing,(unsigned)_selTeamNumber,slot,
+                 oldClub,oldSlot,(unsigned)matchClub,(unsigned)matchSlot,
+                 (const char *)national->playerName);
+            continue;
+        }
+        if(matching) {
+            ambiguous++;
+            SWOS_NationalTrace("NATIONAL_SOURCE_AMBIGUOUS","season=%u team=%04X slot=%u matches=%u name=%.23s",
+                (unsigned)_currentSeasonShowing,(unsigned)_selTeamNumber,
+                slot,matching,(const char *)national->playerName);
+            continue;
+        }
+        /* Do not treat a source country omitted from the pool as evidence
+         * of retirement. Those club files are deliberately not scanned. */
+        if ((lookup[slot*2u]>>8)>=80u ||
+            !v3_valid_club_file(lookup[slot*2u]>>8) ||
+            !v3_pool_country_loaded[lookup[slot*2u]>>8]) {
+            ambiguous++;
+            SWOS_NationalTrace("NATIONAL_SOURCE_UNVERIFIED","season=%u team=%04X slot=%u club=%04X name=%.23s",
+                (unsigned)_currentSeasonShowing,(unsigned)_selTeamNumber,
+                slot,(unsigned)lookup[slot*2u],
+                (const char *)national->playerName);
+            continue;
+        }
+        removeMask |= (uint32_t)1u<<slot;
+        missing++;
+        SWOS_NationalTrace("NATIONAL_SOURCE_MISSING","season=%u team=%04X slot=%u source=%04X:%u name=%.23s action=remove",
+            (unsigned)_currentSeasonShowing,(unsigned)_selTeamNumber,slot,
+            (unsigned)lookup[slot*2u],(unsigned)lookup[slot*2u+1u],
+            (const char *)national->playerName);
+    }
+    if(removeMask)Career_RemoveInternationalPlayersByMask(removeMask);
+    SWOS_NationalTrace("NATIONAL_SOURCE_RECONCILE","season=%u team=%04X inspected=%u kept=%u relinked=%u removed=%u ambiguous=%u mask=%08X",
+        (unsigned)_currentSeasonShowing,(unsigned)_selTeamNumber,considered,
+        kept,relinked,missing,ambiguous,(unsigned)removeMask);
 }
 
 /* ================================================================

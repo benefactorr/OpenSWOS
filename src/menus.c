@@ -1937,6 +1937,33 @@ void SquadAfterDrawCommon(void *entryPtr)
                 managedAgeResolved=1;
             }
         }
+        /* National squads contain COPIES of club players. Looking up an age
+         * by national team ID (0x50xx) fails, after which the old renderer
+         * used the name-based CSV snapshot. That snapshot can refer to an
+         * obsolete player with the same name, e.g. a 47-year-old national
+         * copy while the current club player is 35. Use the saved source
+         * club and physical slot instead. Do not modify player data. */
+        if (_isNationalSquad != 0 && d4_fileIdx < 20u &&
+            _squadTeamFilePtr == (uintptr_t)&_careerTeam) {
+            extern uint16_t _careerUnavailablePlayerLookupTable[];
+            unsigned sourceClub=_careerUnavailablePlayerLookupTable[(unsigned)d4_fileIdx*2u];
+            unsigned sourceSlot=_careerUnavailablePlayerLookupTable[(unsigned)d4_fileIdx*2u+1u];
+            unsigned sourceAge=0,sourceId=0;
+            unsigned sourceFound=0;
+            if(sourceClub!=0xFFFFu && (sourceClub>>8)<80u && sourceSlot<16u) {
+                sourceFound=SWOS_IdentityAgeForClub(sourceClub,sourceSlot,&sourceAge,&sourceId);
+                if(sourceFound && sourceId && sourceAge>=15u && sourceAge<=60u) {
+                    age=sourceAge;
+                    managedAgeResolved=1;
+                }
+            }
+            if ((unsigned)d4_fileIdx==1u || (sourceFound && sourceAge>=40u))
+                swos_age_log("NATIONAL_SOURCE_AGE_RENDER",
+                    "national=%04X slot=%u source=%04X:%u got=%u id=%u identity_age=%u shown_age=%u name=%.22s",
+                    (unsigned)_selTeamNumber,(unsigned)d4_fileIdx,
+                    sourceClub,sourceSlot,sourceFound,sourceId,sourceAge,age,
+                    (const char *)pf->playerName);
+        }
         if (!managedAgeResolved && _isNationalSquad == 0) {
             unsigned club=PACK_BE_U16(tf->countryNumber,tf->teamOrdinal);
             unsigned idAge=0,id=0,found=0;

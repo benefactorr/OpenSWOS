@@ -123,6 +123,8 @@ extern uint16_t _randomSeed;
 extern uint8_t _newRandomSeedCopy;
 extern uint8_t _viewRandomPhase;
 extern uint16_t _numSelectedTeams;
+extern uint16_t _gameType;
+extern uint16_t _isNationalSelector;
 /* Temporary investigation of Yugoslav second-division end-of-season crashes.
  * Remove after the table/menu failure has been identified. */
 static void debug_league_table_state(const char *stage)
@@ -143,20 +145,27 @@ static void debug_league_table_state(const char *stage)
         fprintf(f, "TABLE INVALID DIMENSIONS: impossible standings count\n");
         fclose(f); return;
     }
-    if (total > 14)
-        fprintf(f, "TABLE WARNING: offset count exceeds declared 14-word field (possible legacy alias usage)\n");
-    /* The stored offsets are relative to the beginning of the standings rows,
-       NOT to the beginning of the competition structure. */
-    for (unsigned i = 0; i < total && i < 14; i++) {
-        unsigned off = ex->matchData.league.teamEntryOffsets[i];
+    /* teamEntryOffsets[14] is a legacy alias over matchData.raw. Large
+     * leagues deliberately use the following bytes. The array declaration
+     * is NOT the actual usable number of entries. Do not index beyond the
+     * declared array in diagnostic code or misreport valid 18-team leagues. */
+    const size_t offBase = offsetof(DIYCompetitionEx_LeagueView, teamEntryOffsets);
+    const unsigned available = (unsigned)((sizeof(ex->matchData.raw) - offBase) /
+                                           sizeof(uint16_t));
+    if (total > available)
+        fprintf(f, "TABLE ERROR: offsets exceed matchData storage required=%u available=%u\n",
+                total, available);
+    for (unsigned i = 0; i < total && i < available; i++) {
+        uint16_t off = 0;
+        memcpy(&off, ex->matchData.raw + offBase + i * sizeof(off), sizeof(off));
         unsigned valid = off % sizeof(DIYTeamStats) == 0 &&
                          off / sizeof(DIYTeamStats) < 64;
-        fprintf(f, "TABLE entry[%u]=%u valid=%u\n", i, off, valid);
+        fprintf(f, "TABLE entry[%u]=%u valid=%u\n", i, (unsigned)off, valid);
         if (valid) {
-            DIYTeamStats *row = &ex->leagueStandings[off / sizeof(DIYTeamStats)];
-            fprintf(f, "TABLE stats[%u] teamSelOffset=%u points=%u goals=%u:%u\n",
-                    i, (unsigned)row->teamSelOffset, (unsigned)row->points,
-                    (unsigned)row->goalsFor, (unsigned)row->goalsAgainst);
+            DIYTeamStats *r = &ex->leagueStandings[off / sizeof(DIYTeamStats)];
+            fprintf(f, "TABLE stats[%u] teamSelOffset=%d points=%u goals=%u:%u\n",
+                    i, (int)r->teamSelOffset, (unsigned)r->points,
+                    (unsigned)r->goalsFor, (unsigned)r->goalsAgainst);
         }
     }
     fclose(f);
@@ -180,6 +189,40 @@ uint8_t *diy_resolve_team(int32_t teamSel)
 {
     if (teamSel < 0)                                          /* -1 = careerTeam */
         return (uint8_t *)&_careerTeam;
+
+    /* A national career can retain the original TEAM.080 national side in
+     * selectedTeams[0], while the current 20-player manager-controlled squad
+     * is stored separately in careerTeam.  Saved tournament standings may
+     * refer to the positive selected-team index rather than the special -1
+     * identity.  Using the cached copy starts the World Cup match with the
+     * 1996 Yugoslav players and their old injuries, even though the career
+     * squad screen shows the actual current internationals.
+     *
+     * Resolve by the exact managed team ID, not by name or teamControls:
+     * teamControls may also be PLAYER_COACH on the stale selected-team copy.
+     * Do not mutate the tournament identity or any other national side. */
+    if (_gameType == 4 /* career */ && _isNationalSelector &&
+        teamSel < (int32_t)_numSelectedTeams &&
+        PACK_BE_U16(_careerTeam.team.countryNumber,
+                    _careerTeam.team.teamOrdinal) == _selTeamNumber &&
+        PACK_BE_U16(_selectedTeams[teamSel].team.countryNumber,
+                    _selectedTeams[teamSel].team.teamOrdinal) == _selTeamNumber) {
+        static uint16_t lastLoggedTeam = 0xFFFF;
+        if (lastLoggedTeam != _selTeamNumber) {
+            FILE *f = fopen("swos_national_match_source.log", "a");
+            if (f) {
+                fprintf(f, "NATIONAL_MATCH_SOURCE_REDIRECT selected_index=%ld team=%04X "
+                           "cached_first=%.22s career_first=%.22s career_count=%u\n",
+                        (long)teamSel, (unsigned)_selTeamNumber,
+                        _selectedTeams[teamSel].players[0].playerName,
+                        _careerTeam.players[0].playerName,
+                        (unsigned)_careerNumPlayers);
+                fclose(f);
+            }
+            lastLoggedTeam = _selTeamNumber;
+        }
+        return (uint8_t *)&_careerTeam;
+    }
     return (uint8_t *)(_selectedTeams + teamSel); /* selTeamsPtr + index*684 */
 }
 uint8_t *diy_resolve_team_name(int32_t teamSel)
@@ -680,64 +723,74 @@ __attribute__((used, externally_visible))
 void DIY_SortLeagueTableByStandings(void)
 {
     DIYCompetitionEx *comp = &_diyCompetitionStart;
-    DIYCompetition *a4s = &comp->base;
-    uint8_t *a4 = (uint8_t *)a4s;
-    uint16_t numGroups = (uint16_t)a4s->matchPairsPerRound;
-    uint16_t teamsPerGroup = (uint16_t)a4s->totalMatchesInRound;
-    uint16_t entryBase = 0;  /* word index into teamEntryOffsets */
+    const unsigned groups = (uint16_t)comp->base.matchPairsPerRound;
+    const unsigned teamsPerGroup = (uint16_t)comp->base.totalMatchesInRound;
+    const unsigned total = groups * teamsPerGroup;
+    const size_t offBase = offsetof(DIYCompetitionEx_LeagueView, teamEntryOffsets);
+    const size_t capacity = (sizeof(comp->matchData.raw) - offBase) / sizeof(uint16_t);
 
-    for (int16_t g = (int16_t)numGroups - 1; g >= 0; g--) {
-        uint16_t *p1 = comp->matchData.league.teamEntryOffsets + entryBase;
+    /* These offsets alias the remainder of matchData.raw on leagues with
+     * more than 14 clubs. Read/write through its owning byte array rather
+     * than forming out-of-bounds teamEntryOffsets[14] pointers. */
+    if (!groups || !teamsPerGroup || total > 64u || total > capacity) {
+        FILE *f = fopen("swos_division_debug.log", "a");
+        if (f) {
+            fprintf(f, "TABLE_SORT_REJECT groups=%u perGroup=%u total=%u capacity=%zu\n",
+                    groups, teamsPerGroup, total, capacity);
+            fclose(f);
+        }
+        return;
+    }
 
-        for (int16_t pass = (int16_t)teamsPerGroup - 2; pass >= 0; pass--) {
-            uint16_t *p2 = p1 + 1;
+    /* Validate the entire index table before sorting. Never use a bad
+     * offset as an unchecked pointer into the standings table. */
+    for (unsigned i = 0; i < total; ++i) {
+        uint16_t offset = 0;
+        memcpy(&offset, comp->matchData.raw + offBase + i * sizeof(offset), sizeof(offset));
+        if (offset % sizeof(DIYTeamStats) || offset / sizeof(DIYTeamStats) >= 64) {
+            FILE *f = fopen("swos_division_debug.log", "a");
+            if (f) {
+                fprintf(f, "TABLE_SORT_REJECT invalid_index=%u offset=%u total=%u\n",
+                        i, (unsigned)offset, total);
+                fclose(f);
+            }
+            return;
+        }
+    }
 
-            for (int16_t j = pass; j >= 0; j--) {
-                uint8_t *teamA = a4 + *p1;
-                uint8_t *teamB = a4 + *p2;
-                DIYTeamStats *rowA = (DIYTeamStats *)(teamA + DIY_STANDINGS_OFFSET);
-                DIYTeamStats *rowB = (DIYTeamStats *)(teamB + DIY_STANDINGS_OFFSET);
-
-                /* Compare points — higher is better */
-                if (rowA->points > rowB->points) goto no_swap;
-                if (rowA->points < rowB->points) goto do_swap;
-
-                /* Points equal — compare goal difference */
-                int16_t gdA = (int16_t)rowA->goalsFor - (int16_t)rowA->goalsAgainst;
-                int16_t gdB = (int16_t)rowB->goalsFor - (int16_t)rowB->goalsAgainst;
-                if (gdA > gdB) goto no_swap;
-                if (gdA < gdB) goto do_swap;
-
-                /* Goal diff equal — compare goals scored */
-                if (rowA->goalsFor > rowB->goalsFor) goto no_swap;
-                if (rowA->goalsFor < rowB->goalsFor) goto do_swap;
-
-                /* Goals scored equal — alphabetical comparison */
-                {
-                    uint8_t *nameA = diy_resolve_team_name(rowA->teamSelOffset);
-                    uint8_t *nameB = diy_resolve_team_name(rowB->teamSelOffset);
-                    for (;;) {
-                        uint8_t cA = *nameA++;
-                        if (cA == 0) goto no_swap;
-                        uint8_t cB = *nameB++;
-                        if (cA < cB) goto no_swap;
-                        if (cA > cB) goto do_swap;
+    for (unsigned group = 0; group < groups; ++group) {
+        unsigned start = group * teamsPerGroup;
+        for (unsigned pass = teamsPerGroup; pass > 1; --pass) {
+            for (unsigned j = 0; j + 1 < pass; ++j) {
+                const unsigned index = start + j;
+                uint8_t *p1 = comp->matchData.raw + offBase + index * sizeof(uint16_t);
+                uint8_t *p2 = p1 + sizeof(uint16_t);
+                uint16_t offsetA, offsetB;
+                memcpy(&offsetA, p1, sizeof(offsetA));
+                memcpy(&offsetB, p2, sizeof(offsetB));
+                DIYTeamStats *a = diy_standings_row(comp, offsetA / sizeof(DIYTeamStats));
+                DIYTeamStats *b = diy_standings_row(comp, offsetB / sizeof(DIYTeamStats));
+                int swap = 0;
+                if (a->points != b->points) swap = a->points < b->points;
+                else {
+                    int gdA = (int)a->goalsFor - (int)a->goalsAgainst;
+                    int gdB = (int)b->goalsFor - (int)b->goalsAgainst;
+                    if (gdA != gdB) swap = gdA < gdB;
+                    else if (a->goalsFor != b->goalsFor) swap = a->goalsFor < b->goalsFor;
+                    else {
+                        const uint8_t *nameA = diy_resolve_team_name(a->teamSelOffset);
+                        const uint8_t *nameB = diy_resolve_team_name(b->teamSelOffset);
+                        /* Same alphabetical ascending tie-break as before. */
+                        while (*nameA && *nameA == *nameB) { ++nameA; ++nameB; }
+                        swap = *nameA > *nameB;
                     }
                 }
-
-            do_swap:
-                {
-                    uint16_t tmpOff = (uint16_t)(teamB - a4);
-                    *p1 = tmpOff;
-                    tmpOff = (uint16_t)(teamA - a4);
-                    *p2 = tmpOff;
+                if (swap) {
+                    memcpy(p1, &offsetB, sizeof(offsetB));
+                    memcpy(p2, &offsetA, sizeof(offsetA));
                 }
-            no_swap:
-                p2++;
             }
-            p1++;  /* advance to next position after each pass */
         }
-        entryBase += teamsPerGroup;
     }
 }
 
@@ -1995,6 +2048,51 @@ static void getCurrentFixtureTeamPtrs(uint8_t **team1Out, uint8_t **team2Out)
     uint16_t roundIdx = _diyCompetitionStart.leagueSectionState.sectionMatchesProgress;
     schedule += roundIdx * 2;
 
+    /* Protect ongoing international group stages from a stale fixture grid.
+     * Sorting a group changes teamEntryOffsets but not its membership.  Only
+     * reconcile when the 4/6/8-team fixture group has a DIFFERENT SET of
+     * entrant IDs from the standings group.  Preserve good grids exactly. */
+    if (a0s->competitionType == 0 && a0s->matchPairsPerRound > 1 &&
+        a0s->totalMatchesInRound >= 2 && a0s->totalMatchesInRound <= 8 &&
+        a0s->numTeams > 0 && a0s->numTeams <= 64) {
+        unsigned groupSize = (unsigned)a0s->totalMatchesInRound;
+        unsigned group = (unsigned)a0s->subRoundCounter;
+        unsigned total = (unsigned)a0s->numTeams;
+        if (group < (unsigned)a0s->matchPairsPerRound &&
+            ((group + 1u) * groupSize) <= total) {
+            uint8_t present[64] = {0};
+            uint8_t desired[8] = {0};
+            unsigned valid = 1;
+            unsigned changed = 0;
+            for (unsigned j = 0; j < groupSize; ++j) {
+                unsigned off = compEx->matchData.league.teamEntryOffsets[group*groupSize+j];
+                unsigned ix = off / 18u;
+                if ((off % 18u) != 0 || ix >= total || present[ix]) { valid=0; break; }
+                present[ix] = 1;
+                desired[j] = (uint8_t)ix;
+            }
+            if (valid) {
+                for (unsigned j = 0; j < groupSize; ++j) {
+                    unsigned ix = fixturePositions[j];
+                    if (ix >= total || !present[ix]) { changed = 1; break; }
+                    present[ix] = 0;
+                }
+                if (changed) {
+                    FILE *f = fopen("swos_group_fixture_debug.log", "a");
+                    if (f) {
+                        fprintf(f,"GROUP_FIXTURE_REPAIRED comp=%.24s group=%u "
+                                  "round=%u old=",a0s->competitionName,group,roundIdx);
+                        for (unsigned j=0;j<groupSize;j++) fprintf(f,"%s%u",j?",":"",fixturePositions[j]);
+                        fprintf(f," new=");
+                        for (unsigned j=0;j<groupSize;j++) fprintf(f,"%s%u",j?",":"",desired[j]);
+                        fprintf(f,"\n"); fclose(f);
+                    }
+                    memcpy(fixturePositions, desired, groupSize);
+                }
+            }
+        }
+    }
+
     /* Team A: position index → grid index → competition record */
     uint16_t posA = schedule[0];
     int16_t gridIdxA = (int8_t)fixturePositions[posA];
@@ -2006,6 +2104,48 @@ static void getCurrentFixtureTeamPtrs(uint8_t **team1Out, uint8_t **team2Out)
     int16_t gridIdxB = (int8_t)fixturePositions[posB];
     uint32_t offsetB = (uint16_t)gridIdxB * 18u;
     uint8_t *team2 = a0 + offsetB;
+
+    /* WC / international group-stage fixture audit.  The group displayed in
+     * standings must contain both current fixture entrants.  Do not silently
+     * reseed a competition already in progress. */
+    if (a0s->competitionType == 0 && a0s->matchPairsPerRound > 1 &&
+        a0s->totalMatchesInRound >= 2 && a0s->totalMatchesInRound <= 8 &&
+        a0s->numTeams > 0 && a0s->numTeams <= 64) {
+        static unsigned fixture_log_count = 0;
+        if (fixture_log_count++ < 200) {
+            unsigned groupSize = (unsigned)a0s->totalMatchesInRound;
+            unsigned group = (unsigned)a0s->subRoundCounter;
+            unsigned groups = (unsigned)a0s->numTeams / groupSize;
+            FILE *f = fopen("swos_group_fixture_debug.log", "a");
+            if (f) {
+                fprintf(f,"GROUP_FIXTURE comp=%s group=%u of=%u round=%u "
+                          "pos=%u,%u source_indices=%d,%d team_ids=%04X,%04X\n",
+                          a0s->competitionName,group,groups,(unsigned)roundIdx,
+                          (unsigned)posA,(unsigned)posB,
+                          (int)gridIdxA,(int)gridIdxB,
+                          (gridIdxA>=0 && gridIdxA<a0s->numTeams) ?
+                              (unsigned)BE_READ_U16(&compEx->matchData.league.leagueTeamIds[gridIdxA]) : 0,
+                          (gridIdxB>=0 && gridIdxB<a0s->numTeams) ?
+                              (unsigned)BE_READ_U16(&compEx->matchData.league.leagueTeamIds[gridIdxB]) : 0);
+                if (group < groups && groupSize * groups <= 64) {
+                    for (unsigned j = 0; j < groupSize; j++) {
+                        unsigned k = group*groupSize+j;
+                        unsigned off = compEx->matchData.league.teamEntryOffsets[k];
+                        unsigned ix = off / 18;
+                        fprintf(f,"GROUP_FIXTURE_MEMBER rank=%u standing_index=%u "
+                                  "team_id=%04X fixture_index=%u fixture_team_id=%04X\n",
+                                  j,ix,
+                                  (off%18==0 && ix < (unsigned)a0s->numTeams) ?
+                                    (unsigned)BE_READ_U16(&compEx->matchData.league.leagueTeamIds[ix]) : 0,
+                                  (unsigned)fixturePositions[j],
+                                  (fixturePositions[j]<a0s->numTeams) ?
+                                    (unsigned)BE_READ_U16(&compEx->matchData.league.leagueTeamIds[fixturePositions[j]]) : 0);
+                    }
+                }
+                fclose(f);
+            }
+        }
+    }
 
     /* Home/away swap if flag bit 0 is set. Asm: btst #0,$61(a0) with
      * a0=diyCompetitionStart. On Amiga BE, byte +0x61 is the LSB of
@@ -4088,6 +4228,179 @@ static int EuroReconcileGroupTeamIds(DIYCompetitionEx *comp, DIYTournamentState 
     return 1;
 }
 
+/* World Cup (32 teams, eight groups of four): advance the actual top two
+ * from each standings group. Never add artificial ranking points to the
+ * group-stage table. Record indices need not be consecutive per group. */
+static int WorldCupAdvanceTopTwo(DIYCompetitionEx *comp,
+                                  DIYTournamentState *tourn)
+{
+    enum { WC_TEAMS = 32, WC_GROUPS = 8, WC_GROUP_SIZE = 4, WC_QUALIFIERS = 16 };
+    const size_t offsetsStart = offsetof(DIYCompetitionEx_LeagueView, teamEntryOffsets);
+    uint16_t before[WC_TEAMS], originalIds[WC_TEAMS], resolvedIds[WC_TEAMS];
+    uint8_t qualified[WC_QUALIFIERS];
+    uint32_t seen = 0;
+    const int16_t oldGroups = comp->base.matchPairsPerRound;
+    const int16_t oldPerGroup = comp->base.totalMatchesInRound;
+    FILE *log = fopen("swos_worldcup_qualification_debug.log", "a");
+    int ok = 1;
+    const char *reason = "ok";
+
+    /* Validate the full 32-record standings order and group layout first.
+     * The grouped table contains team indices like 27,6,21,14 in group A;
+     * checking idx/4 instead of the actual 4-row group order is incorrect. */
+    if (offsetsStart + sizeof(before) > sizeof(comp->matchData.raw)) {
+        reason = "offset_capacity";
+        ok = 0;
+        goto done;
+    }
+    for (unsigned i = 0; i < WC_TEAMS; ++i) {
+        uint16_t off;
+        memcpy(&off, comp->matchData.raw + offsetsStart + i * 2, sizeof(off));
+        if ((off % sizeof(DIYTeamStats)) != 0 ||
+            off / sizeof(DIYTeamStats) >= WC_TEAMS) {
+            reason = "invalid_standings_offset";
+            ok = 0;
+            goto done;
+        }
+        const unsigned idx = off / sizeof(DIYTeamStats);
+        /* Only determine qualifiers after the complete three-match group
+         * schedule has been played for every participant. */
+        if (comp->leagueStandings[idx].gamesPlayed != 3) {
+            reason = "group_matches_incomplete";
+            ok = 0;
+            goto done;
+        }
+        if (seen & (UINT32_C(1) << idx)) {
+            reason = "duplicate_standings_record";
+            ok = 0;
+            goto done;
+        }
+        seen |= UINT32_C(1) << idx;
+        before[i] = (uint16_t)idx;
+    }
+    if (seen != UINT32_MAX) {
+        reason = "incomplete_standings_records";
+        ok = 0;
+        goto done;
+    }
+
+    /* A saved tournament can have teamIds[] in a different order from the
+     * live leagueStandings[] records. Reconcile only when they are an exact
+     * one-to-one permutation of the same 32 team IDs. Do not alter the IDs
+     * until the entire mapping has been verified. */
+    for (unsigned i = 0; i < WC_TEAMS; ++i) {
+        const int32_t identity = comp->leagueStandings[i].teamSelOffset;
+        if (identity < -1 || (identity >= 0 &&
+            (unsigned)identity >= (unsigned)_numSelectedTeams)) {
+            reason = "invalid_standings_identity";
+            ok = 0;
+            goto done;
+        }
+        const TeamFileEx *team = (const TeamFileEx *)diy_resolve_team(identity);
+        originalIds[i] = BE_READ_U16(&tourn->teamIds[i]);
+        resolvedIds[i] = PACK_BE_U16(team->team.countryNumber,
+                                     team->team.teamOrdinal);
+        if (resolvedIds[i] == 0 || resolvedIds[i] == 0xFFFFu) {
+            reason = "invalid_resolved_team";
+            ok = 0;
+            goto done;
+        }
+    }
+    for (unsigned i = 0; i < WC_TEAMS; ++i) {
+        unsigned oldCount = 0, newCount = 0;
+        for (unsigned j = 0; j < WC_TEAMS; ++j) {
+            if (originalIds[j] == resolvedIds[i]) ++oldCount;
+            if (resolvedIds[j] == resolvedIds[i]) ++newCount;
+        }
+        if (oldCount != 1 || newCount != 1) {
+            reason = "team_id_set_mismatch";
+            ok = 0;
+            goto done;
+        }
+    }
+
+    /* Sort *within* each original standings group, not as one 32-team
+     * league. This uses the same criteria as the group table shown in-game:
+     * points, goal difference, goals for, alphabetical tie-break. */
+    comp->base.matchPairsPerRound = WC_GROUPS;
+    comp->base.totalMatchesInRound = WC_GROUP_SIZE;
+    DIY_SortLeagueTableByStandings();
+    comp->base.matchPairsPerRound = oldGroups;
+    comp->base.totalMatchesInRound = oldPerGroup;
+
+    seen = 0;
+    for (unsigned group = 0; group < WC_GROUPS; ++group) {
+        uint32_t members = 0;
+        for (unsigned rank = 0; rank < WC_GROUP_SIZE; ++rank) {
+            const unsigned pos = group * WC_GROUP_SIZE + rank;
+            uint16_t off;
+            memcpy(&off, comp->matchData.raw + offsetsStart + pos * 2, sizeof(off));
+            if (off % sizeof(DIYTeamStats) != 0 ||
+                off / sizeof(DIYTeamStats) >= WC_TEAMS) {
+                reason = "invalid_sorted_offset";
+                ok = 0;
+                goto done;
+            }
+            const unsigned idx = off / sizeof(DIYTeamStats);
+            const uint32_t bit = UINT32_C(1) << idx;
+            if (members & bit || (seen & bit)) {
+                reason = "duplicate_sorted_record";
+                ok = 0;
+                goto done;
+            }
+            members |= bit;
+            seen |= bit;
+            /* Check that sorting did not exchange group members. */
+            int inOriginalGroup = 0;
+            for (unsigned k = group * WC_GROUP_SIZE;
+                 k < (group + 1) * WC_GROUP_SIZE; ++k)
+                if (before[k] == idx) ++inOriginalGroup;
+            if (inOriginalGroup != 1) {
+                reason = "cross_group_record";
+                ok = 0;
+                goto done;
+            }
+            if (rank < 2) qualified[group * 2 + rank] = (uint8_t)idx;
+            if (log) {
+                const DIYTeamStats *row = &comp->leagueStandings[idx];
+                fprintf(log, "WC_GROUP_ROW group=%u rank=%u record=%u team=%04X "
+                        "pts=%u gf=%u ga=%u qualified=%u\n",
+                        group + 1, rank + 1, idx, resolvedIds[idx],
+                        (unsigned)row->points, (unsigned)row->goalsFor,
+                        (unsigned)row->goalsAgainst, (unsigned)(rank < 2));
+            }
+        }
+    }
+    if (seen != UINT32_MAX) {
+        reason = "incomplete_sorted_records";
+        ok = 0;
+        goto done;
+    }
+
+    /* Apply both verified mappings together. The next World Cup slot takes
+     * the first 16 teamIndexOrder entries; its knockout shuffle still runs
+     * normally, preserving existing bracket behaviour. */
+    for (unsigned i = 0; i < WC_TEAMS; ++i)
+        BE_WRITE_U16(&tourn->teamIds[i], resolvedIds[i]);
+    memcpy(tourn->teamIndexOrder, qualified, sizeof(qualified));
+    if (log)
+        for (unsigned i = 0; i < WC_QUALIFIERS; ++i)
+            fprintf(log, "WC_QUALIFIED slot=%u group=%u rank=%u record=%u team=%04X\n",
+                    i, i / 2 + 1, i % 2 + 1, qualified[i],
+                    resolvedIds[qualified[i]]);
+
+done:
+    /* Restore competition counters even on any rejection. */
+    comp->base.matchPairsPerRound = oldGroups;
+    comp->base.totalMatchesInRound = oldPerGroup;
+    if (log) {
+        fprintf(log, "WC_TOP_TWO_RESULT ok=%d reason=%s records=%u groups=%u\n",
+                ok, reason, WC_TEAMS, WC_GROUPS);
+        fclose(log);
+    }
+    return ok;
+}
+
 __attribute__((used, externally_visible))
 void DIY_BuildSeededBracketAndUpdateScores(uint8_t *diy, uint8_t *slot,
                                              uint8_t *comp4, uint8_t *comp)
@@ -4100,6 +4413,22 @@ void DIY_BuildSeededBracketAndUpdateScores(uint8_t *diy, uint8_t *slot,
 
     /* Check if world cup competition */
     uint8_t compNum = diyS->field_2E;
+    /* The career World Cup is worldCup2 (ID 3, 32 teams). The older
+     * static World Cup is ID 4 (24 teams). Record every entry before any
+     * qualification-specific tests so a missed transition is visible. */
+    if (compNum == COMPID_worldCup2 || compNum == COMPID_worldCup) {
+        FILE *wcEntryLog = fopen("swos_worldcup_qualification_debug.log", "a");
+        if (wcEntryLog) {
+            fprintf(wcEntryLog,
+                    "WC_BRACKET_ENTRY comp=%u slot=%u league=%u teams=%u groups=%u "
+                    "per_group=%u qualifiers=%u active_teams=%u\n",
+                    (unsigned)compNum, (unsigned)diyS->roundComplete,
+                    (unsigned)s->isLeagueFormat, (unsigned)s->numTeams,
+                    (unsigned)s->groups, (unsigned)s->teamsPerGroup,
+                    (unsigned)s->divisionFactor, (unsigned)compS->numTeams);
+            fclose(wcEntryLog);
+        }
+    }
     EuroQualTrace("SEEDED_ENTER", compNum,
                   (unsigned)s->numTeams,
                   (unsigned)s->groups,
@@ -4198,7 +4527,44 @@ void DIY_BuildSeededBracketAndUpdateScores(uint8_t *diy, uint8_t *slot,
     EuroQualTrace("SEEDED_GENERIC_FALLBACK", compNum,
                   (unsigned)s->numTeams, (unsigned)s->groups,
                   (unsigned)s->divisionFactor, (unsigned)compS->numTeams);
-    if (compNum == COMPID_worldCup) {
+    if (compNum == COMPID_worldCup2 || compNum == COMPID_worldCup) {
+        /* Always record this transition, including layouts that do not
+         * qualify for the 32-team top-two path. Otherwise a silent fallback
+         * can hide the reason a wrong knockout bracket was generated. */
+        {
+            FILE *wcLog = fopen("swos_worldcup_qualification_debug.log", "a");
+            if (wcLog) {
+                fprintf(wcLog,
+                        "WC_ADVANCE_ENTER comp=%u complete=%u league=%u "
+                        "slotTeams=%u groups=%u perGroup=%u division=%u "
+                        "liveTeams=%u\n",
+                        (unsigned)compNum, (unsigned)diyS->roundComplete,
+                        (unsigned)s->isLeagueFormat, (unsigned)s->numTeams,
+                        (unsigned)s->groups, (unsigned)s->teamsPerGroup,
+                        (unsigned)s->divisionFactor, (unsigned)compS->numTeams);
+                fclose(wcLog);
+            }
+        }
+        /* Standard 32-team World Cup: eight group winners and eight
+         * runners-up, independent of cross-group seeding scores. */
+        if (s->isLeagueFormat &&
+            s->numTeams == 32 && s->groups == 8 &&
+            s->teamsPerGroup == 4 && s->divisionFactor == 16 &&
+            compS->numTeams == 32) {
+            (void)WorldCupAdvanceTopTwo(compEx, (DIYTournamentState *)diy);
+            /* On invalid identities, do not run the unsafe generic seeding
+             * fallback. Leave the existing tournament state intact. */
+            return;
+        }
+        /* Other World Cup formats retain their existing advancement rules.
+         * Record the fallback so there is no longer a silent no-log case. */
+        {
+            FILE *wcLog = fopen("swos_worldcup_qualification_debug.log", "a");
+            if (wcLog) {
+                fputs("WC_ADVANCE_FALLBACK reason=layout_not_32x8x4\n", wcLog);
+                fclose(wcLog);
+            }
+        }
         DIY_AdjustWorldCupBracketScores(diy, slot, comp);
         goto copy_back;
     }

@@ -4313,6 +4313,12 @@ void Career_AcceptOffer_SellPlayer(void)
     tp->team.playerValuesDirty = TEAM_VALUES_DIRTY;
     _careerTeam.team.playerValuesDirty = TEAM_VALUES_DIRTY;
 
+    /* An AI club acquiring our player must re-evaluate its starting XI now.
+     * The regular AI-to-AI optimiser is only called by the seasonal/world
+     * transfer pass, not by this human sale path. */
+    extern void SWOS_AI_OptimiseClubAfterHumanSale(unsigned teamId);
+    SWOS_AI_OptimiseClubAfterHumanSale(_offerOrdinals.teamOffering);
+
     PrunePlayerOffersAgainstRosterLimits();
 
     if (GetRemainingOfferSwapSlots() == 0) {

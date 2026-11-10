@@ -20,6 +20,7 @@
 #include "endian_helpers.h"
 #include "menu_system.h"
 #include "game_types.h"
+#include <stdio.h>
 #ifdef SWOS_SDL_BUILD
 #include "uniform.h"            /* the UNIFORM button (entry 68) */
 #include "custom_team.h"        /* (CUSTOM) where the country would be named */
@@ -41,6 +42,7 @@ extern uint8_t  _pl1Fire;
 extern uint8_t  _pl2Fire;
 extern uint16_t _numPlayers;
 extern uint16_t _careerNumPlayers;
+extern uint16_t _isNationalSelector;
 extern uint16_t _gameType;
 extern uint16_t _trainingGame;
 extern uint16_t _coachOrPlayer;
@@ -283,6 +285,51 @@ void ShowUseMatchTeamIfTraining(void) {
  * ================================================================ */
 __attribute__((used, externally_visible))
 void ShowOrHidePlayMatchButton(void) {
+    /* A live diagnostic of the eligibility decision.  The save only contains
+     * persisted cards/injuries, not every transient play-menu gate. */
+    if (_gameType == GAME_TYPE_CAREER) {
+        static unsigned snapshot_count = 0;
+        if (snapshot_count++ < 150) {
+            TeamFileEx *t = _playMatchTeam1Ptr;
+            FILE *f = fopen("swos_match_gate_debug.log", "a");
+            if (f) {
+                unsigned n = (t == &_careerTeam) ? _careerNumPlayers :
+                             (t == &_currentTeam ? _numPlayers : 16);
+                uint8_t *sel = (t == &_careerTeam) ? _currentMatchPlayers :
+                               (t == &_currentTeam ? _playerPositions : t->team.playerNumbers);
+                uint32_t a = GetNumberOfAvailablePlayers((uint8_t *)t, _playMatchExcludeFlags, 0);
+                uint32_t g = GetNumberOfAvailableSubstitutes((uint8_t *)t, _playMatchExcludeFlags);
+                unsigned starterGK = GetNumberOfSubstitutes((uint8_t *)t, 1);
+                fprintf(f,"MATCH_GATE_CHECK step=%u team=%.16s ptr=%s national=%u opp_view=%u "
+                          "count=%u max_subs=%u excl=%d avail=%u disabled=%u "
+                          "keepers=%u disabled_keepers=%u starter_gk=%u "
+                          "allow_changes=%u visibility=%u\n",
+                          snapshot_count, t->team.teamName,
+                          t == &_careerTeam ? "career" : t == &_currentTeam ? "current" : "other",
+                          (unsigned)_isNationalSelector, (unsigned)_viewingOpponentTeam,
+                          n, (unsigned)_maxSubstitutesEntries, (int)_playMatchExcludeFlags,
+                          (unsigned)(a & 0xffff), (unsigned)(a >> 16),
+                          (unsigned)(g & 0xffff), (unsigned)(g >> 16),
+                          starterGK, (unsigned)_squadChangesAllowed,
+                          (unsigned)_playMatchButtonVisibilityState);
+                for (unsigned i = 0; i < n && i < 32; i++) {
+                    unsigned j = sel[i];
+                    if (j >= (t == &_careerTeam || t == &_currentTeam ? 32u : 16u)) {
+                        fprintf(f,"MATCH_GATE_PLAYER pos=%u invalid_slot=%u\n",i,j);
+                        continue;
+                    }
+                    PlayerFile *pf = &t->players[j];
+                    fprintf(f,"MATCH_GATE_PLAYER pos=%u slot=%u name=%.22s "
+                              "status=%u injured=%u cards=%u bucket=%u\n",
+                              i,j,pf->playerName,(unsigned)pf->cardsInjuries,
+                              (unsigned)(pf->cardsInjuries & 0x1c),
+                              (unsigned)(pf->cardsInjuries & 3),
+                              (unsigned)(pf->cardsInjuries & 0xe0));
+                }
+                fclose(f);
+            }
+        }
+    }
     _menuEntries[8].isInvisible = 1;
 
     if (_viewingOpponentTeam) {
@@ -401,6 +448,10 @@ canPlay:
 showPlayBtn:
     /* loc_148768 */
     _menuEntries[9].isInvisible = 0;
+    if (_gameType == GAME_TYPE_CAREER) {
+        FILE *f = fopen("swos_match_gate_debug.log", "a");
+        if (f) { fprintf(f, "MATCH_GATE_RESULT visible=1 button=9\n"); fclose(f); }
+    }
     return;
 
 showPlayBtnPath:
@@ -411,6 +462,10 @@ hidePlayBtnPath:
 hidePlayBtn:
     /* loc_148780 */
     _menuEntries[9].isInvisible = 1;
+    if (_gameType == GAME_TYPE_CAREER) {
+        FILE *f = fopen("swos_match_gate_debug.log", "a");
+        if (f) { fprintf(f, "MATCH_GATE_RESULT visible=0 button=9\n"); fclose(f); }
+    }
     return;
 }
 

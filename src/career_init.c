@@ -3002,6 +3002,73 @@ static unsigned SWOS_AI_P3Collect(SWOS_AI_P3Club *clubs)
     return clubCount;
 }
 
+/* A human-to-AI sale uses the ordinary transfer market rather than the
+ * seasonal AI-to-AI exchange pass. Optimise that one receiving club after
+ * the sale, using the exact same safe player/identity/market-pool swap code
+ * as the seasonal AI optimiser. Read its original TEAM record separately;
+ * overlay the current career pool so the newly purchased player is present.
+ * No global world transfer run or new career state is required. */
+void SWOS_AI_OptimiseClubAfterHumanSale(unsigned teamId)
+{
+    extern MarketPlayer _careerForeignMarketPlayers[];
+    if (teamId == (unsigned)_selTeamNumber || teamId > 0x4FFFu ||
+        SWOS_AI_P3MissingCountry(teamId >> 8)) return;
+    unsigned country = teamId >> 8;
+    const size_t size = 2u + 93u * sizeof(TeamFileEx);
+    uint8_t *raw = malloc(size);
+    if (!raw) {
+        SWOS_AI_LOG("[SWOS AI LINEUP] HUMAN_SALE_SKIP club=%04X reason=allocation\n", teamId);
+        return;
+    }
+    uint16_t count = 0;
+    if (!SWOS_AI_P3ReadCountry(country, raw, size, &count)) {
+        SWOS_AI_LOG("[SWOS AI LINEUP] HUMAN_SALE_SKIP club=%04X reason=team_file\n", teamId);
+        free(raw);
+        return;
+    }
+    SWOS_AI_P3Club *club = calloc(1, sizeof(*club));
+    if (!club) { free(raw); return; }
+    const TeamFileEx *teams = (const TeamFileEx *)(raw + 2);
+    int found = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        const TeamFileEx *team = &teams[i];
+        if (team->team.countryNumber != country ||
+            team->team.teamOrdinal != (uint8_t)teamId) continue;
+        club->id = (uint16_t)teamId;
+        club->sourceFile = (uint8_t)country;
+        club->sourceRecord = (uint8_t)i;
+        club->country = (uint8_t)country;
+        club->league = team->team.league;
+        memcpy(club->name, team->team.teamName, 17);
+        club->name[17] = 0;
+        memcpy(club->players, team->players, sizeof(club->players));
+        memcpy(club->lineupSlots, team->team.playerNumbers, sizeof(club->lineupSlots));
+        SWOS_IdentityRegisterClub(teamId, country, i);
+        SWOS_AI_P3CopyCareerLineup(club);
+        for (unsigned k = 0; k < _numForeignMarketPlayers2; ++k) {
+            const MarketPlayer *entry = &_careerForeignMarketPlayers[k];
+            if (SWOS_AI_P3OverrideMatches(entry, (uint16_t)teamId,
+                                           (unsigned)(uint8_t)entry->playerOrdinal) &&
+                entry->playerOrdinal >= 0 && entry->playerOrdinal < 16)
+                club->players[(unsigned)entry->playerOrdinal] = entry->player;
+        }
+        found = 1;
+        break;
+    }
+    free(raw);
+    if (found && club->lineupValid) {
+        unsigned promoted = SWOS_AI_P3OptimiseLineup(club);
+        SWOS_AI_LOG("[SWOS AI LINEUP] HUMAN_SALE club=%04X promotions=%u valid=1\n",
+                    teamId, promoted);
+        swos_age_log("HUMAN_SALE_LINEUP", "club=%04X promotions=%u",
+                     teamId, promoted);
+    } else {
+        SWOS_AI_LOG("[SWOS AI LINEUP] HUMAN_SALE_SKIP club=%04X reason=%s\n",
+                    teamId, found ? "invalid_lineup" : "club_not_found");
+    }
+    free(club);
+}
+
 /* An exact position and currency-value match must always hold. Requested
  * direction applies to the initiating club; the counterparty necessarily
  * receives the opposite value effect in a two-player swap. */
@@ -3283,6 +3350,53 @@ extern void SWOS_RetirementNewsClear(unsigned season);
 extern void SWOS_RetirementNewsRecord(const PlayerFile *player, unsigned age);
 extern int SWOS_RetirementNewsShow(void);
 
+/* Reconcile an occupied slot for which all persistent identity lookups fail.
+ * We only attach a new identity when the saved name-age table gives an exact
+ * age and that name is unique inside this club. Never resurrect a tombstoned
+ * canonical ID or infer an original identity from its physical slot. */
+static int SWOS_RetirementRecoverUntracked(unsigned club, unsigned slot,
+                                           const PlayerFile *player,
+                                           const PlayerFile *roster,
+                                           unsigned rosterCount,
+                                           unsigned season,
+                                           const char *reason)
+{
+    extern int SWOS_AgesLookupExact(const char *name, unsigned *age);
+    if (!player || !roster || !SWOS_AI_P3IsValid(*player) ||
+        slot >= rosterCount || s_identity_next_id >= 4000000u ||
+        SWOS_ManualFind(club, slot) >= 0 &&
+        s_manual_ids[SWOS_ManualFind(club, slot)].id ||
+        !s_identity_records) return 0;
+    char name[sizeof(player->playerName) + 1u];
+    memcpy(name, player->playerName, sizeof(player->playerName));
+    name[sizeof(player->playerName)] = 0;
+    size_t len = strlen(name);
+    while (len && name[len - 1u] == ' ') name[--len] = 0;
+    unsigned age = 0;
+    if (!len || !SWOS_AgesLookupExact(name, &age) || age < 15u || age > 100u) {
+        swos_age_log("RETIRE_UNTRACKED_UNRESOLVED",
+            "season=%u club=%04X slot=%u reason=%s name=%.22s age_lookup=0",
+            season, club, slot, reason, name);
+        return 0;
+    }
+    for (unsigned i=0; i<rosterCount; ++i)
+        if (i != slot && SWOS_AI_P3IsValid(roster[i]) &&
+            memcmp(roster[i].playerName, player->playerName,
+                   sizeof(player->playerName)) == 0) {
+            swos_age_log("RETIRE_UNTRACKED_UNRESOLVED",
+                "season=%u club=%04X slot=%u reason=duplicate_name name=%.22s age=%u",
+                season, club, slot, name, age);
+            return 0;
+        }
+    const unsigned newId = s_identity_next_id;
+    if (!SWOS_ManualPut(club, slot, newId, age, 0u)) return 0;
+    ++s_identity_next_id;
+    swos_age_log("RETIRE_UNTRACKED_RECOVERED",
+        "season=%u club=%04X slot=%u id=%u age=%u reason=%s name=%.22s",
+        season, club, slot, newId, age, reason, name);
+    return 1;
+}
+
 /* Step 4C.2: Managed club original 16-slot retirement, separately opt-in.
  * Never infer identities for a previously transferred or unverified slot.
  * The owned career squad is persisted by the normal CAR serializer. */
@@ -3308,7 +3422,7 @@ static void SWOS_RetirementLiveManaged(unsigned season,
     memcpy(local.players,_careerTeam.players,sizeof(local.players));
     unsigned inspected=0,eligible=0,retired=0,skipped=0,transferred=0,generatedRetired=0;
     for(unsigned slot=0;slot<32u;slot++){
-        const int tracked=SWOS_ManualIdentityIsTouched(team,slot);
+        int tracked=SWOS_ManualIdentityIsTouched(team,slot);
         /* A generated identity is authoritative at its physical 0..31 slot.
          * Do not confuse it with the canonical shadow record, which can still
          * describe the original player displaced by RES/TRIAL generation. */
@@ -3336,14 +3450,45 @@ static void SWOS_RetirementLiveManaged(unsigned season,
         }else if(tracked){
             /* A tombstone means the player moved away, not an identity. */
             if(!SWOS_ManualIdentityAge(team,slot,&age,&oldId)){
-                skipped++;continue;
+                if (SWOS_RetirementRecoverUntracked(team,slot,
+                    &_careerTeam.players[slot],_careerTeam.players,32u,
+                    season,"managed_tombstone") &&
+                    SWOS_ManualIdentityAge(team,slot,&age,&oldId)) {
+                    /* Recovered a current player, not the retired original. */
+                } else {
+                    skipped++;
+                    swos_age_log("RETIRE_MANAGED_UNTRACKED",
+                        "season=%u club=%04X slot=%u reason=tombstone name=%.22s",
+                        season,team,slot,_careerTeam.players[slot].playerName);
+                    continue;
+                }
             }
         }else{
             /* Untracked reserves cannot be assigned an original identity
              * from squad position alone. */
-            if(slot>=16u||!source){skipped++;continue;}
+            if(slot>=16u||!source){
+                if (SWOS_RetirementRecoverUntracked(team,slot,
+                    &_careerTeam.players[slot],_careerTeam.players,32u,
+                    season,"managed_no_source")) {
+                    if (SWOS_ManualIdentityAge(team,slot,&age,&oldId)) {
+                        tracked = 1;
+                        goto managed_identity_ready;
+                    }
+                }
+                skipped++;
+                swos_age_log("RETIRE_MANAGED_UNTRACKED",
+                    "season=%u club=%04X slot=%u reason=no_source name=%.22s",
+                    season,team,slot,_careerTeam.players[slot].playerName);
+                continue;
+            }
             ix=SWOS_IdentityFind(((uint32_t)file<<12)|((uint32_t)record<<4)|slot);
-            if(ix<0){skipped++;continue;}
+            if(ix<0){
+                skipped++;
+                swos_age_log("RETIRE_MANAGED_UNTRACKED",
+                    "season=%u club=%04X slot=%u reason=no_canonical name=%.22s",
+                    season,team,slot,_careerTeam.players[slot].playerName);
+                continue;
+            }
             oldId=s_identity_records[ix].id;
             age=s_identity_records[ix].age;
             int mirror=0;
@@ -3351,11 +3496,17 @@ static void SWOS_RetirementLiveManaged(unsigned season,
                 if(s_manual_ids[m].id==oldId){mirror=1;break;}
             if(mirror){skipped++;continue;}
         }
+managed_identity_ready:
         if(!SWOS_AI_P3IsValid(_careerTeam.players[slot])){
             skipped++;continue;
         }
         inspected++;
         unsigned chance=SWOS_RetirementChance(age);
+        if (age>=40u)
+            swos_age_log("RETIRE_40PLUS_MANAGED_AUDIT",
+                "season=%u club=%04X slot=%u id=%u age=%u eligible=%u name=%.22s",
+                season,team,slot,oldId,age,(unsigned)(chance>0),
+                _careerTeam.players[slot].playerName);
         if(!chance)continue;
         eligible++;
         unsigned roll=SWOS_RetirementRandom(seed)%100u;
@@ -3469,7 +3620,17 @@ static void SWOS_RetirementLiveAI(unsigned season)
                     staleTombstoneGenerated++;
                     manualIndex=-1;
                 }else{
-                    manualTombstones++;skipped++;continue;
+                    if (SWOS_RetirementRecoverUntracked(club->id,slot,
+                        &club->players[slot],club->players,16u,
+                        season,"ai_tombstone")) {
+                        manualIndex=SWOS_ManualFind(club->id,slot);
+                    } else {
+                        manualTombstones++;skipped++;
+                        swos_age_log("RETIRE_AI_UNTRACKED",
+                            "season=%u club=%04X slot=%u reason=tombstone name=%.22s",
+                            season,club->id,slot,club->players[slot].playerName);
+                        continue;
+                    }
                 }
             }
             if(manualIndex>=0&&generatedIndex>=0){
@@ -3481,6 +3642,11 @@ static void SWOS_RetirementLiveAI(unsigned season)
             /* Generated and manually tracked players do not need a canonical
              * source slot. Previously a missing ix excluded even a valid
              * generated footballer from ageing-based retirement forever. */
+            if (manualIndex<0 && generatedIndex<0 && ix<0 &&
+                SWOS_RetirementRecoverUntracked(club->id,slot,
+                    &club->players[slot],club->players,16u,
+                    season,"ai_missing_canonical"))
+                manualIndex=SWOS_ManualFind(club->id,slot);
             if((manualIndex<0&&generatedIndex<0&&ix<0)||
                !SWOS_AI_P3IsValid(club->players[slot])){
                 if(ix<0&&manualIndex<0&&generatedIndex<0)missingIdentity++;
@@ -3499,6 +3665,11 @@ static void SWOS_RetirementLiveAI(unsigned season)
                 generatedIndex>=0?s_generated[generatedIndex].age:s_identity_records[ix].age;
             inspected++;
             unsigned chance=SWOS_RetirementChance(age);
+            if (age>=40u)
+                swos_age_log("RETIRE_40PLUS_AUDIT",
+                    "season=%u club=%04X slot=%u id=%u age=%u eligible=%u name=%.22s",
+                    season,club->id,slot,trackedId,age,(unsigned)(chance>0),
+                    club->players[slot].playerName);
             if(!chance)continue;
             eligible++;
             unsigned ageBand=age>=40u?5u:age-35u;
@@ -4101,11 +4272,24 @@ void ContinueCareerNextSeason(void)
      * either job-change branch. Never age at new-career creation or load. */
     {
         extern void SWOS_AgesAdvanceOneSeason(void);
-        swos_age_log("SEASON_TRANSITION", "completed=%u next_age_increment=1", (unsigned)_careerSeasonsCompleted);
+        swos_age_log("SEASON_TRANSITION", "completed=%u next_age_increment=1", (unsigned)_currentSeasonShowing);
         SWOS_AgesAdvanceOneSeason();
         SWOS_IdentityAdvanceSeason();
-        SWOS_RetirementDryRun((unsigned)_careerSeasonsCompleted);
-        SWOS_RetirementLiveAI((unsigned)_careerSeasonsCompleted);
+        /* Reconcile short-lived manual/generated slot overlaps BEFORE the
+         * retirement scan. The same deterministic reconciliation previously
+         * happened only at integrity/save time, after retirement had already
+         * skipped those slots. Preserve ages and identities of the surviving
+         * authoritative records; do not modify any PlayerFile here. */
+        {
+            unsigned reconciled = SWOS_IdentityPrepareSave();
+            reconciled += SWOS_ManualIdentityPrepareSave();
+            if (reconciled)
+                swos_age_log("RETIRE_PRECHECK_RECONCILE",
+                    "season=%u repaired=%u", (unsigned)_currentSeasonShowing,
+                    reconciled);
+        }
+        SWOS_RetirementDryRun((unsigned)_currentSeasonShowing);
+        SWOS_RetirementLiveAI((unsigned)_currentSeasonShowing);
     }
     /* Run one automatic worldwide AI transfer batch for each completed
      * season transition.  This path is not used by InitCareer(), so a new
@@ -4144,16 +4328,24 @@ void ContinueCareerNextSeason(void)
             trackedInternational, (unsigned)removedMask,
             (unsigned)_careerNumPlayers);
     }
+    /* Verify national-team copies against surviving club players after ALL
+     * retirements and AI transfers. This catches old national copies whose
+     * source slot is now occupied by someone else, while relinking players
+     * that have simply moved to another club. */
+    if (_isNationalSelector) {
+        extern void SWOS_NationalReconcileAfterSeason(void);
+        SWOS_NationalReconcileAfterSeason();
+    }
     /* Post-season repair after retirements and AI transfers. A failed check
      * is logged and never silently destroys any footballer or save data. */
-    if (!SWOS_CareerIntegrityCheck("season_end", (unsigned)_careerSeasonsCompleted))
+    if (!SWOS_CareerIntegrityCheck("season_end", (unsigned)_currentSeasonShowing))
         swos_age_log("CAREER_INTEGRITY_UNRESOLVED",
                      "season=%u save_preflight_will_recheck=1",
                      (unsigned)_careerSeasonsCompleted);
     SWOS_NationalTrace("ROSTER_REFRESH_POINT", "completed=%u selected=%04X ages_retirements_transfers_done=1",
         (unsigned)_careerSeasonsCompleted, (unsigned)_selTeamNumber);
     /* Observe the active worldwide squads after retirement and AI transfers. */
-    SWOS_WorldQualitySnapshot((unsigned)_careerSeasonsCompleted);
+    SWOS_WorldQualitySnapshot((unsigned)_currentSeasonShowing);
     SWOS_AUTOSKIP_LOG("[bug1] ContinueCareerNextSeason EXIT");
 }
 

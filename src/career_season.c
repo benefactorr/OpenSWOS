@@ -1526,6 +1526,76 @@ static void v3_seed_oceania(void)
         (unsigned)COMPID_oceaniaCup);
 }
 
+/* Keep the verified national draw in private storage. Legacy competition
+ * auto-advance reuses inactive competition buffers, so an early seed can be
+ * overwritten before its own cup starts. The snapshot is process-local and
+ * only valid for the exact season in which it was captured. Saved games still
+ * use the existing draw validator and deterministic rebuild fallback. */
+typedef struct V3ContinentalDrawSnapshot {
+    uint8_t competition;
+    uint8_t count;
+    uint16_t season;
+    uint8_t valid;
+    uint16_t entrants[32];
+} V3ContinentalDrawSnapshot;
+
+static V3ContinentalDrawSnapshot s_v3ContinentalDraws[5];
+
+static V3ContinentalDrawSnapshot *v3_continental_snapshot(uint8_t id)
+{
+    const uint8_t ids[] = { COMPID_europeanChampionships2,
+        COMPID_copaAmerica, COMPID_africanNationsCup,
+        COMPID_northAmericanCup, COMPID_asianCup };
+    for (unsigned i = 0; i < sizeof(ids); ++i) {
+        if (ids[i] == id) {
+            s_v3ContinentalDraws[i].competition = id;
+            return &s_v3ContinentalDraws[i];
+        }
+    }
+    return NULL;
+}
+
+static void v3_capture_continental_draw(uint8_t id)
+{
+    V3ContinentalDrawSnapshot *snap = v3_continental_snapshot(id);
+    uint8_t *record = NULL, region = 0;
+    unsigned count = 0;
+    if (!snap || !v3_continental_record(id, &record, &count, &region) ||
+        count > 32u || !v3_continental_draw_valid(id)) return;
+    TeamId *seeds = comp_team_seed_list((Competition *)record);
+    if (!seeds) return;
+    for (unsigned i = 0; i < count; ++i)
+        snap->entrants[i] = BE_READ_U16((uint8_t *)seeds + 2u * i);
+    snap->count = (uint8_t)count;
+    snap->season = _currentSeasonShowing;
+    snap->valid = 1;
+    SWOS_NationalTrace("CONTINENTAL_DRAW_SNAPSHOT",
+        "season=%u comp=%u entrants=%u", (unsigned)_currentSeasonShowing,
+        (unsigned)id, count);
+}
+
+static int v3_restore_continental_draw(uint8_t id)
+{
+    V3ContinentalDrawSnapshot *snap = v3_continental_snapshot(id);
+    uint8_t *record = NULL, region = 0;
+    unsigned count = 0;
+    if (!snap || !snap->valid || snap->season != _currentSeasonShowing ||
+        !v3_continental_record(id, &record, &count, &region) ||
+        snap->count != count) return 0;
+    TeamId *seeds = comp_team_seed_list((Competition *)record);
+    if (!seeds) return 0;
+    /* The saved snapshot was validated at capture. Restore it only when the
+     * live draw is invalid, never replace a valid qualifier-derived draw. */
+    if (v3_continental_draw_valid(id)) return 1;
+    for (unsigned i = 0; i < count; ++i)
+        BE_WRITE_U16((uint8_t *)seeds + 2u * i, snap->entrants[i]);
+    if (!v3_continental_draw_valid(id)) return 0;
+    SWOS_NationalTrace("CONTINENTAL_DRAW_SNAPSHOT_RESTORED",
+        "season=%u comp=%u entrants=%u", (unsigned)_currentSeasonShowing,
+        (unsigned)id, count);
+    return 1;
+}
+
 static int v3_active_continental(uint8_t id)
 {
     return _isNationalSelector && _currentCompetitionPtr &&
@@ -1544,7 +1614,10 @@ void Career_SeedIndependentContinentalCups(void)
         const uint8_t cups[] = { COMPID_copaAmerica, COMPID_africanNationsCup,
              COMPID_northAmericanCup, COMPID_asianCup };
         for (unsigned i = 0; i < sizeof(cups); ++i)
-            if (!v3_active_continental(cups[i])) v3_write_continental_draw(cups[i]);
+            if (!v3_active_continental(cups[i])) {
+                v3_write_continental_draw(cups[i]);
+                v3_capture_continental_draw(cups[i]);
+            }
         if (!v3_active_continental(COMPID_oceaniaCup)) v3_seed_oceania();
     } else if (phase == 3u &&
                !v3_active_continental(COMPID_europeanChampionships2)) {
@@ -1552,6 +1625,7 @@ void Career_SeedIndependentContinentalCups(void)
          * phase-2 qualification. Only fall back to seeded entrants if the
          * qualifiers were unavailable or the save predates this feature. */
         v3_write_continental_draw(COMPID_europeanChampionships2);
+        v3_capture_continental_draw(COMPID_europeanChampionships2);
     }
 }
 
@@ -1575,6 +1649,10 @@ static void v3_simulate_continental(uint8_t id)
     uint8_t *record = NULL, region = 0;
     unsigned count = 0;
     if (!v3_continental_record(id, &record, &count, &region)) return;
+    /* Prefer the already verified draw from season start. The inactive
+     * competition record may have been reused by another cup in between. */
+    if (!v3_continental_draw_valid(id))
+        (void)v3_restore_continental_draw(id);
     if (!v3_continental_draw_valid(id)) {
         /* The original competition engine can reuse/overwrite inactive cup
          * draws while advancing an earlier cup in the same season.  A draw
