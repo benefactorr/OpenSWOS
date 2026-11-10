@@ -3280,7 +3280,24 @@ void SWOS_NationalReconcileAfterSeason(void)
             (unsigned)lookup[slot*2u],(unsigned)lookup[slot*2u+1u],
             (const char *)national->playerName);
     }
-    if(removeMask)Career_RemoveInternationalPlayersByMask(removeMask);
+    if (removeMask) {
+        extern void SWOS_NationalSquadUnavailableNewsRecord(const PlayerFile *player);
+        /* Capture player names before the removal routine marks slots 0xFF. */
+        for (unsigned slot = 0; slot < 20u; ++slot) {
+            if (removeMask & ((uint32_t)1u << slot)) {
+                const PlayerFile *player = &_careerTeam.players[slot];
+                if (player->playerName[0] &&
+                    (uint8_t)player->playerName[0] != 0xFFu)
+                    SWOS_NationalSquadUnavailableNewsRecord(player);
+                SWOS_NationalTrace("NATIONAL_SQUAD_NEWS",
+                    "season=%u team=%04X slot=%u type=unavailable name=%.23s",
+                    (unsigned)_currentSeasonShowing,
+                    (unsigned)_selTeamNumber, slot,
+                    (const char *)player->playerName);
+            }
+        }
+        Career_RemoveInternationalPlayersByMask(removeMask);
+    }
     SWOS_NationalTrace("NATIONAL_SOURCE_RECONCILE","season=%u team=%04X inspected=%u kept=%u relinked=%u removed=%u ambiguous=%u mask=%08X",
         (unsigned)_currentSeasonShowing,(unsigned)_selTeamNumber,considered,
         kept,relinked,missing,ambiguous,(unsigned)removeMask);

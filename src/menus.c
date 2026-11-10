@@ -4176,6 +4176,9 @@ static unsigned s_retirementNewsCount;
 static unsigned s_retirementNewsSeason;
 static unsigned s_retirementNewsPage;
 static uint8_t s_retirementNewsIsNational;
+/* A missing club source is not necessarily a confirmed retirement. */
+static uint8_t s_retirementNewsUnavailable[SWOS_RETIREMENT_NEWS_MAX];
+static uint8_t s_retirementNewsHasUnavailable;
 char _retirementNewsHeading[64] = "PLAYER RETIREMENTS";
 char _retirementNewsRows[10][64];
 char _retirementNewsAction[16] = "CONTINUE";
@@ -4188,6 +4191,8 @@ void SWOS_RetirementNewsClear(unsigned season)
     s_retirementNewsPage = 0;
     s_retirementNewsSeason = season;
     s_retirementNewsIsNational = 0;
+    s_retirementNewsHasUnavailable = 0;
+    memset(s_retirementNewsUnavailable, 0, sizeof s_retirementNewsUnavailable);
 }
 
 void SWOS_RetirementNewsRecord(const PlayerFile *player, unsigned age)
@@ -4195,6 +4200,7 @@ void SWOS_RetirementNewsRecord(const PlayerFile *player, unsigned age)
     if (!player || s_retirementNewsCount >= SWOS_RETIREMENT_NEWS_MAX)
         return;
     unsigned i = s_retirementNewsCount++;
+    s_retirementNewsUnavailable[i] = 0;
     /* PlayerFile.playerName has 23 bytes, including its usual NUL. Never
      * trust the runtime byte for menu string termination. */
     memcpy(s_retirementNews[i].name, player->playerName, sizeof(player->playerName));
@@ -4213,13 +4219,28 @@ void SWOS_NationalRetirementNewsRecord(const PlayerFile *player, unsigned age)
     SWOS_RetirementNewsRecord(player, age);
 }
 
+/* Called from the post-season national squad source reconciliation. Do not
+ * label these removals as confirmed retirements when no retired identity was
+ * established. Retain the existing acknowledged end-of-season screen. */
+void SWOS_NationalSquadUnavailableNewsRecord(const PlayerFile *player)
+{
+    if (!player || s_retirementNewsCount >= SWOS_RETIREMENT_NEWS_MAX)
+        return;
+    s_retirementNewsIsNational = 1;
+    s_retirementNewsHasUnavailable = 1;
+    SWOS_RetirementNewsRecord(player, 0);
+    s_retirementNewsUnavailable[s_retirementNewsCount - 1u] = 1;
+}
+
 static void SWOS_RetirementNewsPopulate(void)
 {
     static const char *positions[8] = {"GK", "RB", "LB", "D", "RW", "LW", "M", "A"};
     unsigned start = s_retirementNewsPage * SWOS_RETIREMENT_NEWS_PAGE;
     snprintf(_retirementNewsHeading, sizeof(_retirementNewsHeading),
              s_retirementNewsIsNational ?
-                 "NATIONAL TEAM RETIREMENTS - %u" :
+                 (s_retirementNewsHasUnavailable ?
+                     "NATIONAL TEAM SQUAD CHANGES - %u" :
+                     "NATIONAL TEAM RETIREMENTS - %u") :
                  "PLAYER RETIREMENTS - SEASON %u", s_retirementNewsSeason);
     for (unsigned i = 0; i < SWOS_RETIREMENT_NEWS_PAGE; ++i) {
         _retirementNewsRows[i][0] = 0;
@@ -4227,9 +4248,11 @@ static void SWOS_RetirementNewsPopulate(void)
             unsigned idx = start + i;
             if (s_retirementNewsIsNational)
                 snprintf(_retirementNewsRows[i], sizeof(_retirementNewsRows[i]),
-                         "%-23.23s  %s - REPLACE",
+                         "%-23.23s  %s - %s",
                          s_retirementNews[idx].name,
-                         positions[s_retirementNews[idx].position]);
+                         positions[s_retirementNews[idx].position],
+                         s_retirementNewsUnavailable[idx] ? "UNAVAILABLE" :
+                             (s_retirementNewsHasUnavailable ? "RETIRED" : "REPLACE"));
             else
                 snprintf(_retirementNewsRows[i], sizeof(_retirementNewsRows[i]),
                          "%-23.23s  AGE %2u  %s",
@@ -4261,6 +4284,20 @@ void SWOS_RetirementNewsNext(void)
 
 int SWOS_RetirementNewsShow(void)
 {
+    /* One record per season transition, including the case where no notice
+     * was collected. This distinguishes an empty notification from a menu
+     * display problem without changing career or save data. */
+    {
+        FILE *f = fopen("swos_national_retirement_screen.log", "a");
+        if (f) {
+            fprintf(f, "RETIREMENT_SCREEN season=%u count=%u national=%u unavailable=%u action=%s\n",
+                    s_retirementNewsSeason, s_retirementNewsCount,
+                    (unsigned)s_retirementNewsIsNational,
+                    (unsigned)s_retirementNewsHasUnavailable,
+                    s_retirementNewsCount ? "show" : "skip_empty");
+            fclose(f);
+        }
+    }
     if (!s_retirementNewsCount)
         return 0;
     s_retirementNewsPage = 0;
@@ -7841,6 +7878,332 @@ static char careerFixtureTopName[18];
 static char careerFixtureBottomName[18];
 
 
+/* Align the career EURO fixture preview with the actual tournament draw.
+ * The draw is represented by DIYTournamentState.teamIndexOrder and groupMap,
+ * not by the *unshuffled* teamIds sequence. The source game originally
+ * constructs the career cache before the final tournament draw. */
+static void Career_SynchroniseEuroGroupFixturePreviews(void)
+{
+    extern uint8_t _teamSelectionKeyCache[];
+    extern uint16_t _teamSelectionKeyCacheCount;
+    extern DIYCompetitionEx _diyCompetitionStart;
+    const DIYTournamentState *t = &_primaryCompetitionBuf.tourn;
+    const DIYTournamentSlot *slot = &t->slots[0];
+    const DIYCompetitionEx *stage = &_diyCompetitionStart;
+    const DIYCompetitionEx *saved =
+        (const DIYCompetitionEx *)(const void *)_primaryCompetitionBuf.stageSnapshot;
+    const char *source = "live";
+    FILE *log = NULL;
+    static unsigned traceCount = 0;
+    if (++traceCount <= 12) log = fopen("swos_euro_fixture_sync.log", "a");
+#define EURO_SKIP(reason) do { if (log) fprintf(log, "EURO_PREVIEW_SKIP reason=%s\n", reason); goto done; } while (0)
+    if (!_isNationalSelector || _gameType != 4) EURO_SKIP("not_national_career");
+    if ((t->header.field_2E != COMPID_europeanChampionships2 &&
+         t->header.field_2E != COMPID_europeanChampionships) ||
+        t->header.competitionType != 2) EURO_SKIP("not_euro");
+    if (t->header.currentRoundIndex != 0 ||
+        slot->numTeams != 16 || slot->groups != 4 || slot->teamsPerGroup != 4)
+        EURO_SKIP("not_16_team_group_stage");
+    if (stage->base.competitionType != 0 ||
+        stage->base.field_2E != t->header.field_2E) {
+        stage = saved;
+        source = "saved";
+    }
+    if (stage->base.competitionType != 0 ||
+        stage->base.field_2E != t->header.field_2E ||
+        stage->base.numTeams != 16) EURO_SKIP("no_group_stage_snapshot");
+
+    /* The active EURO league stage owns the genuine group membership.
+     * Stable leagueStandings records [group*4..group*4+3] identify teams
+     * via teamSelOffset; teamEntryOffsets simply SORTS those records for
+     * display. The stage leagueTeamIds array may contain a different, stale
+     * draw (as observed in actual career saves). Never infer group membership
+     * from leagueTeamIds or shuffleAndPad. */
+    static const uint8_t pairings[3][4] = {
+        {1, 0, 3, 2}, {2, 1, 0, 3}, {1, 3, 0, 2}
+    };
+    uint16_t members[4][4];
+    uint16_t opponent[3];
+    uint8_t humanFirst[3];
+    unsigned myGroup = 4, myPosition = 4;
+    for (unsigned g = 0; g < 4; ++g) {
+        for (unsigned pos = 0; pos < 4; ++pos) {
+            const DIYTeamStats *row = &stage->leagueStandings[g*4 + pos];
+            int identity = row->teamSelOffset;
+            if (identity < -1 || identity >= 100)
+                EURO_SKIP("bad_group_row_team_identity");
+            const TeamFileEx *team = identity == -1
+                ? &_careerTeam : &_selectedTeams[identity];
+            uint16_t id = ((uint16_t)team->team.countryNumber << 8)
+                          | (uint16_t)team->team.teamOrdinal;
+            if (!id || id == 0xFFFF) EURO_SKIP("bad_group_team_id");
+            for (unsigned gg = 0; gg <= g; ++gg)
+                for (unsigned pp = 0; pp < (gg == g ? pos : 4); ++pp)
+                    if (members[gg][pp] == id)
+                        EURO_SKIP("duplicate_group_team_id");
+            members[g][pos] = id;
+            if (id == _selTeamNumber) {
+                if (myGroup != 4) EURO_SKIP("duplicate_human_team");
+                myGroup = g;
+                myPosition = pos;
+            }
+        }
+    }
+    if (myGroup >= 4) EURO_SKIP("human_missing_from_standings");
+
+    /* Compare each sorted group as drawn on screen to the original
+     * standings-record quartet. This catches accidental identity damage
+     * without conflating sorted table positions and fixture positions. */
+    for (unsigned g = 0; g < 4; ++g) {
+        for (unsigned i = 0; i < 4; ++i) {
+            unsigned off = stage->matchData.league.teamEntryOffsets[g*4+i];
+            if ((off % sizeof(DIYTeamStats)) ||
+                (off / sizeof(DIYTeamStats)) >= 16)
+                EURO_SKIP("bad_standings_offset");
+            const DIYTeamStats *row = &stage->leagueStandings[off / sizeof(DIYTeamStats)];
+            int identity = row->teamSelOffset;
+            if (identity < -1 || identity >= 100)
+                EURO_SKIP("bad_standings_team_identity");
+            const TeamFileEx *team = identity == -1
+                ? &_careerTeam : &_selectedTeams[identity];
+            uint16_t id = ((uint16_t)team->team.countryNumber << 8)
+                          | (uint16_t)team->team.teamOrdinal;
+            unsigned hits = 0;
+            for (unsigned j = 0; j < 4; ++j)
+                if (members[g][j] == id) hits++;
+            if (hits != 1) EURO_SKIP("stage_group_vs_standings_mismatch");
+        }
+    }
+    for (unsigned r = 0; r < 3; ++r) {
+        unsigned hits = 0;
+        for (unsigned m = 0; m < 2; ++m) {
+            unsigned first = pairings[r][2*m], second = pairings[r][2*m+1];
+            if (myPosition != first && myPosition != second) continue;
+            opponent[r] = members[myGroup][myPosition == first ? second : first];
+            humanFirst[r] = (myPosition == first);
+            hits++;
+        }
+        if (hits != 1) EURO_SKIP("pairing_invalid");
+    }
+    if (log) fprintf(log,
+        "EURO_STAGE_SOURCE method=standings_identities source=%s group=%u position=%u "
+        "members=%04X,%04X,%04X,%04X "
+        "opponents=%04X,%04X,%04X\n",
+        source, myGroup+1, myPosition,
+        members[myGroup][0],members[myGroup][1],
+        members[myGroup][2],members[myGroup][3],
+        opponent[0],opponent[1],opponent[2]);
+
+    /* Career fixture cache has a separate 22-byte entry for each EURO
+     * group match. Round index is 0, cupRoundStringIdx is 0, and the
+     * group-stage entries are consecutive. Preserve already played games. */
+    TeamSelectionKeyCacheEntry *entries[3] = {0};
+    unsigned n = 0, off = 0;
+    unsigned count = _teamSelectionKeyCacheCount;
+    if (count > 128) EURO_SKIP("cache_count_bad");
+    for (unsigned i = 0; i < count; ++i) {
+        if (off + sizeof(TeamSelectionKeyCacheEntry) > 8192u)
+            EURO_SKIP("cache_bounds");
+        TeamSelectionKeyCacheEntry *e =
+            (TeamSelectionKeyCacheEntry *)(void *)(_teamSelectionKeyCache + off);
+        unsigned stride = e->entryStride;
+        if (stride < sizeof(*e) || stride > 256 || off + stride > 8192u)
+            EURO_SKIP("cache_stride_bad");
+        if (e->compSlot == 0 && e->roundIdx == 0 &&
+            e->cupRoundStringIdx == 0 && e->totalElements == 1 &&
+            stride >= sizeof(*e) + sizeof(TeamSelectionKeyCacheMatchSlot)) {
+            if (n >= 3) EURO_SKIP("too_many_group_rows");
+            entries[n++] = e;
+        }
+        off += stride;
+    }
+    if (n != 3) EURO_SKIP("missing_group_rows");
+    for (unsigned r = 0; r < 3; ++r) {
+        TeamSelectionKeyCacheMatchSlot *m =
+            (TeamSelectionKeyCacheMatchSlot *)(void *)(entries[r] + 1);
+        if (m->matchFlags) continue;
+        uint8_t *ids = (uint8_t *)(void *)m;
+        uint16_t old1 = BE_READ_U16(ids + 2);
+        uint16_t old2 = BE_READ_U16(ids + 4);
+        uint16_t new1 = humanFirst[r] ? _selTeamNumber : opponent[r];
+        uint16_t new2 = humanFirst[r] ? opponent[r] : _selTeamNumber;
+        if (log) fprintf(log, "EURO_PREVIEW_ROW source=%s group=%u round=%u old=%04X,%04X expected=%04X,%04X\n",
+                         source, myGroup+1, r+1, old1, old2, new1, new2);
+        if (old1 == new1 && old2 == new2) continue;
+        BE_WRITE_U16(ids+2, new1);
+        BE_WRITE_U16(ids+4, new2);
+        if (log) fprintf(log, "EURO_PREVIEW_SYNC group=%u round=%u old=%04X,%04X new=%04X,%04X\n",
+                         myGroup+1,r+1,old1,old2,new1,new2);
+    }
+    if (log) fprintf(log, "EURO_PREVIEW_SUCCESS source=%s group=%u human_pos=%u\n", source,myGroup+1,myPosition);
+done:
+    if (log) fclose(log);
+#undef EURO_SKIP
+}
+
+
+/* 32-team World Cup group preview.  Unlike the stale tournament teamIds[]
+ * order, the live league standings keep stable selected-team identities in
+ * their records.  The league shuffle grid and the standard four-team
+ * fixture schedule determine which of those players actually meets whom.
+ * Reconcile only unplayed career cache rows.  Never rewrite the tournament. */
+static void Career_SynchroniseWorldCupGroupFixturePreviews(void)
+{
+    extern uint8_t _teamSelectionKeyCache[];
+    extern uint16_t _teamSelectionKeyCacheCount;
+    extern DIYCompetitionEx _diyCompetitionStart;
+    const DIYTournamentState *t = &_primaryCompetitionBuf.tourn;
+    const DIYTournamentSlot *slot = &t->slots[0];
+    const DIYCompetitionEx *stage = &_diyCompetitionStart;
+    const DIYCompetitionEx *saved =
+        (const DIYCompetitionEx *)(const void *)_primaryCompetitionBuf.stageSnapshot;
+    const char *source = "live";
+    FILE *log = NULL;
+    static unsigned traceCount = 0;
+    if (++traceCount <= 24) log = fopen("swos_worldcup_fixture_sync.log", "a");
+#define WC_PREVIEW_SKIP(reason) do { if (log) fprintf(log, "WC_PREVIEW_SKIP reason=%s\n", reason); goto done; } while (0)
+    if (!_isNationalSelector || _gameType != 4) WC_PREVIEW_SKIP("not_national_career");
+    if (t->header.field_2E != COMPID_worldCup2 ||
+        t->header.competitionType != 2) WC_PREVIEW_SKIP("not_32_world_cup");
+    if (t->header.currentRoundIndex != 0 ||
+        slot->numTeams != 32 || slot->groups != 8 || slot->teamsPerGroup != 4)
+        WC_PREVIEW_SKIP("not_group_stage");
+    if (stage->base.competitionType != 0 ||
+        stage->base.field_2E != t->header.field_2E) {
+        stage = saved;
+        source = "saved";
+    }
+    if (stage->base.competitionType != 0 ||
+        stage->base.field_2E != t->header.field_2E ||
+        stage->base.numTeams != 32) WC_PREVIEW_SKIP("no_active_group_stage");
+
+    /* Use the actual standard SWOS four-team league schedule.  Each pair
+     * of games constitutes one World Cup group match day. */
+    static const uint8_t roundPairs[3][4] = {
+        {0, 1, 2, 3}, {0, 2, 1, 3}, {3, 0, 1, 2}
+    };
+    uint16_t ids[32];
+    uint8_t grid[32];
+    uint16_t opponents[3];
+    uint8_t humanFirst[3];
+    unsigned humanGroup = 8, humanPos = 4;
+    uint32_t seen = 0;
+    for (unsigned i = 0; i < 32; ++i) {
+        unsigned idx = stage->matchData.league.shuffleAndPad[i];
+        if (idx >= 32 || (seen & (UINT32_C(1) << idx)))
+            WC_PREVIEW_SKIP("bad_or_duplicate_fixture_grid");
+        seen |= UINT32_C(1) << idx;
+        grid[i] = (uint8_t)idx;
+        const DIYTeamStats *row = &stage->leagueStandings[idx];
+        int32_t identity = row->teamSelOffset;
+        if (identity < -1 || (identity >= 0 && (unsigned)identity >= _numSelectedTeams))
+            WC_PREVIEW_SKIP("bad_team_identity");
+        const TeamFileEx *team = identity == -1
+            ? &_careerTeam : &_selectedTeams[identity];
+        ids[idx] = ((uint16_t)team->team.countryNumber << 8) |
+            (uint16_t)team->team.teamOrdinal;
+        if (!ids[idx] || ids[idx] == 0xffffu)
+            WC_PREVIEW_SKIP("bad_team_id");
+        if (ids[idx] == _selTeamNumber) {
+            if (humanGroup != 8) WC_PREVIEW_SKIP("duplicate_managed_team");
+            humanGroup = i / 4;
+            humanPos = i % 4;
+        }
+    }
+    if (seen != UINT32_MAX) WC_PREVIEW_SKIP("incomplete_fixture_grid");
+    if (humanGroup >= 8) WC_PREVIEW_SKIP("managed_team_not_in_grid");
+
+    /* Cross-check the eight sorted standings groups against fixture group
+     * membership.  Sorting changes order but not the set of four records.
+     * Do not write cache entries if the draw itself is inconsistent. */
+    const size_t offsetsStart = offsetof(DIYCompetitionEx_LeagueView, teamEntryOffsets);
+    if (offsetsStart + 32u * sizeof(uint16_t) > sizeof(stage->matchData.raw))
+        WC_PREVIEW_SKIP("standings_storage_bounds");
+    for (unsigned g = 0; g < 8; ++g) {
+        uint8_t checked = 0;
+        for (unsigned i = 0; i < 4; ++i) {
+            uint16_t offset;
+            memcpy(&offset, stage->matchData.raw + offsetsStart + (g*4+i)*2, sizeof(offset));
+            if (offset % sizeof(DIYTeamStats) || offset / sizeof(DIYTeamStats) >= 32)
+                WC_PREVIEW_SKIP("bad_standings_offset");
+            unsigned rec = offset / sizeof(DIYTeamStats);
+            unsigned found = 0;
+            for (unsigned j = 0; j < 4; ++j) {
+                if (grid[g*4+j] == rec) {
+                    if (checked & (1u << j)) WC_PREVIEW_SKIP("duplicate_group_record");
+                    checked |= (uint8_t)(1u << j);
+                    ++found;
+                }
+            }
+            if (found != 1) WC_PREVIEW_SKIP("standings_group_mismatch");
+        }
+        if (checked != 15) WC_PREVIEW_SKIP("incomplete_group");
+    }
+    for (unsigned round = 0; round < 3; ++round) {
+        unsigned hits = 0;
+        for (unsigned match = 0; match < 2; ++match) {
+            unsigned a = roundPairs[round][match*2];
+            unsigned b = roundPairs[round][match*2+1];
+            if (humanPos != a && humanPos != b) continue;
+            unsigned opponentPos = humanPos == a ? b : a;
+            opponents[round] = ids[grid[humanGroup*4+opponentPos]];
+            humanFirst[round] = (uint8_t)(humanPos == a);
+            ++hits;
+        }
+        if (hits != 1 || opponents[round] == _selTeamNumber)
+            WC_PREVIEW_SKIP("bad_world_cup_pairing");
+    }
+    if (log) fprintf(log, "WC_PREVIEW_SOURCE source=%s group=%u position=%u "
+                         "opponents=%04X,%04X,%04X\n",
+                     source, humanGroup+1, humanPos,
+                     opponents[0], opponents[1], opponents[2]);
+
+    /* Exactly three league cache entries, one match per group round, are
+     * created for the managed side.  Touch only entries without results. */
+    TeamSelectionKeyCacheEntry *entries[3] = {0};
+    unsigned count = _teamSelectionKeyCacheCount;
+    unsigned n = 0, off = 0;
+    if (count > 128) WC_PREVIEW_SKIP("cache_count_invalid");
+    for (unsigned i = 0; i < count; ++i) {
+        if (off + sizeof(TeamSelectionKeyCacheEntry) > 8192u)
+            WC_PREVIEW_SKIP("cache_bounds");
+        TeamSelectionKeyCacheEntry *e =
+            (TeamSelectionKeyCacheEntry *)(void *)(_teamSelectionKeyCache + off);
+        unsigned stride = e->entryStride;
+        if (stride < sizeof(*e) || stride > 256 || off + stride > 8192u)
+            WC_PREVIEW_SKIP("cache_stride_invalid");
+        if (e->compSlot == 0 && e->roundIdx == 0 &&
+            e->cupRoundStringIdx == 0 && e->totalElements == 1 &&
+            stride >= sizeof(*e) + sizeof(TeamSelectionKeyCacheMatchSlot)) {
+            if (n >= 3) WC_PREVIEW_SKIP("too_many_group_cache_entries");
+            entries[n++] = e;
+        }
+        off += stride;
+    }
+    if (n != 3) WC_PREVIEW_SKIP("missing_group_cache_entries");
+    for (unsigned r = 0; r < 3; ++r) {
+        TeamSelectionKeyCacheMatchSlot *m =
+            (TeamSelectionKeyCacheMatchSlot *)(void *)(entries[r] + 1);
+        if (m->matchFlags) continue;
+        uint8_t *raw = (uint8_t *)(void *)m;
+        uint16_t oldA = BE_READ_U16(raw+2), oldB = BE_READ_U16(raw+4);
+        uint16_t newA = humanFirst[r] ? _selTeamNumber : opponents[r];
+        uint16_t newB = humanFirst[r] ? opponents[r] : _selTeamNumber;
+        if (log) fprintf(log, "WC_PREVIEW_ROW round=%u old=%04X,%04X expected=%04X,%04X\n",
+                         r+1, oldA, oldB, newA, newB);
+        if (oldA == newA && oldB == newB) continue;
+        BE_WRITE_U16(raw+2, newA);
+        BE_WRITE_U16(raw+4, newB);
+        if (log) fprintf(log, "WC_PREVIEW_SYNC round=%u old=%04X,%04X new=%04X,%04X\n",
+                         r+1, oldA, oldB, newA, newB);
+    }
+    if (log) fprintf(log, "WC_PREVIEW_SUCCESS group=%u position=%u\n", humanGroup+1, humanPos);
+done:
+    if (log) fclose(log);
+#undef WC_PREVIEW_SKIP
+}
+
+
 __attribute__((used, externally_visible))
 void CareerGameListCommon(MenuEntry *item)
 {
@@ -7850,6 +8213,8 @@ void CareerGameListCommon(MenuEntry *item)
     uint16_t d0 = a5->ordinal - entry19->ordinal;
 
     if (d0 == 0) {
+        Career_SynchroniseEuroGroupFixturePreviews();
+        Career_SynchroniseWorldCupGroupFixturePreviews();
         _columnMarker = _gameListY;
         _cglmVar3 = 0;
     }
