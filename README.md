@@ -173,7 +173,7 @@ All credit for making this project possible belongs to the original OpenSWOS dev
 
 I am not a game developer. I am just vibeing, adding features that I have wanted in Sensible World of Soccer since I was a kid!
 
-The OpenSWOS project builds upon an extraordinary reverse-engineering effort:
+This mod builds upon an extraordinary reverse-engineering effort:
 
 - **Ben Baker** ([GitHub](https://github.com/benbaker76)) reverse-engineered the SWOS Amiga 68k assembly in [SWOS-RE](https://github.com/benbaker76/SWOS-RE), from which this C port developed. He is also the author of the original C and SDL ports.
 - **Zlatko Karakaš** ([GitHub](https://github.com/zlatkok/)) reverse-engineered the original DOS version.
