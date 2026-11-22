@@ -21,6 +21,8 @@ For full credits, scroll below!
 - **Modern transfer values!** Want to sign Mbappé? You will have to pay for him. A lot! The financial system accommodates much higher modern player valuations.
 - **Expanded squads!** The modern world supports larger club rosters, while retaining the familiar SWOS matchday squad interface. Thanks to Aminta!
 
+![Select starting season](docs/images/screenshots/Screenshot%202026-11-20%20083653.png)
+
 ## ⚽ A Living Football World
 
 In original SWOS, the world remains largely static. Career+ changes that.
@@ -32,6 +34,16 @@ In original SWOS, the world remains largely static. Career+ changes that.
 - **More intelligent AI squad management!** Computer clubs evaluate their squads and use stronger players when they become available. Where expanded rosters exist, suitable reserves can replace departing first-team players.
 - **More reserve and trial players!** Emergency players help clubs maintain their squads, with more plausible attributes and values.
 - **Longer careers!** Continue managing through many more seasons, allowing the football world to evolve over decades.
+
+| AC Milan | Real Madrid |
+|:---:|:---:|
+| ![Modern AC Milan squad with ages and values](docs/images/screenshots/Screenshot%202026-11-20%20083713.png) | ![Modern Real Madrid squad](docs/images/screenshots/Screenshot%202026-11-20%20083736.png) |
+| **Modern Milan with player ages and values** | **Real Madrid in 2026/27** |
+
+| Expanded Real Madrid Squad | Inter Milan |
+|:---:|:---:|
+| ![Additional Real Madrid players](docs/images/screenshots/Screenshot%202026-11-20%20083743.png) | ![Modern Inter Milan squad](docs/images/screenshots/Screenshot%202026-11-20%20083757.png) |
+| **More players beyond the original 16-player limit** | **Inter Milan in 2026/27** |
 
 ## 🏆 International Football Overhaul
 
@@ -47,6 +59,12 @@ National team management has been completely transformed.
 
 International football is no longer an occasional thing. It is a fully integrated part of the career world.
 
+| Start as a National Manager | Search for Italian Internationals |
+|:---:|:---:|
+| ![Start as a national team manager](docs/images/screenshots/Screenshot%202026-11-20%20101400.png) | ![Search for eligible Italy players](docs/images/screenshots/Screenshot%202026-11-20%20101413.png) |
+| **Begin your career as a national manager** | **Search for eligible national team players** |
+![National team retirement notifications](docs/images/screenshots/Screenshot%202026-11-20%20153739.png)
+
 ## 🇧🇦 🇲🇰 🇷🇸 Expanded Historical Leagues
 
 The 1996/97 database has also received substantial attention, particularly in the former Yugoslavia.
@@ -57,6 +75,8 @@ The 1996/97 database has also received substantial attention, particularly in th
 - **International eligibility:** Players from the newly supported countries can represent their national teams and participate in international football.
 
 Reconstructing these leagues has been particularly challenging because historical squad and competition information is often incomplete or inconsistent.
+
+![New Serbian league](docs/images/screenshots/Screenshot%202026-11-20%20083852.png)
 
 ## 💷 Transfers, Finances and Managerial Careers
 
