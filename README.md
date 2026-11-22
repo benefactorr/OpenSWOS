@@ -91,6 +91,8 @@ Career+ substantially expands the original management experience.
 - **Adjusted club finances!** Gate receipts, wages and running costs have been rebalanced to better suit the different football economies.
 - **Modern financial scale!** The 2026/27 world supports considerably higher player prices and club values.
 
+![World player search](docs/images/screenshots/Screenshot%202026-11-20%20083722.png)
+
 ## 📊 Player Management and Football History
 
 Several improvements make long-term squad management more informative and enjoyable.
