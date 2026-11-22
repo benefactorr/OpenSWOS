@@ -19,6 +19,11 @@ int16_t WriteFile(uint8_t *filename, uint8_t *src, uint32_t _size);
 void ShowFsErrorByCode(uint16_t errCode);
 int16_t LoadCareerFile(uint8_t *filename);
 int16_t SaveCareerFile(uint8_t *filename);
+#ifdef SWOS_SDL_BUILD
+extern uint16_t _modernSeasonEndAutosave;
+void CareerAutosave_SeasonEnd(int finishingSeason);
+void CareerAutosave_SeasonStart(void);
+#endif
 int16_t LoadPresetFile(uint8_t *filename);
 int16_t SavePresetCompetitionFile(uint8_t *filename);
 int16_t LoadDIYFile(uint8_t *filename);
@@ -48,5 +53,7 @@ void SelectFilesInputSaveFilenameOnSelect(MenuEntry *entry);
 /* --- Chunk 218: SelectFilesInit, SelectFilesOnReturn --- */
 void SelectFilesInit(void);
 void SelectFilesOnReturn(void);
+void SelectFilesSort(void);             /* the list's order ([general] file_sort: name | date) */
+void SelectFilesSortOnSelect(void);     /* SORTED BY: the other order */
 
 #endif

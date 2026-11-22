@@ -1,143 +1,161 @@
-#
+# OpenSWOS Career+ V4
 
-## 🌍 V3.1: Macedonia and Bosnia!
+**Two football worlds. 1996/97 and 2026/27.**
 
-- **Fully playable leagues and national teams!** First leagues for Bosnia and Macedonia are fully reconstructed for 1996/97 season. Considering the mess with historical data, this is a major achievment!
+OpenSWOS Career+ is an unofficial modification of OpenSWOS that significantly expands career mode while preserving the classic Sensible World of Soccer experience: Aging, retirements, AI doing transfers.... in addition to red cards for AI, injuries and subs, and many other changes listed below.
 
-## 🌍 V3: International Football Overhaul
+Players would grow older and retire, clubs would buy and sell footballers, national teams would change, new generations would emerge, and you could look back at decades of football history!
 
-- **Start your career as a national team manager!** You can now manage a national team from the very beginning of your career.
+V4 brings together all previous Career+ improvements into one unified game, with two playable databases: **1996/97 and 2026/27**.
 
-- **A dynamic international football world!** All national teams are now active and select their strongest available players from the career database. National squads evolve over time instead of remaining unchanged season after season.
+Credits for 2026/27 database go to Aminta! He created the realistic league structures which was used here and allowed me to port it for this mod!
+https://github.com/aminta/swos-9697-mod
 
-- **Generated players for smaller nations!** More than 75 national teams lack enough players in the original database. A new Football Manager-style system fills the gaps with generated players, drawing on a database of over **21,000 names**!
+For full credits, scroll below!
 
-- **International players age and retire!** When players retire, they disappear from their national teams. If you manage a national team, you will need to select their replacements.
+## 🌍 Two Football Worlds: 1996/97 and 2026/27
 
-- **National team selection!** Build and manage your national squad by selecting eligible players from clubs around the world.
+- **The classic 1996/97 world!** The original SWOS football universe, now with corrected and expanded historical leagues, player ages, dynamic national teams and a substantially improved career experience.
+- **The modern 2026/27 world!** Manage modern clubs and players with updated squads, competitions, player ages and market values.
+- **One unified career system!** Both worlds are part of Career+ features, including ageing, retirements, AI transfers, player searches, national team management and improved gameplay.
+- **Modern transfer values!** Want to sign Mbappé? You will have to pay for him. A lot! The financial system accommodates much higher modern player valuations.
+- **Expanded squads!** The modern world supports larger club rosters, while retaining the familiar SWOS matchday squad interface. Thanks to Aminta!
 
-- **International competition history!** You can now view previous winners of the World Cup, European Championship, Copa América, African Nations Cup, Asian Cup and other international tournaments, even when managing a club.
+## ⚽ A Living Football World
 
-## ⚽ Gameplay Improvements
+In original SWOS, the world remains largely static. Career+ changes that.
 
-- **Optional Advanced AI!** The improved AI builds attacks more intelligently, passes more accurately and generally plays more realistic football. Prefer the original SWOS experience? Simply switch back to the original AI in the Options menu.
+- **Players age every season!** Every footballer has an age that increases as your career progresses. For the 1996/97 database, I have tried to establish historically accurate ages for as many players as possible.
+- **Players retire!** Enjoy Baresi while you can. He will not be playing forever! Older players eventually retire, making way for the next generation.
+- **New players emerge!** The game generates young footballers to replace retirees and replenish squads, with ages, attributes, positions, values and names.
+- **Automatic AI transfers!** Computer-controlled clubs buy and sell players at the beginning of each season. Some make excellent decisions. Others make questionable ones. Just like real football!
+- **More intelligent AI squad management!** Computer clubs evaluate their squads and use stronger players when they become available. Where expanded rosters exist, suitable reserves can replace departing first-team players.
+- **More reserve and trial players!** Emergency players help clubs maintain their squads, with more plausible attributes and values.
+- **Longer careers!** Continue managing through many more seasons, allowing the football world to evolve over decades.
 
-- **Optional three-button gameplay!** Experience SWOS with three dedicated controls instead of the traditional single fire button: passing, shooting and long shooting. This gives you more control and makes gameplay faster and more responsive!
+## 🏆 International Football Overhaul
 
-  Both gameplay improvements can be enabled or disabled in the Options menu.
+National team management has been completely transformed.
 
-## 📸 V3 Screenshots
+- **Start as a national team manager!** You no longer need to wait for an international job offer. Begin your career managing a national team from the very first day.
+- **Dynamic national teams!** International squads are no longer permanently fixed. They are selected from the active career database and evolve as players develop, transfer and retire.
+- **Manage your national squad!** Search for eligible footballers worldwide and select the players you want representing your country.
+- **International retirements!** Retired players leave their national squads. If you manage a national team, you will be notified and asked to select replacements.
+- **Generated internationals for smaller nations!** More than 75 countries lack sufficient players in the original database. A Football Manager-style system creates additional internationals, drawing from a collection of over **21,000 names**.
+- **International competition history!** Career+ records winners of the World Cup, European Championship, Copa América, African Nations Cup, Asian Cup and other international tournaments, including competitions you are not personally managing.
+- **A world that develops independently!** National teams and international tournaments continue to evolve while you concentrate on your club career.
 
-### New Gameplay Options
+International football is no longer an occasional thing. It is a fully integrated part of the career world.
 
-![Advanced AI and three-button gameplay options](docs/images/screenshots/Screenshot%202026-11-07%20143318.png)
+## 🇧🇦 🇲🇰 🇷🇸 Expanded Historical Leagues
 
-### Start a Career as a National Team Manager
+The 1996/97 database has also received substantial attention, particularly in the former Yugoslavia.
 
-![Start a career with a national team](docs/images/screenshots/Screenshot%202026-11-07%20142618.png)
+- **Yugoslavia:** Reconstructed the domestic league structure with 24 clubs across the 1A and 1B divisions, including historical 1996/97 squads. The original SWOS database contained outdated rosters and an incomplete league structure.
+- **Bosnia and Herzegovina:** Added a fully playable domestic league and national team.
+- **Macedonia:** Added a reconstructed, playable 1996/97 league and national team, with domestic cup competition.
+- **International eligibility:** Players from the newly supported countries can represent their national teams and participate in international football.
 
-### National Team Player Selection
+Reconstructing these leagues has been particularly challenging because historical squad and competition information is often incomplete or inconsistent.
 
-![National team player selection](docs/images/screenshots/Screenshot%202026-11-07%20142623.png)
+## 💷 Transfers, Finances and Managerial Careers
 
-### International Player Retirements
+Career+ substantially expands the original management experience.
 
-![International player retirement notifications](docs/images/screenshots/Screenshot%202026-11-07%20142222.png)
+- **Worldwide player search!** Search the football database by position and value, and approach players without navigating through hundreds of individual clubs.
+- **Improved national team player search!** Find eligible internationals directly, rather than opening every club to inspect its players.
+- **More transfer-listed players!** Computer-controlled teams make more footballers available for purchase.
+- **More transfer offers!** Other clubs are more active in approaching you for your players.
+- **Expanded job opportunities!** Receive more managerial offers, including opportunities from foreign clubs.
+- **Higher job offer limit!** The game can accommodate up to 50 job offers.
+- **Adjusted club finances!** Gate receipts, wages and running costs have been rebalanced to better suit the different football economies.
+- **Modern financial scale!** The 2026/27 world supports considerably higher player prices and club values.
 
-### European Championship Past Winners
+## 📊 Player Management and Football History
 
-![European Championship past winners](docs/images/screenshots/Screenshot%202026-11-07%20142448.png)
+Several improvements make long-term squad management more informative and enjoyable.
 
-### Copa América Past Winners
+- **Player ages in squad screens!** See how old your players are and plan for their eventual retirement.
+- **Attributes directly in the squad screen!** No need to leave the squad view simply to inspect a player's abilities.
+- **Historical winners!** Review previous winners of domestic leagues, national cups, European club competitions and international tournaments.
+- **Improved squad presentation!** Expanded displays provide more information while retaining the recognisable SWOS interface.
+- **More useful RES/TRIAL players!** Generated players can provide emergency squad depth as footballers are sold or retire.
+- **Improved AI squad ordering!** Computer teams organise their starting line-ups according to positional requirements and player quality.
 
-![Copa América past winners](docs/images/screenshots/Screenshot%202026-11-07%20142458.png)
+## 🎮 Gameplay Improvements
 
-# Version 2
+- **Optional Improved AI!** Computer opponents build attacks more intelligently, make better passing decisions, improve their positioning and generally provide more realistic opposition. Prefer classic SWOS? Switch back to the original AI.
+- **Optional three-button gameplay!** Use dedicated buttons for passing, shooting and long shooting rather than relying exclusively on the traditional single fire button.
+- **Red cards for AI players!** Computer-controlled footballers can be sent off, just like human-controlled players.
+- **Automatic AI injury substitutions!** Computer teams attempt to replace injured players during matches, prioritising suitable positional replacements.
+- **More fouls!** Adjusted foul detection produces a slightly greater frequency of refereeing decisions.
+- **Improved substitution displays!** Corrections to substitute bench kits and shirt-number spacing.
 
-- **Player age and aging:** All players now have age, and they age as the career progresses. I have tried to find accurate age for the majority of players in the database!
+Both Improved AI and three-button gameplay can be switched on or off through the Options menu. **Improved AI is enabled by default; three-button gameplay is disabled by default.**
 
-- **Retirements!:** As players age, they retire! Enjoy your Baresi while you can, he will not be there forever, new players will emerge!
+## 🛠️ Technical and Quality-of-Life Improvements
 
-- **AI Squad Improvement!:** As AI buys players, now it also checks whether reserves are better than the first team players, and swaps them!
+- **Unified executable:** Select between the classic and modern football databases within one game.
+- **Portable installation:** Game assets, databases, settings and career saves can be kept together in the installation directory.
+- **Separate tactics loading:** Tactics files no longer appear among ordinary career and season saves.
+- **Improved transfer-market navigation:** Additional filtering and sorting options make finding players easier.
+- **Career continuity:** Expanded player identity, ageing and competition systems allow the football world to evolve across successive seasons.
+- **Simplified menus:** Unnecessary options inherited from the original OpenSWOS have been hidden.
 
-| Player Ages in Squad | Player Ages | Retirements |
-|:---:|:---:|:---:|
-| ![Player ages](docs/images/screenshots/swos_age_screenshot.png) | ![Player ages in squad](docs/images/screenshots/Screenshot%202026-11-04%20184242.png) | ![Retirements](docs/images/screenshots/Screenshot%202026-11-04%20184658.png) |
+## 📸 Screenshots
 
-# Version 1
-
-# OpenSWOS Career+: New Features and Improvements
-
-This modified version of OpenSWOS introduces a range of improvements to career mode, transfers, finances, player management and match gameplay. All credits for making this possible goes to the original OpenSWOS team, not to me. I am just vibe-ing here, making features that I wanted in SWOS since I was a kid.
-
-## Career Mode Improvements
-
-- **Automatic AI transfers:** AI-controlled clubs make transfers at the beginning of every new season. Sometimes they strengthen their squads, sometimes they make questionable decisions! The system can process hundreds of thousands of transfers over the course of a career, making the football world more dynamic.
-
-- **Improved national team player search:** A new search interface makes it much easier to find and select players for national teams, without having to browse through individual clubs.
-
-- **Worldwide player search:** Search for players across the entire game database, filtering by position and price range, and make transfer offers directly from the search results.
-
-- **More balanced club finances:** Adjusted income and expenditure make it easier to manage larger clubs without facing unrealistic financial difficulties.
-
-- **Historical competition winners:** The game now records the winners of domestic leagues and cups across multiple seasons, allowing you to revisit the history of your career.
-
-- **Player attributes in the squad screen:** View your players' attributes directly from the SQUAD screen.
-
-- **More transfer-listed players:** An increased number of players can be placed on the transfer list.
-
-- **More transfer offers:** Receive more offers from AI clubs for your players.
-
-- **More job opportunities:** Increased frequency of job offers during your managerial career.
-
-- **Higher job offer limit:** More job offers can be available simultaneously.
-
-- **Improved reserve and trial players:** Emergency players have more realistic attributes, making them useful replacements when squad depth becomes a problem.
-
-- **Extended career length:** Play more seasons before reaching the game's career limit.
-
-## Match Gameplay Improvements
-
-- **Red cards for AI players!** Computer-controlled players can now receive red cards, just like human-controlled players.
-
-- **Slightly more fouls:** Adjusted foul detection increases the frequency of refereeing decisions for both human and AI players.
-
-- **Automatic AI injury substitutions:** AI-controlled teams now attempt to replace injured players during matches, prioritising substitutes who play in the same or a similar position.
-
-## Yugoslavia
-- **Both divisions + National team** In original SWOS 1996/97 Yugoslav league was not updated. Rosters were old, and there were only 10 teams in the league instead of 12. This mod brings 24 teams, in 1A and 1B leagues, with all real rosters from 1996/97
-
-## Data Editor
-In the future versions I will release a data editor, which will be able to deal with adding new leagues, teams, etc.
-
-## Screenshots
+### Career Worlds, National Teams and Gameplay
 
 | | |
-|---|---|
-| ![A new world search](docs/images/screenshots/Screenshot%202026-10-28%20183716.png) | ![Previous winners Bundesliga](docs/images/screenshots/Screenshot%202026-10-28%20183656.png) |
-| ![Bayern transfer done by AI](docs/images/screenshots/Screenshot%202026-10-28%20183636.png) | ![More transfer listed players](docs/images/screenshots/Screenshot%202026-10-28%20183625.png) |
-| ![New menus WIP](docs/images/screenshots/Screenshot%202026-10-28%20183615.png) | ![Player can do more AI transfers](docs/images/screenshots/Screenshot%202026-10-28%20183605.png) |
-| ![Past winners Italy](docs/images/screenshots/Screenshot%202026-10-28%20084013.png) | ![Squad screen with player attributes](docs/images/screenshots/Screenshot%202026-10-28%20184645.png) |
-| ![New national team player search interface](docs/images/screenshots/Screenshot%202026-10-28%20185535.png) | ![Searching national team players](docs/images/screenshots/Screenshot%202026-10-28%20185610.png) |
+|:---:|:---:|
+| ![Gameplay options](docs/images/screenshots/Screenshot%202026-11-07%20143318.png) | ![Start as a national manager](docs/images/screenshots/Screenshot%202026-11-07%20142618.png) |
+| **Gameplay options** | **Start as a national manager** |
+| ![National team player selection](docs/images/screenshots/Screenshot%202026-11-07%20142623.png) | ![International retirement](docs/images/screenshots/Screenshot%202026-11-07%20142222.png) |
+| **National team selection** | **International player retirements** |
+| ![European Championship history](docs/images/screenshots/Screenshot%202026-11-07%20142448.png) | ![Copa America history](docs/images/screenshots/Screenshot%202026-11-07%20142458.png) |
+| **European Championship winners** | **Copa América winners** |
 
+### Players, Ageing and Retirements
 
-## Development Status
+| | | |
+|:---:|:---:|:---:|
+| ![Player ages](docs/images/screenshots/swos_age_screenshot.png) | ![Squad ages](docs/images/screenshots/Screenshot%202026-11-04%20184242.png) | ![Retirements](docs/images/screenshots/Screenshot%202026-11-04%20184658.png) |
+| **Player ages** | **Squad ages** | **Retirements** |
 
-*This is an unofficial, experimental modification of OpenSWOS. Some features are still being tested and refined. Feedback and bug reports are welcome!*
+### Transfers, Careers and Football History
 
-## Limitations
+| | |
+|:---:|:---:|
+| ![World player search](docs/images/screenshots/Screenshot%202026-10-28%20183716.png) | ![Bundesliga historical winners](docs/images/screenshots/Screenshot%202026-10-28%20183656.png) |
+| **Worldwide player search** | **Past winners** |
+| ![Bayern AI transfer](docs/images/screenshots/Screenshot%202026-10-28%20183636.png) | ![Transfer listed players](docs/images/screenshots/Screenshot%202026-10-28%20183625.png) |
+| **AI transfer activity** | **Expanded transfer lists** |
+| ![Career menus](docs/images/screenshots/Screenshot%202026-10-28%20183615.png) | ![Transfers](docs/images/screenshots/Screenshot%202026-10-28%20183605.png) |
+| **Career interface** | **Transfer management** |
+| ![Italian league winners](docs/images/screenshots/Screenshot%202026-10-28%20084013.png) | ![Player attributes](docs/images/screenshots/Screenshot%202026-10-28%20184645.png) |
+| **League history** | **Squad attributes** |
+| ![National search](docs/images/screenshots/Screenshot%202026-10-28%20185535.png) | ![National player results](docs/images/screenshots/Screenshot%202026-10-28%20185610.png) |
+| **National player search** | **International player selection** |
 
-This version of SWOS works only with the original database. I have not tested it with any other data set.
+## 🔧 Development Status
 
-# OpenSWOS is the main thing! Here are the links
+OpenSWOS Career+ V4 is an **unofficial, experimental modification**. It introduces extensive changes to the original career systems, and some features are still being tested and refined.
 
+The two databases differ in their underlying structures, so certain squad and competition features may behave differently between the 1996/97 and 2026/27 worlds.
 
-- **Ben Baker** ([github.com/benbaker76](https://github.com/benbaker76)) —
-  reverse-engineered the SWOS Amiga 68k assembly in
-  **[SWOS-RE](https://github.com/benbaker76/SWOS-RE)**, which this C port grew
-  out of, and author of the port (originally two trees, `SWOS_C` for Amiga and
-  `SWOS_C_SDL` for SDL, merged here into one).
-- **Zlatko Karakaš** ([github.com/zlatkok](https://github.com/zlatkok/)) —
-  reverse-engineered the original DOS version.
-- **Richard Joseph** — RJP1 audio engine.
-- **gabomdq** & contributors — SDL_GameControllerDB.
+Feedback, testing and bug reports are welcome!
+
+## ❤️ Credits: OpenSWOS Makes This Possible
+
+All credit for making this project possible belongs to the original OpenSWOS developers and contributors.
+
+I am not a game developer. I am just vibeing, adding features that I have wanted in Sensible World of Soccer since I was a kid!
+
+The OpenSWOS project builds upon an extraordinary reverse-engineering effort:
+
+- **Ben Baker** ([GitHub](https://github.com/benbaker76)) reverse-engineered the SWOS Amiga 68k assembly in [SWOS-RE](https://github.com/benbaker76/SWOS-RE), from which this C port developed. He is also the author of the original C and SDL ports.
+- **Zlatko Karakaš** ([GitHub](https://github.com/zlatkok/)) reverse-engineered the original DOS version.
+- **Richard Joseph** created the RJP1 audio engine.
+- **gabomdq and contributors** maintain SDL_GameControllerDB.
+
+OpenSWOS Career+ exists because of their work.

@@ -18,6 +18,7 @@
  * no libc.
  */
 #include "build_info.h"
+#include "project_identity.h"
 #include "swos_build.h"
 
 /* ---- which platform is this binary for? ----------------------------------
@@ -37,8 +38,12 @@
 #else
 #  if   defined(__CYGWIN__) || defined(_WIN32)
 #    define SWOS_PLATFORM_OS "windows"
+#  elif defined(SWOS_IOS_BUILD)
+#    define SWOS_PLATFORM_OS "ios"
 #  elif defined(__APPLE__)
 #    define SWOS_PLATFORM_OS "macos"
+#  elif defined(SWOS_ANDROID_BUILD)
+#    define SWOS_PLATFORM_OS "android"
 #  elif defined(__linux__)
 #    define SWOS_PLATFORM_OS "linux"
 #  else
@@ -86,39 +91,11 @@ const char *Build_Platform(void)
 
 const char *Build_Version(void)
 {
-    return "OpenSWOS " SWOS_BUILD_ID " (" SWOS_BUILD_DATE ", " SWOS_PLATFORM SWOS_BUILD_RULES ")";
+    return PROJECT_NAME " " SWOS_BUILD_ID " (" SWOS_BUILD_DATE ", " SWOS_PLATFORM SWOS_BUILD_RULES ")";
 }
 
-/* ---- the on-screen form ---------------------------------------------------
- * Built once into a static buffer rather than as a literal, because only the
- * commit id has an uppercase twin from the generator; the platform is composed
- * here. The in-game font has no lowercase glyphs -- a lowercase letter draws as
- * a blank -- so everything is uppercased on the way in. */
-static char s_screenText[96];
-
-static char *appendUpper(char *dst, const char *end, const char *src)
-{
-    while (*src && dst < end) {
-        char c = *src++;
-        if (c >= 'a' && c <= 'z')
-            c = (char)(c - 'a' + 'A');
-        *dst++ = c;
-    }
-    return dst;
-}
-
+/* The main menu uses the uppercase SWOS font. */
 const char *Build_ScreenText(void)
 {
-    if (s_screenText[0] == '\0') {
-        char *p = s_screenText;
-        char *end = s_screenText + sizeof s_screenText - 1;
-        p = appendUpper(p, end, "BUILD ");
-        p = appendUpper(p, end, SWOS_BUILD_ID_UC);
-        p = appendUpper(p, end, "  ");
-        p = appendUpper(p, end, SWOS_BUILD_DATE);
-        p = appendUpper(p, end, "  ");
-        p = appendUpper(p, end, SWOS_PLATFORM);
-        *p = '\0';
-    }
-    return s_screenText;
+    return "OPENSWOS CAREER+ V4.0";
 }

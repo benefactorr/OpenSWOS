@@ -25,7 +25,12 @@
  *   no effect on software renderers — frames are not synced to monitor
  *   refresh, so 50 Hz monitor users see a slow drift / beat pattern.
  *
- * Accelerated (PLATFORM_RENDERER_ACCEL):
+ * Accelerated (PLATFORM_RENDERER_ACCEL, the default):
+ *   the GPU presenter (src/gpu_present.c, sokol_gfx on OpenGL: docs/RENDERING.md), which
+ *   colours and scales the 8bpp frame in a shader; where it cannot start, SDL's renderer as
+ *   below. [video] renderer = sdl asks for SDL's renderer by name.
+ *
+ * SDL (PLATFORM_RENDERER_SDL):
  *   SDL_RENDERER_ACCELERATED, optionally with SDL_RENDERER_PRESENTVSYNC.
  *   Hardware contexts (D3D / OpenGL / Metal) are bound to the creating
  *   thread, so the cross-thread fallback render is suppressed; only
@@ -38,6 +43,7 @@
 typedef enum {
     PLATFORM_RENDERER_SOFTWARE = 0,
     PLATFORM_RENDERER_ACCEL    = 1,
+    PLATFORM_RENDERER_SDL      = 2,
 } PlatformRendererMode;
 
 /* Fullscreen mode selector.
@@ -106,46 +112,54 @@ typedef struct {
      * NOT change the game: the simulation view is pinned either way, so the
      * extra columns are margin the simulation cannot see. */
     int                    widescreen;
-    int                    pitch_maps;       /* 1 = a DOS pitch's picture from <dir>/pitch<N>.tmj (pitch_map.h) */
     int                    outfit_shading;   /* 1 = shade the kit, 0 = flat team colour */
     int                    shadow_shading;   /* 1 = shade the drop shadow, 0 = SWOS's colour 8 */
     int                    hair_shading;     /* 1 = shade hair the game leaves flat (black), 0 = as the game has it */
     int                    shade_step;       /* sixteenths between kit shades: 16, 16-N, 16-2N, 16-3N; hair too */
+    int                    clash_kits;       /* [graphics] clash_kits: SWOS 2020's GK/REF CLASH KITS (clash_kits.c), 0 = off */
     int                    kit_art;          /* the UNIFORM screen's kit drawings: 0 = the Amiga's, 1 = the Jaguar's (kit_art.h) */
     int                    sound_style;      /* a match's sounds: 0 = the Amiga's, 1 = the PC game's samples (dos_sound.h) */
     char                   commentary_dir[260]; /* the folder of commentary categories; "" = sound_dos/commentary */
+    int                    title_midi;       /* with music_style 1: 1 = the intro plays sound_dos/title.xmi on the emulated chip, 0 = title.mp3 */
     int                    menu_recording;   /* with music_style 1: 1 = play sound_dos/menu.mp3, 0 = menu.xmi on the emulated chip */
     int                    music_style;      /* the menus' music: 0 = the Amiga's, 1 = the PC game's menu.xmi (dos_music.h) */
     int                    commentary;       /* the PC game's commentary: 0 off, 1 on (over the Amiga's sounds too), 2 auto = with sound_style 1 */
-    int                    improved_ai;      /* Career+: enabled by default */
-    int                    three_button;     /* Career+: disabled by default */
-    int                    dos_gameplay;     /* 1 = DOS gameplay tweaks (framerate etc.). PC-only; reserved */
-    int                    contest_own_ratings; /* 1 = a contested ball's dice rates each side by the man at the
+    int                    dos_gameplay;     /* the gameplay style, GAMEPLAY_* (dos_mode.h): 0 AMIGA, 1 DOS, 2 XBOX */
+    int                    contest_own_ratings_unused; /* 1 = a contested ball's dice rates each side by the man at the
                                               * ball; 0 (default) = the original's squad-slot lookup
                                               * (ball_possession.c, _gContestOwnRatings). Offline only. */
     int                    fire_hold_lockout;/* 1 = keep the ORIGINAL Amiga bug where an OPPONENT's tackle
                                               * kills your held fire button's shot charge for good. 0 (default)
                                               * = fixed. See _gOriginalFireHoldLockout in team_control.c */
     int                    replay_auto_save; /* 1 = keep a dated .SRP of every match, not only LATEST.SRP */
+    int                    replay_frame_overlay; /* 1 = the viewer's frame box shows at first (I toggles it) */
+    int                    vol_music, vol_chants, vol_commentary, vol_effects;  /* 0..100 ([audio] *_volume) */
+    int                    replay_half_speed;    /* 1 = recordings start at half speed in the viewer */
     char                   matchmaker[80];   /* [netplay] matchmaker: the server MULTIPLAYER logs in to,
                                               * "host" or "host:port". Typed on the login menu and saved
                                               * there; empty = a server on this machine. */
     int                    stick_deadzone;   /* [input] stick_deadzone: how far an analog stick must be
                                               * pushed, in percent of its travel, before it counts */
-    char                   key_bind[8][24];  /* [input] key_up/_down/_left/_right/_fire/_pass/_shoot/_high_shot: the player's own
+    char                   key_bind[8][24];  /* [input] key_up/_down/_left/_right/_fire: the player's own
                                               * keys, SDL scancode names, beside the built-in ones.
                                               * Empty = none (input_sdl.c) */
+    int                    three_button;     /* Career+ pass, shoot and high shot */
     int                    latch_presses;    /* [input] latch_presses: a fire press that came and went
                                               * between two reads still counts (default on) */
+    int                    touch_controls;   /* [input] touch_controls: TOUCH_CONTROLS_* -- the phones'
+                                              * on-screen controls, auto (0) | always | never */
     char                   netplay_name[33]; /* [netplay] name: the name typed on the MULTIPLAYER login
                                               * screen, kept while REMEMBER LOGIN INFO is on */
     int                    netplay_remember; /* [netplay] remember_login: that switch (default on) */
+    int                    live_cast;        /* [netplay] live_cast: 1 viewers may watch this player's
+                                              * matches (LIVE CAST, the default), 0 not */
     char                   record[80];       /* [netplay] record: stream every live match to a
                                               * recorder -- "server" (the matchmaker), "host[:port]",
                                               * or empty/"off". include/match_record.h */
     int                    prediction;       /* [netplay] prediction: PRED/SEEN in a live match's .SRP */
+    char                   chat_quick[10][101]; /* [chat] quick1..quick0: the keys 1..0 in an online
+                                              * match send these (include/match_chat.h); "" = off */
     int                    no_injuries_cards; /* [testing] no_injuries_cards: offline only (test_rules.h) */
-    int                    netplay_balance;  /* [netplay] balance: the two players share the guessing (docs/NETPLAY_BALANCE.md) */
     int                    reports;          /* [netplay] reports: SEND MATCH REPORTS -- both players'
                                               * logs and ratings to the server after an online
                                               * match. include/match_report.h */
@@ -167,16 +181,80 @@ typedef struct {
     char                   assets_reminder_off[64]; /* [general] assets_reminder_off: the data versions whose "update your
                                                      * game data" reminder was dismissed (src/assets_check.c), "" none */
     char                   currency[8];      /* "pound" (default) or "dollar" — money symbol */
+    /* ---- SWOS 2020 port, agent B ---- */
+    char                   file_sort[8];     /* [general] file_sort: the LOAD / SAVE lists' order (SWOS 2020's
+                                              * sortOption): "name" (the game's own, default) | "date" */
+    int                    quick_access;     /* [general] quick_access: SWOS 2020's QUICK ACCESS after a
+                                              * friendly (src/quick_access.c), 0 off (default) */
+    char                   world[8];         /* [general] world: the football world (include/world.h), "" = 9697 */
+    char                   mods[256];        /* [mods] enabled: the mods to play with (include/mods.h), "" = none */
+    char                   mods_disabled[256];   /* [mods] disabled: canonical mods turned off, "" = none */
+    uint32_t               tweaks;           /* [tweaks]: TWEAK_* bits switched on (include/tweaks.h), 0 = none */
+    /* [options]: the game's OPTIONS screen (game length, pitch type, auto replays, all player teams
+     * equal, auto save highlights, menu music), kept between runs -- the original kept them only in
+     * memory and in a career. OPTION_UNSET: not in SWOS.ini, the game's own default. */
+#define OPTION_UNSET (-100)
+    int                    opt_game_length;      /* _gameLength: 0..3 = 3, 5, 7, 10 minutes */
+    int                    opt_pitch_type;       /* _pitchType: -2 seasonal, -1 random, 0..6 frozen..hard */
+    int                    opt_auto_replays;
+    int                    opt_all_teams_equal;
+    int                    opt_auto_save_highlights;
+    int                    opt_menu_music;
+    /* -- the match chat's window (SWOS 2020 port, agent C; include/match_chat.h) -- */
+    int                    chat_scale;           /* [chat] scale: 0..8, the box 1x .. 5x in halves */
+    int                    chat_auto_close;      /* [chat] auto_close: 1..5 s the box stays after a line */
+    /* ---- SWOS 2020's CONTROLS MENU, CONTROLLER SETUP, menu look and MULTIPLAYER SETTINGS
+     * (SWOS 2020 port, agent A; src/input_sdl.c, src/settings_menus.c, src/match_chat.c) ---- */
+    char                   pad_pref[2][48];      /* [input] pad1/pad2: auto | keyboard | none | <guid>[#n] */
+    int                    auto_detect_pads;     /* [input] auto_detect_pads (1) */
+    char                   pad_config[512];      /* [input] pad_config: per pad GUID, fire/bench/cut-offs */
+    int                    shoulder_buttons_off; /* [input] shoulder_buttons: 1 = off, as SWOS 2020's default */
+    int                    call_bench;           /* [input] call_bench: 0 both, 1 taps, 2 button */
+    int                    menu_cursor;          /* [video] menu_cursor: 0 flashing, 1 steady */
+    int                    chat_controller_off;  /* [chat] controller_off: the pad steers nobody while typing */
+    int                    esc_presses;          /* [netplay] esc_presses: ESCs that leave a live match, 1-3 */
+    /* ---- launcher options (agent A): the SWOS United Launcher's, in SWOS.ini and on the settings
+     * pages (src/settings_menus.c, docs/SETTINGS.md "The launcher's options") ---- */
+    int                    skip_intro;           /* [general] skip_intro: no intro at start (--no-intro) */
+    int                    skip_image_reels;     /* [general] skip_image_reels: the intro's title only (--no-image-reels) */
+    int                    no_load_pause;        /* [general] no_load_pause: no 3 s on the stadium screen (--no-load-pause) */
+    int                    auto_centering;       /* [video] auto_centering: the window kept centred (--auto-centering) */
+    int                    show_fps;             /* [video] show_fps: the frames a second, top right (--show-fps) */
+    int                    mouse_cursor;         /* [input] mouse_cursor: 0 system, 1 workbench2, 2 workbench1 */
+    int                    cpu_tactics;          /* [gameplay] cpu_tactics: 0 normal, 1 expert (--improved-cpu-tactics) */
+    /* ---- launcher options (agent B): DISPLAY OPTIONS (src/settings_menus.c, src/display_options.c) ---- */
+    int                    menu_opacity;         /* [video] menu_opacity: 0-100, the menus' coloured parts over
+                                                  * the backdrop (SWOS 2020's --alpha-blending-menu); 100 opaque */
+    int                    purple_for_brown;     /* [video] purple_for_brown: maroon kits drawn purple */
+    int                    improved_pitch_palette; /* [video] improved_pitch_palette: SWOS 2020's wet/soft stripes */
+    int                    pixel_filter;         /* [video] pixel_filter: PIXEL_FILTER_* (include/pixel_filter.h) */
 } PlatformInitOptions;
 
 int  Platform_Init(const PlatformInitOptions *opts);
 void Platform_Shutdown(void);
+/* Opens url in the player's browser; 0 done. SDL_OpenURL, except in the Windows (Cygwin) build:
+ * Cygwin's SDL runs xdg-open, which a Windows machine does not have -- ShellExecute there. */
+int  Platform_OpenUrl(const char *url);
+/* The menus' true-colour backdrop (frontend.c, from a mod): R, G, B, A bytes, w x h, kept by the
+ * caller; NULL the game's own. While the menus are up, every frame pixel of MENU_BACKDROP_KEY
+ * shows the image, which covers the window (the GPU presenter at full size, SDL's renderer at
+ * the game's). 62: a colour of the game's own backdrop (33-62), which no menu element uses. */
+#define MENU_BACKDROP_KEY 62
+void Platform_SetMenuBackdrop(const uint8_t *rgba, int w, int h);
+/* ---- launcher options (agent B) ---- */
+/* DISPLAY OPTIONS: the menus' opacity, the pixel filter, purple for brown and the improved pitch
+ * palette, from the options (at Platform_Init, and when a row changes one). Drawing only. */
+void Platform_SetDisplayOptions(const PlatformInitOptions *o);
+/* One colour of the palette the screen is drawn in, by index. */
+void Platform_PaletteRgb(int index, uint8_t *r, uint8_t *g, uint8_t *b);
 
 /* Toggle / set fullscreen at runtime. Alt+Enter calls this internally;
  * exposed here in case a future settings menu needs a programmatic hook.
  * Toggles between windowed and the fullscreen flavour the user launched
  * with (--fullscreen=desktop or =exclusive). */
 void Platform_ToggleFullscreen(void);
+void Platform_SetFullscreenMode(PlatformFullscreenMode mode);    /* VIDEO OPTIONS' WINDOW MODE (agent A) */
+void Platform_VolumeKey(int key);        /* Shift+1..6 in a match: a volume down / up */
 
 /* Set the windowed-mode integer scale factor (1..4) at runtime. Called
  * from the +/- key handlers. No-op while fullscreen. */
@@ -204,15 +282,14 @@ int  Platform_VBlank(void);
 int  Platform_Present(void);
 /* The entry of the palette last shown nearest an RGB colour (not entry 0). */
 uint8_t Platform_NearestColour(uint8_t r, uint8_t g, uint8_t b);
+/* The colour of a palette entry, as last shown. */
+void Platform_PaletteColour(uint8_t index, uint8_t *r, uint8_t *g, uint8_t *b);
 /* Make the next frame `us` microseconds longer than the frame rate says -- netplay's frame
  * pacing (src/netplay_match.c). The limiter keeps deadlines, so a plain sleep between
  * frames is taken back out of the next one and changes nothing; this moves the deadline.
  * When the display itself paces (vsync at the game's rate) there is no deadline to move,
  * and it sleeps instead. */
 void Platform_DelayNextFrame(uint32_t us);
-/* How many frames late the frame limiter still catches up on (1 = drop any backlog
- * past one frame, the default). A live match sets its prediction window. */
-void Platform_SetCatchUpFrames(int frames);
 
 /* A function Platform_VBlank calls every frame, whatever is on screen -- or NULL.
  * For a connection that must not go quiet while a modal menu owns the loop: the
@@ -224,6 +301,14 @@ void Platform_SetFrameHook(void (*hook)(void));
 /* Just pump SDL events, render bitplanes, and present. No pacing.
  * Safe to call from the SDL_AddTimer thread. */
 void Platform_RenderFrame(void);
+/* A progress bar alone on the screen (the phones' Wi-Fi copy, before the game's data). */
+void Platform_ShowProgress(int permille);
+
+/* For a mod drawing over the picture (ModDef frameDrawn): the 8bpp frame this present shows
+ * (FRONTBUFFER_ROW_STRIDE_BYTES a row), and the HUD layer (8bpp, _screen_width a row, index 0
+ * empty), NULL when the HUD is drawn in the frame itself ([video] subpixel_scroll off). */
+const uint8_t *Platform_FrameShown(void);
+uint8_t       *Platform_HudLayerBuffer(void);
 
 /* Run the Amiga Level-3 VBlank ISR body, throttled to ~50 Hz max and
  * mutex-guarded so concurrent calls from the timer thread and the main

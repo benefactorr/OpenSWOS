@@ -2,7 +2,10 @@
  * swosdata -- build OpenSWOS's game data from the player's own copy of the game,
  * from the command line. The setup app does the same through the library.
  *
- *   swosdata [--scan DIR]... [--adf FILE]... [--dos DIR] [--jag FILE] [--swos2020 DIR]
+ *   swosdata [--scan DIR]... [--adf FILE]... [--dos DIR] [--dos-cd CD] [--jag FILE] [--swos2020 DIR]
+ *   --dos: the PC game's folder, its CD's image, or one of its two floppy images (give both)
+ *   --dos-cd: the PC game's CD (its drive or a copy) or its image (.iso, .bin, .cue), for the
+ *   commentary and effects an install leaves on it
  *            [--out DIR [--res DIR]]    (no --out: only report what was found)
  *   --scan looks through DIR and every folder inside it
  *   swosdata --compare OUT REF     every file in OUT equals REF's (RNC unpacked)
@@ -59,11 +62,15 @@ static int32_t usage(void)
 {
     fprintf(stderr,
             "usage: swosdata [--scan DIR]... [--adf FILE]... [--dos DIR] [--jag FILE]\n"
-            "                [--swos2020 DIR]\n"
+            "                [--dos-cd CD]   (the PC CD, its drive, a copy or .iso/.bin/.cue: the commentary)\n"
+            "       swosdata --amiga-mod MODDIR... [--remove-json]   (a mod's JSON as the Amiga's binary)\n"
+            "                [--swos2020 DIR] [--world PACKAGE]   (OpenSWOS-World-<tag>.zip, or unpacked)\n"
+            "                [--mods-dir DIR]     (with --world: install it there as a mod, world<tag>)\n"
             "                [--out DIR [--res DIR]]   (no --out: report what was found;\n"
             "                                           no sources: the last install's, from --out's ASSETS.ini)\n"
             "       swosdata --compare OUT REF\n"
             "       swosdata --whdload OUT.lha --drawer SWOSDRAWER --assets ASSETSDIR [--res DIR]\n"
+            "                [--with-world]   (World 2026-27 on the Amiga: its package installed)\n"
             "       swosdata --installed ASSETSDIR\n"
             "       swosdata --list-parts ASSETSDIR   (part, data version, file: check_data_versions.py)\n");
     return 2;
@@ -203,6 +210,24 @@ int main(int argc, char **argv)
         }
         return 0;
     }
+    /* --amiga-mod DIR... [--remove-json]: each mod folder made ready for the Amiga, in place
+     * (SwosData_AmigaMod: its challenge packs and classics indexes as binary). */
+    if (argc >= 3 && strcmp(argv[1], "--amiga-mod") == 0) {
+        int32_t removeJson = 0;
+        for (int i = 2; i < argc; i++)
+            if (strcmp(argv[i], "--remove-json") == 0)
+                removeJson = 1;
+        for (int i = 2; i < argc; i++) {
+            char err[256] = "";
+            if (strcmp(argv[i], "--remove-json") == 0)
+                continue;
+            if (SwosData_AmigaMod(argv[i], removeJson, on_log, NULL, err) != 0) {
+                fprintf(stderr, "swosdata: %s: %s\n", argv[i], err);
+                return 1;
+            }
+        }
+        return 0;
+    }
     if (argc == 3 && strcmp(argv[1], "--list-parts") == 0) {
         /* part key, data version, file: the files of each part that are there. */
         SwosData_ListFiles(argv[2], list_part_file, NULL);
@@ -213,7 +238,10 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "--whdload") == 0) {
         const char *out = argc > 2 ? argv[2] : NULL, *drawer = NULL, *assets = NULL;
         char res[1024] = "";
-        for (int i = 3; i + 1 < argc; i += 2) {
+        int32_t withWorld = 0;
+        for (int i = 3; i < argc; i += 2) {
+            if (strcmp(argv[i], "--with-world") == 0) { withWorld = 1; i--; continue; }
+            if (i + 1 >= argc) return usage();
             if (strcmp(argv[i], "--drawer") == 0) drawer = argv[i + 1];
             else if (strcmp(argv[i], "--assets") == 0) assets = argv[i + 1];
             else if (strcmp(argv[i], "--res") == 0) snprintf(res, sizeof res, "%s", argv[i + 1]);
@@ -223,7 +251,11 @@ int main(int argc, char **argv)
             return usage();
         if (!res[0])
             find_res_dir(argv[0], res, sizeof res);
-        if (SwosData_MakeWhdload(assets, drawer, res, out, on_log, NULL, err) != 0) {
+        if (withWorld && !SwosData_HaveAmigaWorld(assets)) {
+            fprintf(stderr, "--with-world: no world in %s -- install its package first (--world)\n", assets);
+            return 1;
+        }
+        if (SwosData_MakeWhdload(assets, drawer, res, out, withWorld, NULL, on_log, NULL, err) != 0) {
             fprintf(stderr, "failed: %s\n", err);
             return 1;
         }
@@ -254,8 +286,15 @@ int main(int argc, char **argv)
                 return 1;
             }
         } else if (strcmp(a, "--dos") == 0) {
-            if (SdSources_AddFile(&job.src, v) != 0 || !SdSources_HaveDos(&job.src)) {
+            /* (a floppy: the two make the game, whichever comes first) */
+            if (SdSources_AddFile(&job.src, v) != 0 ||
+                (!SdSources_HaveDos(&job.src) && !job.src.dosFloppy1[0] && !job.src.dosFloppy2[0])) {
                 fprintf(stderr, "not a PC Sensible World of Soccer folder: %s\n", v);
+                return 1;
+            }
+        } else if (strcmp(a, "--dos-cd") == 0) {
+            if (SdSources_AddDosCd(&job.src, v) != 0) {
+                fprintf(stderr, "not the PC game's CD (no SFX/PIERCE on it): %s\n", v);
                 return 1;
             }
         } else if (strcmp(a, "--swos2020") == 0) {
@@ -263,8 +302,15 @@ int main(int argc, char **argv)
                 fprintf(stderr, "not a SWOS 2020 install: %s\n", v);
                 return 1;
             }
+        } else if (strcmp(a, "--world") == 0) {
+            if (SdSources_AddFile(&job.src, v) != 0 || !SdSources_HaveWorld(&job.src)) {
+                fprintf(stderr, "not a world package (OpenSWOS-World-<tag>.zip): %s\n", v);
+                return 1;
+            }
         } else if (strcmp(a, "--out") == 0)
             snprintf(job.outDir, sizeof job.outDir, "%s", v);
+        else if (strcmp(a, "--mods-dir") == 0)      /* a world as a mod, into this mods folder */
+            snprintf(job.modsDir, sizeof job.modsDir, "%s", v);
         else if (strcmp(a, "--res") == 0)
             snprintf(job.resDir, sizeof job.resDir, "%s", v);
         else
@@ -276,9 +322,15 @@ int main(int argc, char **argv)
         printf("Searched %d folders\n", (int)s_scanned);
     /* Nothing named on the command line: what the last install used (ASSETS.ini in --out). */
     if (job.outDir[0] && !job.src.adf1[0] && !job.src.adf2[0] && !job.src.hdf[0] && !job.src.lha[0] &&
-        !job.src.dosDir[0] &&
-        !job.src.jagRom[0] && !job.src.s2020Dir[0] && SwosData_LoadSources(job.outDir, &job.src) > 0)
+        !job.src.dosDir[0] && !job.src.dosCd[0] && !job.src.dosFloppy1[0] && !job.src.dosFloppy2[0] &&
+        !job.src.jagRom[0] && !job.src.s2020Dir[0] && !job.src.world[0] &&
+        SwosData_LoadSources(job.outDir, &job.src) > 0)
         printf("Sources: from %s/%s, the last install's\n", job.outDir, "ASSETS.ini");
+    /* The PC game's CD in a drive, as the setup app looks for it: for a copy without the
+     * commentary (an installed CD, the floppy version), or as the PC game when there is none. */
+    if (!job.src.dosCd[0] && (!job.src.dosDir[0] || !SdSources_HaveCommentary(&job.src)) &&
+        SdSources_FindCdDrive(&job.src) == 0)
+        printf("Found the PC game's CD in a drive\n");
     printf("Amiga disk 1: %s\n", job.src.adf1[0] ? job.src.adf1 : "(not found)");
     printf("Amiga disk 2: %s\n", job.src.adf2[0] ? job.src.adf2 : "(not found)");
     printf("Amiga HDF:    %s\n", job.src.hdf[0] ? job.src.hdf : "(not found)");
@@ -292,8 +344,15 @@ int main(int argc, char **argv)
                job.src.hdf[0] && !(job.src.adf1[0] && job.src.adf2[0]) ? job.src.hdfDir : "");
     }
     printf("PC game:      %s\n", job.src.dosDir[0] ? job.src.dosDir : "(not found)");
+    if (job.src.dosFloppy1[0] || job.src.dosFloppy2[0])
+        printf("PC floppies:  %s, %s\n", job.src.dosFloppy1[0] ? job.src.dosFloppy1 : "(disk 1 not found)",
+               job.src.dosFloppy2[0] ? job.src.dosFloppy2 : "(disk 2 not found)");
+    if ((job.src.dosFloppy1[0] || job.src.dosFloppy2[0]) && !job.src.dosDir[0] && SdSources_DosProblem()[0])
+        printf("PC note:      %s\n", SdSources_DosProblem());
+    printf("PC CD:        %s\n", job.src.dosCd[0] ? job.src.dosCd : "(not found)");
     printf("Jaguar:       %s\n", job.src.jagRom[0] ? job.src.jagRom : "(not found)");
     printf("SWOS 2020:    %s\n", job.src.s2020Dir[0] ? job.src.s2020Dir : "(not found)");
+    printf("World:        %s\n", job.src.world[0] ? job.src.world : "(not found)");
     if (!job.outDir[0])
         return 0;       /* no --out: only say what was found */
     if (!job.resDir[0])

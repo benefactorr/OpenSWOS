@@ -4,6 +4,7 @@
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
 #include "game_state.h"
+#include "goal_ring.h"
 #include "game_types.h"
 #include "endian_helpers.h"
 #include "display.h"    /* _screen_width, WIDE_MARGIN — center the in-match HUD in widescreen */
@@ -315,9 +316,11 @@ extern uint16_t _throwInDeadVar;
 __attribute__((used, externally_visible, optimize("no-tree-loop-distribute-patterns")))
 void InitCurrentGoalHighlight(void)
 {
+    extern char _goalBase[];
     uint32_t *p = (uint32_t *)_goalBasePtr;
-    int16_t i;
-    for (i = 4749; i >= 0; i--)
+    /* The match's ring whole (goal_ring.h: bigger than a scene on SDL); a scene its 19000. */
+    int32_t i = (int32_t)((_goalBasePtr == (uint8_t *)_goalBase ? GOAL_RING_BYTES : GOAL_SCENE_BYTES) / 4u) - 1;
+    for (; i >= 0; i--)
         *p++ = 0;
     _currentHilPtr = _goalBasePtr;
     _replayState = 0;
@@ -790,6 +793,18 @@ void UpdateTime(void)
     /* timeVar is always 31000 here -> convert to 150 */
     _timeVar = 150;
 
+    {
+        /* A mod's match with no clock shown (mod_match.c, H2): off the display list. */
+        extern int32_t ModMatch_HideClock(void);
+        if (ModMatch_HideClock()) {
+            if (_currentTimeSprite.visible) {
+                _currentTimeSprite.visible = 0;
+                InitDisplaySprites();
+            }
+            goto time_invisible;
+        }
+    }
+
     /* Make time sprite visible if not already */
     if (_currentTimeSprite.visible == 0)
     {
@@ -797,6 +812,7 @@ void UpdateTime(void)
         InitDisplaySprites();
     }
 
+time_invisible:
     /* --- Time update section (time_invisible) --- */
 
     /* If gameSeconds is negative -> last minute countdown in progress */
@@ -870,6 +886,8 @@ check_game_end:
             goto last_cycle;
         _gameSeconds = 0;
         PlayEndGameWhistleSample();
+        { extern void ModMatch_Event(int32_t kind, int32_t team, int32_t player, int32_t arg);
+          ModMatch_Event(11 /* MODEVENT_FULL_TIME */, 0, -1, 0); }     /* the mods' match event (src/mod_match.c) */
         BumpPlayersLastPlayedHalfAtHalfEnd();
         _statsTeam1GoalsCopy = _statsTeam1Goals;
         _statsTeam2GoalsCopy = _statsTeam2Goals;

@@ -1,4 +1,3 @@
-#include "career_plus_options.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
@@ -13,6 +12,7 @@
 #include "goalkeeper.h"
 #include "tackle_foul.h"
 #include "headers.h"
+extern int32_t _gsKeeperLooseBallMinDeltaZ;   /* the keeper's loose ball -- dos_gameplay.c */
 extern int16_t _gsBallDefensiveZ;   /* GS_27_22 goalie-catch z-threshold — dos_gameplay.c */
 extern int16_t _gsThrowInHideResult; /* GS_55_50 throw-in UI gate — dos_gameplay.c */
 #include "player_anim.h"
@@ -86,6 +86,7 @@ extern int16_t      _breakState;
 
 #ifdef DETERMINISTIC_MODE
 #include "deterministic.h"
+
 extern volatile uint16_t panicReasonCode;
 extern void PanicHaltLoop(void);
 extern Sprite **team2SpritesTable;
@@ -99,6 +100,18 @@ extern Sprite **team2SpritesTable;
 #else
 #define T2P6_DESTX_TRAP(lineid)
 #endif
+
+#include "tweaks.h"   /* [tweaks] no_teammate_tackles, tackle_controlled_player */
+
+/* [tweaks] no_teammate_tackles: on a human's team, his controlled player has the ball (within
+ * 72 units^2 of it, the nearest a slide starts from) -- the receiver leaves it to him. */
+static int32_t teammate_has_ball(const TeamGeneralInfo *team)
+{
+    const Sprite *ctrl = team->controlledPlayer;
+    return team->playerNumber != 0 && ctrl != (const Sprite *)0 && (uint32_t)ctrl->ballDistance <= 72 &&
+           Tweaks_On(TWEAK_NO_TEAMMATE_TACKLES);
+}
+
 extern int16_t      _inGameCounter;
 extern int16_t      _nobodysBallTimer;
 extern int16_t      _whichCard;
@@ -695,12 +708,34 @@ not_in_penalty:
                 goto save_not_attempted_set_run_speed;
             if (ball->deltaZ.raw > 0x8000)
                 goto save_not_attempted_set_run_speed;
-            if (ball->deltaZ.raw < -0x8000)
+            /* -0x8000 in both releases; +0x8000 in XBOX (dos_gameplay.c). */
+            if (ball->deltaZ.raw < _gsKeeperLooseBallMinDeltaZ)
                 goto save_not_attempted_set_run_speed;
             goto mark_opponent_and_chase;
         }
 
     shot_at_goal:
+        {
+            /* A mod's match whose players throw their own keeper at a penalty (mod_match.c,
+             * H4; the5ar): a held direction dives him at once, at full speed, at the height
+             * chosen (down = low); a stand leaves him where he is, the catch checks still his. */
+            extern int16_t ModMatch_ManualKeeper(const TeamGeneralInfo *team);
+            const int16_t manual = ModMatch_ManualKeeper(team);
+            if (manual == 0) {
+                player->destX = player->x.s.i;
+                player->destY = player->y.s.i;
+                goto goalie_can_catch_checks;
+            }
+            if (manual > 0) {
+                const int16_t dir = (manual == 5 || manual == 6) ? 6 : 2;
+                player->direction = dir;
+                GoalkeeperJumping(dir, 0, dir, player, ball, team);
+                GoalkeeperForceDiveAnim(player, team, manual == 3 || manual == 5);
+                team->passKickTimer = 0;
+                team->passingKickingPlayer = (Sprite *)0;
+                goto clamp_keeper_y_min;
+            }
+        }
         if (ball->z.s.i > 16)
             goto save_not_attempted_set_run_speed;
 
@@ -747,6 +782,11 @@ not_in_penalty:
                             } else {
                                 d0 = 2; d3 = 2;
                             }
+                            {   /* the side a player chose (mod_match.c, keeperDive: SWOS 2020's
+                                 * g_JumpDir2 / g_JumpDir6 in place of the 2 and 6 here) */
+                                extern int16_t ModMatch_KeeperDiveSide(const TeamGeneralInfo *team, int16_t dir);
+                                d0 = d3 = ModMatch_KeeperDiveSide(team, d0);
+                            }
                             player->direction = d0;
                             _ballSpeed = _ballSprite.speed;
                             opp->spinTimer = (int16_t)0xFFFF;
@@ -769,6 +809,11 @@ not_in_penalty:
     goalie_save_attempt_entry:
         {
             int16_t attemptSave = ShouldGoalkeeperDive(player, ball, team);
+            {   /* whether he dives at all, a player's choice (mod_match.c, keeperDive: SWOS 2020's
+                 * g_JumpOrNot at ShouldGoalkeeperDive's end) */
+                extern int16_t ModMatch_KeeperDive(const TeamGeneralInfo *team, int16_t dive);
+                attemptSave = ModMatch_KeeperDive(team, attemptSave);
+            }
             if (!attemptSave)
                 goto save_not_attempted_set_run_speed;
 
@@ -802,6 +847,10 @@ not_in_penalty:
                 }
 
             apply_facing_then_jump:
+                {   /* (as at the beaten keeper's dive above: the player's side) */
+                    extern int16_t ModMatch_KeeperDiveSide(const TeamGeneralInfo *team, int16_t dir);
+                    d0 = d3 = ModMatch_KeeperDiveSide(team, d0);
+                }
                 player->direction = d0;
                 GoalkeeperJumping(d0, d1, d3, player, ball, team);
                 team->passKickTimer = 0;
@@ -1535,7 +1584,7 @@ not_in_penalty:
              * DoPass otherwise falls back to a direction-only kick when
              * nobody is facing the selected passing direction. Do not apply
              * to restarts, goalkeeper distribution, or human controls. */
-            if (_careerImprovedAiOption && team->playerNumber == 0 &&
+            if (Tweaks_On(TWEAK_IMPROVED_AI) && team->playerNumber == 0 &&
                 _gameStatePl == ST_GAME_IN_PROGRESS &&
                 player->playerOrdinal != 1) {
                 Sprite *receiver = GetClosestNonControlledPlayerInDirection(
@@ -1653,8 +1702,11 @@ not_in_penalty:
             team->currentAllowedDirection >= 0 && team->plNotFarFromBall) {
             if (team->ballLessEqual4 || team->ball4To8) {
                 Sprite *passTarget = team->passToPlayerPtr;
+                /* [tweaks] tackle_controlled_player: on a human's team the player he controls
+                 * slides, whoever is nearer (the original lets a nearer receiver take it, below). */
                 if (passTarget == (Sprite *)0 ||
-                    passTarget->ballDistance >= player->ballDistance) {
+                    passTarget->ballDistance >= player->ballDistance ||
+                    (team->playerNumber != 0 && Tweaks_On(TWEAK_TACKLE_CONTROLLED_PLAYER))) {
                     /* Tackle site 1 of 2: `begin_tackle_and_clear_control`
                      * (data/SWOS2.s:30428) = `@@begin_tackling`
                      * (swos-port/swos/swos.asm:115123). NO opponent clears here, in
@@ -2290,9 +2342,13 @@ not_in_penalty:
             goto finalize;
         }
 
-        /* inplay_try_begin_tackle */
+        /* inplay_try_begin_tackle -- the receiver's slide. Not on a human's team with [tweaks]
+         * tackle_controlled_player (only the player he controls slides) or no_teammate_tackles
+         * while his player has the ball (include/tweaks.h). */
         if (player->playerOrdinal != 1 && team->fireThisFrame &&
-            team->currentAllowedDirection >= 0 && team->plNotFarFromBall) {
+            team->currentAllowedDirection >= 0 && team->plNotFarFromBall &&
+            !(team->playerNumber != 0 &&
+              (Tweaks_On(TWEAK_TACKLE_CONTROLLED_PLAYER) || teammate_has_ball(team)))) {
             if (team->ballLessEqual4 || team->ball4To8) {
                 Sprite *ctrl = team->controlledPlayer;
                 if (ctrl == (Sprite *)0 || ctrl->ballDistance >= player->ballDistance) {
@@ -2313,8 +2369,9 @@ not_in_penalty:
             }
         }
 
-        /* pass_chase_try_autoswitch */
-        if (!team->ballLessEqual4)
+        /* pass_chase_try_autoswitch -- not while a human's own player has the ball, with
+         * [tweaks] no_teammate_tackles: the receiver would take it off him. */
+        if (!team->ballLessEqual4 || teammate_has_ball(team))
             goto pass_follow_decide;
         if (_ballSprite.speed >= 1536) {
             if (team->plCloseToBall)
@@ -2360,6 +2417,16 @@ not_in_penalty:
         goto finalize;
 
     pass_follow_decide:
+        if (teammate_has_ball(team)) {
+            /* [tweaks] no_teammate_tackles: up to support distance, never onto the ball. */
+            team->passingBall = 0;
+            if ((uint32_t)player->ballDistance <= 3200) {
+                player->destX = player->x.s.i;
+                player->destY = player->y.s.i;
+                goto finalize;
+            }
+            goto pass_follow_update_dest;
+        }
         if (!team->passingBall) {
             Sprite *ctrl = team->controlledPlayer;
             if (ctrl != (Sprite *)0 && (uint32_t)ctrl->ballDistance <= 3200) {
@@ -2383,7 +2450,7 @@ not_in_penalty:
          * vector is the actual ball velocity, not a guessed kick angle.
          * Only the nominated receiver is affected; human-controlled
          * receivers, keepers, aerial passes and restarts are untouched. */
-        if (_careerImprovedAiOption && team->playerNumber == 0 && team->passingToPlayer &&
+        if (Tweaks_On(TWEAK_IMPROVED_AI) && team->playerNumber == 0 && team->passingToPlayer &&
             team->passToPlayerPtr == player && player->playerOrdinal > 1 &&
             _gameStatePl == ST_GAME_IN_PROGRESS && ball->z.s.i <= 3 &&
             ball->speed >= 384) {

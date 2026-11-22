@@ -21,6 +21,10 @@
  * BenchCheckControls is called from GameLoop each frame.
  */
 
+#include "tweaks.h"
+#ifdef SWOS_SDL_BUILD
+#include <stdio.h>
+#endif      /* ai_injury_subs */
 #include "bench_subs.h"
 #include "dos_sound.h"
 #include "game_types.h"
@@ -42,6 +46,7 @@ extern int      _gDosGameplay;
 /* DOS's benchPickTeamCounter — see the team alternation in BenchCheckControls.
  * The Amiga has no such variable; it tests frameCount instead. */
 uint16_t _benchPickTeamCounter;
+int32_t  _gBenchTapsOff;        /* CALL BENCH: 2ND FIRE BUTTON ONLY (see check_double_tap) */
 extern uintptr_t _benchTeam;          /* Competition*-shaped pointer; retyped uintptr_t for 64-bit. See project_uint32_pointer_storage_trap.md. */
 extern uintptr_t _benchTeamGame;      /* TeamGame*-shaped pointer; retyped uintptr_t for 64-bit. */
 extern uint16_t _subsTeamsSwapped;
@@ -248,7 +253,8 @@ static void drawFormationMenuEntry(uint8_t *charsTable, uint16_t y, uint16_t ent
 uint8_t _aiInjurySubsTeam1Allowed = 0;
 uint8_t _aiInjurySubsTeam2Allowed = 0;
 
-/* AI injury substitutions, at a match stoppage only.  No bench menu is
+/* AI injury substitutions (benefactorr's Career+; the ai_injury_subs tweak), at a match
+ * stoppage only.  No bench menu is
  * activated for a computer team, so we apply the same 61-byte roster swap
  * and refresh the team's tactics without altering the human menu state. */
 static int aiSubPositionCost(int oldPos, int newPos)
@@ -333,11 +339,19 @@ static void aiReplaceInjuredPlayer(TeamGeneralInfo *team, TeamGame *tg,
     _benchTeam = oldBenchTeam;
     _benchTeamGame = oldBenchGame;
     DOS_SOUND(DOS_EV_SUBSTITUTION, 0);
+#ifdef SWOS_SDL_BUILD
+    fprintf(stderr, "[tweaks] ai_injury_subs: the %s team's slot %d off injured, bench %d on\n",
+            isTopTeam ? "top" : "bottom", leaving, entering);
+#endif
 }
 
 static void aiCheckInjuredSubs(void)
 {
-    /* This is called from the existing stoppage-only bench check. */
+    /* This is called from the existing stoppage-only bench check -- only with the
+     * ai_injury_subs tweak on (include/tweaks.h): the original's computer never
+     * substitutes (BenchCheckControls answers only a player calling the bench). */
+    if (!Tweaks_On(TWEAK_AI_INJURY_SUBS))
+        return;
     if (_trainingGame || _inSubstitutesMenu || _substituteInProgress ||
         _waitForPlayerToGoInTimer || _cameraLeavingSubsTimer ||
         _refState || _injuriesForever || _statsTimer ||
@@ -508,6 +522,11 @@ reset_bench_tap_state:
     return;
 
 check_double_tap:
+    /* SWOS 2020's CALL BENCH = 2ND FIRE BUTTON ONLY (ApplyCallBenchModeGate): the taps are not
+     * counted, as if no direction were held. Set by input_sdl.c for a DOS-style match of this
+     * machine's alone; always 0 on the Amiga, online and in the rigs. */
+    if (_gBenchTapsOff)
+        _subsDirection = 0xFFFF;
     /* double-tap detection for top team (a6 == &topTeamData) or bottom team */
     if (a6 == &_topTeamData) {
         /* player 1 double-tap detection */
@@ -1156,6 +1175,10 @@ substitutePlayer(void)
     _waitForPlayerToGoInTimer = 100;
     _subsBlockFire = 1;
     DOS_SOUND(DOS_EV_SUBSTITUTION, 0);
+    /* the mods: off7's slot (d7) now holds the man coming on, off6's (d6) the man going off */
+    { extern void ModMatch_Event(int32_t kind, int32_t team, int32_t player, int32_t arg);
+      ModMatch_Event(17 /* MODEVENT_SUBSTITUTION */, ((TeamGeneralInfo *)_benchTeam)->teamNumber,
+                     (int32_t)d7, (int32_t)d6); }
 
     leaveSubsMenu();
 }
@@ -1679,6 +1702,16 @@ static void draw_bench_occupants_only(void)
     if ((uint8_t)_topTeamInGame.teamName[0] & 2) {
         uint16_t t = topY; topY = botY; botY = t;
     }
+    /* Apply the activation block's second bench-side swap using the team that
+     * _topTeamData actually represents, even after the half-time side change. */
+    /* Use the match team's stable in-game pointer, not the mutable top-team
+     * pointer. After sides swap, _topTeamData can refer to the other team,
+     * and the old comparison drew benches in the wrong team's kit.
+     * Adapted from OpenSWOS / SWOS United (14 November 2026). */
+    TeamGame *benchGame = (TeamGame *)_topTeamData.inGameTeamPtr;
+    if (benchGame != &_topTeamInGame) {
+        uint16_t t = topY; topY = botY; botY = t;
+    }
 
     uint16_t savedLimit = _benchXLimit, savedBenchY = _benchY;
     uint16_t savedOppY  = _opponentBenchY, savedState = _subsState;
@@ -1689,7 +1722,7 @@ static void draw_bench_occupants_only(void)
     _benchY          = topY;
     _opponentBenchY  = botY;
     _benchTeam       = (uintptr_t)&_topTeamData;
-    _benchTeamGame   = (uintptr_t)_topTeamPtr;
+    _benchTeamGame   = (uintptr_t)benchGame;
     _initialSubsState = 0;      /* idle: neutral coach frames, no selection */
 
     drawOpponentsBench();
@@ -2274,9 +2307,9 @@ static void drawSubstitutesMenuEntry(uint16_t y, uint16_t baseColor, int16_t sel
             uint8_t numStr[4];
             uint8_t *p = numStr;
             uint8_t num = (uint8_t)d5;
-            if (num >= 10) {
-                *p++ = '1';
-                num -= 10;
+            if (num >= 10) {                /* (0..99: the game wrote 10..19 only, 23 as "1=") */
+                *p++ = (uint8_t)('0' + num / 10 % 10);
+                num %= 10;
             }
             *p = num + '0';
             p++;
@@ -2318,6 +2351,10 @@ draw_name:
         uint16_t nameX = _subsMenuX - Render_CameraX() + 9;
         if (_useIndividualPlayerSkinColor != 0)
             nameX += 9;
+        /* Keep two-digit shirt numbers separate from player names.
+         * Adapted from OpenSWOS / SWOS United (14 November 2026). */
+        if ((uint8_t)pi->shirtNumber >= 10 && (uint8_t)pi->shirtNumber < 100)
+            nameX += 4;
         DrawMenuText(nameX, y, 2, (uint8_t *)pi->shortName, charsTable);
     }
 
@@ -3129,6 +3166,10 @@ void SubstitutePlayer(void)
     _waitForPlayerToGoInTimer = 100;
     _subsBlockFire = 1;
     DOS_SOUND(DOS_EV_SUBSTITUTION, 0);
+    /* the mods: the leaving slot now holds the man coming on, the bench's the man going off */
+    { extern void ModMatch_Event(int32_t kind, int32_t team, int32_t player, int32_t arg);
+      ModMatch_Event(17 /* MODEVENT_SUBSTITUTION */, ((TeamGeneralInfo *)_benchTeam)->teamNumber,
+                     (int32_t)leaving, (int32_t)entering); }
     LeaveSubsMenu();
 }
 

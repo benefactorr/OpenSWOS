@@ -53,9 +53,9 @@
       "name": "upLabel",
       "coords": {
         "x": 32,
-        "y": 36,
+        "y": 38,
         "w": 92,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
@@ -75,9 +75,9 @@
       "name": "up",
       "coords": {
         "x": 132,
-        "y": 36,
+        "y": 38,
         "w": 150,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
@@ -107,9 +107,9 @@
       "name": "downLabel",
       "coords": {
         "x": 32,
-        "y": 50,
+        "y": 54,
         "w": 92,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
@@ -129,9 +129,9 @@
       "name": "down",
       "coords": {
         "x": 132,
-        "y": 50,
+        "y": 54,
         "w": 150,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
@@ -161,9 +161,9 @@
       "name": "leftLabel",
       "coords": {
         "x": 32,
-        "y": 64,
+        "y": 70,
         "w": 92,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
@@ -183,9 +183,9 @@
       "name": "left",
       "coords": {
         "x": 132,
-        "y": 64,
+        "y": 70,
         "w": 150,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
@@ -215,9 +215,9 @@
       "name": "rightLabel",
       "coords": {
         "x": 32,
-        "y": 78,
+        "y": 86,
         "w": 92,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
@@ -237,9 +237,9 @@
       "name": "right",
       "coords": {
         "x": 132,
-        "y": 78,
+        "y": 86,
         "w": 150,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
@@ -269,9 +269,9 @@
       "name": "fireLabel",
       "coords": {
         "x": 32,
-        "y": 92,
+        "y": 102,
         "w": 92,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
@@ -291,9 +291,9 @@
       "name": "fire",
       "coords": {
         "x": 132,
-        "y": 92,
+        "y": 102,
         "w": 150,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
@@ -320,18 +320,18 @@
     },
     {
       "kind": "entry",
-      "name": "passLabel",
+      "name": "latchLabel",
       "coords": {
         "x": 32,
-        "y": 106,
+        "y": 118,
         "w": 92,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
           "op": "text",
           "flags": "0x0",
-          "literal": "PASS / TACKLE"
+          "literal": "SHORT PRESSES"
         },
         {
           "op": "colors",
@@ -342,12 +342,12 @@
     },
     {
       "kind": "entry",
-      "name": "pass",
+      "name": "latch",
       "coords": {
         "x": 132,
-        "y": 106,
+        "y": 118,
         "w": 150,
-        "h": 12
+        "h": 14
       },
       "commands": [
         {
@@ -368,168 +368,6 @@
         },
         {
           "op": "onselect_fire",
-          "func": "controlsMenu_pass_OnSelect"
-        }
-      ]
-    },
-    {
-      "kind": "entry",
-      "name": "shootLabel",
-      "coords": {
-        "x": 32,
-        "y": 120,
-        "w": 92,
-        "h": 12
-      },
-      "commands": [
-        {
-          "op": "text",
-          "flags": "0x0",
-          "literal": "SHOOT"
-        },
-        {
-          "op": "colors",
-          "frame_color": 0,
-          "background_color": 7
-        }
-      ]
-    },
-    {
-      "kind": "entry",
-      "name": "shoot",
-      "coords": {
-        "x": 132,
-        "y": 120,
-        "w": 150,
-        "h": 12
-      },
-      "commands": [
-        {
-          "op": "text_no_ptr",
-          "flags": "0x0"
-        },
-        {
-          "op": "colors",
-          "frame_color": 0,
-          "background_color": 13
-        },
-        {
-          "op": "nav",
-          "left": -1,
-          "right": -1,
-          "up": 13,
-          "down": 17
-        },
-        {
-          "op": "onselect_fire",
-          "func": "controlsMenu_shoot_OnSelect"
-        }
-      ]
-    },
-    {
-      "kind": "entry",
-      "name": "highLabel",
-      "coords": {
-        "x": 32,
-        "y": 134,
-        "w": 92,
-        "h": 12
-      },
-      "commands": [
-        {
-          "op": "text",
-          "flags": "0x0",
-          "literal": "HIGH SHOT"
-        },
-        {
-          "op": "colors",
-          "frame_color": 0,
-          "background_color": 7
-        }
-      ]
-    },
-    {
-      "kind": "entry",
-      "name": "high",
-      "coords": {
-        "x": 132,
-        "y": 134,
-        "w": 150,
-        "h": 12
-      },
-      "commands": [
-        {
-          "op": "text_no_ptr",
-          "flags": "0x0"
-        },
-        {
-          "op": "colors",
-          "frame_color": 0,
-          "background_color": 13
-        },
-        {
-          "op": "nav",
-          "left": -1,
-          "right": -1,
-          "up": 15,
-          "down": 19
-        },
-        {
-          "op": "onselect_fire",
-          "func": "controlsMenu_high_OnSelect"
-        }
-      ]
-    },
-    {
-      "kind": "entry",
-      "name": "latchLabel",
-      "coords": {
-        "x": 32,
-        "y": 148,
-        "w": 92,
-        "h": 12
-      },
-      "commands": [
-        {
-          "op": "text",
-          "flags": "0x0",
-          "literal": "SHORT PRESSES"
-        },
-        {
-          "op": "colors",
-          "frame_color": 0,
-          "background_color": 7
-        }
-      ]
-    },
-    {
-      "kind": "entry",
-      "name": "latch",
-      "coords": {
-        "x": 132,
-        "y": 148,
-        "w": 150,
-        "h": 12
-      },
-      "commands": [
-        {
-          "op": "text_no_ptr",
-          "flags": "0x0"
-        },
-        {
-          "op": "colors",
-          "frame_color": 0,
-          "background_color": 13
-        },
-        {
-          "op": "nav",
-          "left": -1,
-          "right": -1,
-          "up": 17,
-          "down": 21
-        },
-        {
-          "op": "onselect_fire",
           "func": "controlsMenu_latch_OnSelect"
         }
       ]
@@ -539,9 +377,9 @@
       "name": "note",
       "coords": {
         "x": 12,
-        "y": 165,
+        "y": 150,
         "w": 296,
-        "h": 10
+        "h": 12
       },
       "commands": [
         {
@@ -555,7 +393,7 @@
       "name": "clear",
       "coords": {
         "x": 37,
-        "y": 181,
+        "y": 162,
         "w": 100,
         "h": 15
       },
@@ -563,7 +401,7 @@
         {
           "op": "text",
           "flags": "0x0",
-          "literal": "NO OWN KEYS"
+          "literal": "DEFAULT KEYS"
         },
         {
           "op": "colors",
@@ -573,8 +411,8 @@
         {
           "op": "nav",
           "left": -1,
-          "right": 22,
-          "up": 19,
+          "right": 16,
+          "up": 13,
           "down": -1
         },
         {
@@ -588,7 +426,7 @@
       "name": "exit",
       "coords": {
         "x": 167,
-        "y": 181,
+        "y": 162,
         "w": 100,
         "h": 15
       },
@@ -605,14 +443,68 @@
         },
         {
           "op": "nav",
-          "left": 21,
+          "left": 15,
           "right": -1,
-          "up": 19,
+          "up": 13,
           "down": -1
         },
         {
           "op": "onselect_fire",
           "func": "controlsMenu_exit_OnSelect"
+        }
+      ]
+    },
+    {
+      "kind": "entry",
+      "name": "touchLabel",
+      "coords": {
+        "x": 32,
+        "y": 134,
+        "w": 92,
+        "h": 14
+      },
+      "commands": [
+        {
+          "op": "text",
+          "flags": "0x0",
+          "literal": "ON-SCREEN"
+        },
+        {
+          "op": "colors",
+          "frame_color": 0,
+          "background_color": 7
+        }
+      ]
+    },
+    {
+      "kind": "entry",
+      "name": "touch",
+      "coords": {
+        "x": 132,
+        "y": 134,
+        "w": 150,
+        "h": 14
+      },
+      "commands": [
+        {
+          "op": "text_no_ptr",
+          "flags": "0x0"
+        },
+        {
+          "op": "colors",
+          "frame_color": 0,
+          "background_color": 13
+        },
+        {
+          "op": "nav",
+          "left": -1,
+          "right": -1,
+          "up": 13,
+          "down": 15
+        },
+        {
+          "op": "onselect_fire",
+          "func": "controlsMenu_touch_OnSelect"
         }
       ]
     }

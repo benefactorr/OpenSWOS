@@ -1,0 +1,16 @@
+{
+  "id": "swos9697",
+  "_about": "Host limits of the 1996 SWOS 96/97 exe as modded by the SWOS 96/97 Mod (complist.py / rnames.py / careerworld.py, 2026-10).",
+  "languages": ["it", "en", "fr", "de"],
+  "charset": " &'()-./0123456789:,!?+ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  "widths": {"default": 6, "I": 2, "1": 2, "'": 2, "(": 3, ")": 3, ",": 2, "-": 4, ".": 2, ":": 2, " ": 3},
+  "title_max": 34,
+  "title_px": 158,
+  "short_px": 70,
+  "club_name_max": 16,
+  "clubs_per_file": 256,
+  "table_rows": 24,
+  "long_table_rows": 30,
+  "max_teams_per_stage": 255,
+  "arena_max": 65536
+}

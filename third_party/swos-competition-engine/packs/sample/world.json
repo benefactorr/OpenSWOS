@@ -1,0 +1,45 @@
+{
+  "schema": "swc/1",
+  "id": "sample",
+  "version": "1.0.0",
+  "host_world": 250,
+  "_note": "The format's first sample pack: a 6-club league (double round robin, a closed league: champion only) and an 8-club cup whose first round is a fixed draw. All names invented.",
+  "languages": ["it", "en", "fr", "de"],
+  "countries": {"SMP": {"names": {"it": "ESEMPIA", "en": "SAMPLELAND", "fr": "EXEMPLIE", "de": "BEISPIELLAND"}}},
+  "clubs": [
+    {"id": "club:smp.northgate", "name": "NORTHGATE", "country": "SMP", "host": {"file": 250, "ordinal": 0}},
+    {"id": "club:smp.riverside", "name": "RIVERSIDE", "country": "SMP", "host": {"file": 250, "ordinal": 1}},
+    {"id": "club:smp.hillford", "name": "HILLFORD", "country": "SMP", "host": {"file": 250, "ordinal": 2}},
+    {"id": "club:smp.oakmere", "name": "OAKMERE", "country": "SMP", "host": {"file": 250, "ordinal": 3}},
+    {"id": "club:smp.stonebridge", "name": "STONEBRIDGE", "country": "SMP", "host": {"file": 250, "ordinal": 4}},
+    {"id": "club:smp.westhaven", "name": "WESTHAVEN", "country": "SMP", "host": {"file": 250, "ordinal": 5}},
+    {"id": "club:smp.ashby-rovers", "name": "ASHBY ROVERS", "country": "SMP", "host": {"file": 250, "ordinal": 6}},
+    {"id": "club:smp.fenwick-town", "name": "FENWICK TOWN", "country": "SMP", "host": {"file": 250, "ordinal": 7}}
+  ],
+  "competitions": [
+    {"id": "smp.league", "kind": "league", "country": "SMP", "level": 1,
+     "names": {"it": ["LEGA ESEMPIO", "LEGA"], "en": ["SAMPLE LEAGUE", "LEAGUE"],
+               "fr": ["LIGUE EXEMPLE", "LIGUE"], "de": ["BEISPIELLIGA", "LIGA"]},
+     "participants": {"count": 6, "clubs": ["club:smp.northgate", "club:smp.riverside", "club:smp.hillford",
+                                            "club:smp.oakmere", "club:smp.stonebridge", "club:smp.westhaven"]},
+     "points": {"win": 3, "draw": 1, "loss": 0},
+     "stages": [{"id": "table", "type": "round_robin", "legs": 2,
+                 "tiebreakers": ["points", "goal_difference", "goals_for", "head_to_head_points", "draw_lots"]}],
+     "outcomes": [{"stage": "table", "positions": "1", "tag": "champion", "zone": "CL"}],
+     "modes": ["career", "season", "friendly"]},
+    {"id": "smp.cup", "kind": "cup", "country": "SMP",
+     "names": {"it": ["COPPA ESEMPIO", "COPPA"], "en": ["SAMPLE CUP", "CUP"],
+               "fr": ["COUPE EXEMPLE", "COUPE"], "de": ["BEISPIELPOKAL", "POKAL"]},
+     "participants": {"count": 8, "clubs": ["club:smp.northgate", "club:smp.riverside", "club:smp.hillford",
+                                            "club:smp.oakmere", "club:smp.stonebridge", "club:smp.westhaven",
+                                            "club:smp.ashby-rovers", "club:smp.fenwick-town"]},
+     "stages": [{"id": "ko", "type": "knockout", "rounds": [
+       {"ties": 4, "legs": 1, "home": "fixed", "pairing": "fixed", "decider": ["extra_time", "penalties"],
+        "fixed": [["club:smp.ashby-rovers", "club:smp.northgate"], ["club:smp.fenwick-town", "club:smp.riverside"],
+                  ["club:smp.hillford", "club:smp.westhaven"], ["club:smp.oakmere", "club:smp.stonebridge"]]},
+       {"ties": 2, "legs": 2, "home": "draw", "pairing": "bracket", "decider": ["aggregate", "away_goals", "extra_time", "penalties"]},
+       {"ties": 1, "legs": 1, "home": "neutral", "pairing": "bracket", "decider": ["extra_time", "penalties"]}]}],
+     "outcomes": [{"stage": "ko", "positions": "1", "tag": "champion"}],
+     "modes": ["career", "season", "preset"]}
+  ]
+}

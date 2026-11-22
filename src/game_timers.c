@@ -12,6 +12,7 @@
 #include "dos_sound.h"
 #include "game_types.h"
 #include "netplay_match.h"    /* NetplayMatch_IsLive: no goal replay online (SDL) */
+extern int32_t ModMatch_Active(void);   /* (mod_match.c: a mod's match is the one being played) */
 
 /* ---- Extern globals ---- */
 extern uint16_t _playingPenalties;
@@ -303,6 +304,12 @@ static void __attribute__((noinline)) handleBreakCameraMode(TeamGeneralInfo *a6)
         if (_gameState == ST_KEEPER_HOLDS_BALL)
             break;
         _stoppageEventTimer = (uint16_t)_gsStoppageEventReload;   /* GS_GK_55_50 */
+        {   /* a mod's match with quick restarts (mod_match.c, G9) */
+            extern int32_t ModMatch_QuickRestarts(void);
+            extern int32_t ModMatch_ShortStops(void);
+            if (ModMatch_QuickRestarts() || ModMatch_ShortStops())
+                _stoppageEventTimer = 1;
+        }
         if (_goalCameraMode != 0)
             _stoppageEventTimer = 75;
         break;
@@ -493,7 +500,8 @@ void UpdateGameTimersAndCameraBreakMode(void)
         _stoppageTimerActive += d0;
         a6 = _lastTeamPlayedBeforeBreak;
         if (a6->playerNumber == 0) {
-            if (_stoppageTimerActive >= _gsKickoffStoppage) {   /* GS_825_750 */
+            extern int32_t ModMatch_QuickRestarts(void);    /* (a mod's match, G9: no wait) */
+            if (_stoppageTimerActive >= (ModMatch_QuickRestarts() ? 0 : _gsKickoffStoppage)) {   /* GS_825_750 */
                 PrepareForInitialKick();
                 _initialKickWriteOnlyTicks += 1;
             }
@@ -526,6 +534,28 @@ void UpdateGameTimersAndCameraBreakMode(void)
 }
 
 
+/* A player of the team's other than its goalkeeper on the pitch (spritesTable[0] is the keeper). */
+static int32_t team_has_outfielder(const TeamGeneralInfo *team)
+{
+    if (!team->spritesTable)
+        return 1;
+    for (int i = 1; i < 11; i++) {
+        const Sprite *p = team->spritesTable[i];
+        if (p && p->visible && !p->sentAway)
+            return 1;
+    }
+    return 0;
+}
+
+/* A corner the side can take: in a mod's match a side may have no outfielder (SHOOTING PRACTICE:
+ * the CPU's keeper alone), and its corner waited for good for a taker it does not have (report
+ * 0059). The ball off the defending side over its own line is then its goal kick, as the ball
+ * off the other side would be. A real match never has a team without outfielders. */
+static int32_t corner_takeable(const TeamGeneralInfo *taker)
+{
+    return !ModMatch_Active() || team_has_outfielder(taker);
+}
+
 /* ---- Helper: write restart globals and stop players ---- */
 static void __attribute__((noinline)) writeRestartGlobalsAndStopPlayers(
     TeamGeneralInfo *team, int16_t d1, int16_t d2, int16_t d3, uint8_t d4)
@@ -545,6 +575,115 @@ static void __attribute__((noinline)) writeRestartGlobalsAndStopPlayers(
     StopAllPlayers();
     _cameraXVelocity = 0;
     _cameraYVelocity = 0;
+}
+
+/* (both targets: the Amiga's mods start matches in a break too) */
+/* ---- A mod's match that starts in a break (mod_match.c, H6) ----
+ * In place of the first kick-off, the break the engine itself would have called: a corner as
+ * CheckIfBallOutOfPlay sets one, a free kick or a penalty as a foul does (tackle_foul.c) --
+ * the same states, places and flags, so the restart then plays exactly as in a match. The
+ * bottom team attacks the top goal (its corners are the upper flags). teamNumber is the taker's
+ * (1, 2); wing 0 the left flag as he attacks, 1 the right; x, y where a free kick's foul was. */
+void GameTimers_ModRestart(int32_t kind, int32_t teamNumber, int32_t wing, int16_t x, int16_t y)
+{
+    TeamGeneralInfo *taker = _topTeamData.teamNumber == teamNumber ? &_topTeamData : &_bottomTeamData;
+    if (kind == 1 && !team_has_outfielder(taker)) {    /* (a corner it cannot take, report 0059: */
+        taker = taker->opponentsTeam;                   /*  the other side's goal kick, as the ball */
+        kind = 5;                                       /*  going out gives -- CheckIfBallOutOfPlay) */
+    }
+    const int32_t up = taker == &_bottomTeamData;       /* attacking the top goal */
+    int16_t d1, d2, d3;
+    uint8_t d4;
+
+    if (kind == 1) {                                    /* MODRESTART_CORNER */
+        if (up) {
+            if (!wing) { d1 = 86;  d2 = 134; d3 = 2; d4 = 0x1C; _gameState = ST_CORNER_LEFT; }
+            else       { d1 = 585; d2 = 134; d3 = 6; d4 = 0x70; _gameState = ST_CORNER_RIGHT; }
+        } else {    /* (attacking down the screen, his left flag is the screen's right) */
+            if (!wing) { d1 = 585; d2 = 764; d3 = 6; d4 = 0xC1; _gameState = ST_CORNER_LEFT; }
+            else       { d1 = 86;  d2 = 764; d3 = 2; d4 = 7;    _gameState = ST_CORNER_RIGHT; }
+        }
+        _breakCameraMode = 0xFFFF;
+        writeRestartGlobalsAndStopPlayers(taker, d1, d2, d3, d4);
+        return;
+    }
+
+    if (kind == 4) {                                    /* MODRESTART_THROW_IN */
+        /* As CheckIfBallOutOfPlay gives one (the throw-in band, above): the touchline by x --
+         * the left under 336 -- at y, the zone by y as seen from the team taking it. A side
+         * without outfielders cannot take one (report 0058): the other side does, as there. */
+        if (!team_has_outfielder(taker))
+            taker = taker->opponentsTeam;
+        const int16_t ty = y < 129 ? 129 : y > 769 ? 769 : y;
+        const int32_t takerIsTop = taker == &_topTeamData;
+        if (x >= 336) {
+            d1 = 590; d3 = 6; d4 = 0xF1;
+            if (!takerIsTop) _gameState = ty < 342 ? ST_THROW_IN_BACK_LEFT : ty < 556 ? ST_THROW_IN_CENTER_LEFT : ST_THROW_IN_FORWARD_LEFT;
+            else             _gameState = ty < 342 ? ST_THROW_IN_FORWARD_RIGHT : ty < 556 ? ST_THROW_IN_CENTER_RIGHT : ST_THROW_IN_BACK_RIGHT;
+        } else {
+            d1 = 81; d3 = 2; d4 = 0x1F;
+            if (!takerIsTop) _gameState = ty < 342 ? ST_THROW_IN_BACK_RIGHT : ty < 556 ? ST_THROW_IN_CENTER_RIGHT : ST_THROW_IN_FORWARD_RIGHT;
+            else             _gameState = ty < 342 ? ST_THROW_IN_FORWARD_LEFT : ty < 556 ? ST_THROW_IN_CENTER_LEFT : ST_THROW_IN_BACK_LEFT;
+        }
+        _breakCameraMode = 0xFFFF;
+        writeRestartGlobalsAndStopPlayers(taker, d1, ty, d3, d4);
+        return;
+    }
+
+    if (kind == 5) {                                    /* MODRESTART_GOAL_KICK */
+        /* As CheckIfBallOutOfPlay gives one: from the taker's own six-yard box, wing as he
+         * attacks (attacking down the screen, his left is the screen's right). */
+        if (up) {   /* (his own goal the bottom one) */
+            if (!wing) { d1 = 276; _gameState = ST_GOAL_OUT_LEFT; }
+            else       { d1 = 396; _gameState = ST_GOAL_OUT_RIGHT; }
+            d2 = 744; d3 = 0; d4 = 0xC7;
+        } else {
+            if (!wing) { d1 = 396; _gameState = ST_GOAL_OUT_LEFT; }
+            else       { d1 = 276; _gameState = ST_GOAL_OUT_RIGHT; }
+            d2 = 154; d3 = 4; d4 = 0x7C;
+        }
+        _breakCameraMode = 0xFFFF;
+        if (taker->playerNumber == 0)
+            d4 &= 0xBB;
+        _goalOut = 1;
+        writeRestartGlobalsAndStopPlayers(taker, d1, d2, d3, d4);
+        return;
+    }
+
+    /* A free kick or a penalty: as a foul by the other team (tackle_foul.c's bands and
+     * quadrants, from the fouling team's side). */
+    {
+        TeamGeneralInfo *fouler = taker->opponentsTeam;
+        const int32_t top = fouler == &_topTeamData;
+        int16_t vx = x, vy = y;
+        if (kind == 3) {                                /* MODRESTART_PENALTY */
+            _gameState = ST_PENALTY;
+            _playerTurnFlags = top ? 0x83 : 0x38;
+            vx = 336;
+            vy = top ? 187 : 711;
+        } else {
+            static const uint8_t kTop[7] = { ST_FREE_KICK_LEFT1, ST_FREE_KICK_LEFT2, ST_FREE_KICK_LEFT3,
+                                             ST_FREE_KICK_CENTER, ST_FREE_KICK_RIGHT1, ST_FREE_KICK_RIGHT2,
+                                             ST_FREE_KICK_RIGHT3 };
+            const int32_t q = vx < 153 ? 0 : vx < 261 ? 1 : vx < 309 ? 2 : vx < 362 ? 3 : vx < 410 ? 4
+                            : vx < 518 ? 5 : 6;
+            const int32_t band = top ? (vy >= 216 && vy < 331) : (vy >= 567 && vy <= 682);
+            _gameState = !band ? ST_FOUL : top ? kTop[q] : kTop[6 - q];
+            _playerTurnFlags = 0xFF;
+        }
+        _cameraDirection = top ? 0 : 4;
+        _breakCameraMode = 0xFFFF;
+        _foulXCoordinate = (uint16_t)vx;
+        _foulYCoordinate = (uint16_t)vy;
+        _gameStatePl = ST_STOPPED;
+        _gameNotInProgressCounterWriteOnly = 0;
+        _lastTeamPlayedBeforeBreak = taker;
+        _stoppageTimerTotal = 0;
+        _stoppageTimerActive = 0;
+        StopAllPlayers();
+        _cameraXVelocity = 0;
+        _cameraYVelocity = 0;
+    }
 }
 
 /* ---- Helper: handle goal scoring ---- */
@@ -572,6 +711,14 @@ static void __attribute__((noinline)) handleGoalScored(TeamGeneralInfo *teamData
         TeamGeneralInfo *opTeam = teamData->opponentsTeam;
         int16_t camDir;
         uint8_t turnFlags;
+        {
+            /* A mod's match whose team takes every kick-off (mod_match.c, H1): the restart
+             * after a goal too, not the side that conceded. */
+            extern int16_t ModMatch_KickOffTeam(void);
+            const int16_t forced = ModMatch_KickOffTeam();
+            if (forced)
+                opTeam = _topTeamData.teamNumber == forced ? &_topTeamData : &_bottomTeamData;
+        }
 
         if (opTeam == &_topTeamData) {
             camDir = 4;
@@ -700,7 +847,7 @@ void CheckIfBallOutOfPlay(void)
 
     if (d2 < 129) {
         /* Ball past top end line */
-        if (_lastTeamPlayed == a6) {
+        if (_lastTeamPlayed == a6 && corner_takeable(a6->opponentsTeam)) {
             /* Same team kicked it out — corner for opponent */
             a6 = &_bottomTeamData;
             if (d1 < 336) {
@@ -742,7 +889,7 @@ void CheckIfBallOutOfPlay(void)
 
     if (d2 > 769) {
         /* Ball past bottom end line */
-        if (_lastTeamPlayed == a6) {
+        if (_lastTeamPlayed == a6 && corner_takeable(a6->opponentsTeam)) {
             /* Same team kicked it out — corner for opponent */
             a6 = &_topTeamData;
             if (d1 < 336) {
@@ -808,6 +955,17 @@ void CheckIfBallOutOfPlay(void)
     {
         TeamGeneralInfo *throwTeam = _lastTeamPlayed;
         TeamGeneralInfo *opTeam = throwTeam->opponentsTeam;
+
+        /* A mod's match can field a side without outfielders (SHOOTING PRACTICE: the CPU's
+         * keeper alone). Its keeper was sent to take the throw-in, could not reach the
+         * touchline, and the match stood there for good -- or, reaching it, the game crashed as
+         * he threw (report 0058). The other side takes it. A real match never has a team with no
+         * outfielder (it is abandoned first), so its throw-ins are as they always were. */
+        if (ModMatch_Active() && !team_has_outfielder(opTeam)) {
+            TeamGeneralInfo *t = throwTeam;
+            throwTeam = opTeam;
+            opTeam = t;
+        }
 
         if (d1 >= 336) {
             /* Right side */

@@ -51,13 +51,9 @@
  *
  * See project_keycache_cluster_design / docs/KEYCACHE_CLUSTER_REWORK.md.
  */
-#include "swos_types.h"
+#include "game_types.h"
 #include "swos_platform.h"
 
-/* Tightened from the SWOS2.s 20014-byte teamSelectionKeyCache->End span to an
- * honest bound now that foreign-market no longer shares the slack — see the
- * file header. ~7x the measured ~1188 B HWM. */
-#define KEY_CACHE_BUF_SIZE 8192
 /* Standalone zero-init BSS storage — pure C (was an __asm__ .skip block;
  * converted for the WASM/Emscripten target, which rejects asm-defined data
  * symbols — see docs/WASM.md §4b).
@@ -65,8 +61,8 @@
  * The cache and the season-flag `_teamSelectionKeyCacheEnd` are now INDEPENDENT
  * globals. In SWOS2.s `End` sat immediately past the cache, so its single
  * storage slot did double duty: its VALUE is a season flag, and its ADDRESS was
- * the InsertSpaceSorted overflow bound (== cache + KEY_CACHE_BUF_SIZE). The save
- * already models the two roles as SEPARATE fields (a 1870-B cache blob +
+ * the InsertSpaceSorted overflow bound (== cache + KEYCACHE_CAPACITY). The save
+ * already models the two roles as SEPARATE fields (a byte array for the cache +
  * a uint16 `team_selection_key_cache_end`), so decoupling the storage is
  * format-neutral; End's address-bound role is re-expressed at the two
  * career_teams.c call sites as `_teamSelectionKeyCache + sizeof(...)`, so the
@@ -76,7 +72,7 @@ uint16_t _teamSelectionKeyCacheIndex;
 uint16_t _teamSelectionKeyCacheOffset;
 uint16_t _teamSelectionKeyCacheCount;
 uint16_t _careerSlotProcessingInProgress;
-uint8_t  _teamSelectionKeyCache[KEY_CACHE_BUF_SIZE];
+uint8_t  _teamSelectionKeyCache[KEYCACHE_CAPACITY];
 uint16_t _teamSelectionKeyCacheEnd;     /* season-flag VALUE; the old &End == cache+SIZE
                                            overflow bound is now derived in career_teams.c */
 uint8_t  _careerJobOfferPhaseBias;      /* promoted standalone scalar (was cache byte 1) */

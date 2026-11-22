@@ -107,8 +107,6 @@ extern CompetitionLeague _russianLeague;
 extern CompetitionLeague _sanMarinoLeague;
 extern CompetitionLeague _slovakianLeague;
 extern CompetitionLeague _slovenianLeague;
-extern CompetitionLeague _macedonianLeague;
-extern CompetitionLeague _bosnianLeague;
 extern CompetitionLeague _swedishLeague;
 extern CompetitionLeague _swissLeague;
 extern CompetitionLeague _turkishLeague;
@@ -214,8 +212,6 @@ extern CompetitionCup _romanianCup;
 extern CompetitionCup _russianCup;
 extern CompetitionCup _sanMarinoCup;
 extern CompetitionCup _slovakianCup;
-extern CompetitionCup _macedonianCup;
-extern CompetitionCup _bosnianCup;
 extern CompetitionCup _slovenianCup;
 extern CompetitionCup _swedishCup;
 extern CompetitionCup _swissCup;
@@ -351,7 +347,7 @@ extern Competition *_hungaryTable[4];
 extern Competition *_icelandTable[4];
 extern Competition *_republicIrelandTable[4];
 extern Competition *_israelTable[4];
-extern Competition *_italyTable[4];
+extern Competition *_italyTable[5];
 extern Competition *_latviaTable[4];
 extern Competition *_lithuaniaTable[4];
 extern Competition *_luxembourgTable[4];
@@ -366,8 +362,6 @@ extern Competition *_russiaTable[4];
 extern Competition *_sanMarinoTable[4];
 extern Competition *_scotlandTable[5];
 extern Competition *_slovakiaTable[4];
-extern Competition *_macedoniaTable[4];
-extern Competition *_bosniaTable[4];
 extern Competition *_sloveniaTable[4];
 extern Competition *_spainTable[4];
 extern Competition *_swedenTable[4];
@@ -414,8 +408,8 @@ extern uint32_t _nationalSelectorSeasonMaskB;
  * Countries list and career remap
  * ====================================================================== */
 
-extern CountryNumbers _allCountriesList[68];
-extern uint8_t _careerCompetitionIdRemapTable[68];
+extern CountryNumbers _allCountriesList[66];
+extern uint8_t _careerCompetitionIdRemapTable[66];
 
 /* ======================================================================
  * Euro Cup Qualifying Seed Lists

@@ -1,0 +1,613 @@
+{
+ "schema": "swc/1",
+ "id": "example.ita-serie-b",
+ "version": "1.0.0",
+ "host_world": 5,
+ "_note": "Example for OpenSWOS: Serie A + Serie B 2026-27, club names only (no squads, no player data). Club ids follow the press names. Serie B's play-off 3rd-8th (preliminary at the better placed, two-legged semi-finals and final, level: the better placed). Left out of this small example: Serie C, the Serie B play-out, the 3rd's direct promotion when 14+ points ahead of the 4th (skip_if, a primitive after v1) and extra time + penalties in the final when the two clubs finished level on points.",
+ "languages": [
+  "it",
+  "en",
+  "fr",
+  "de"
+ ],
+ "countries": {
+  "ITA": {
+   "names": {
+    "it": "ITALIA",
+    "en": "ITALY",
+    "fr": "ITALIE",
+    "de": "ITALIEN"
+   }
+  }
+ },
+ "clubs": [
+  {
+   "id": "club:ita.inter",
+   "name": "INTER",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 0
+   }
+  },
+  {
+   "id": "club:ita.napoli",
+   "name": "NAPOLI",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 1
+   }
+  },
+  {
+   "id": "club:ita.roma",
+   "name": "ROMA",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 2
+   }
+  },
+  {
+   "id": "club:ita.como",
+   "name": "COMO",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 3
+   }
+  },
+  {
+   "id": "club:ita.milan",
+   "name": "MILAN",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 4
+   }
+  },
+  {
+   "id": "club:ita.juventus",
+   "name": "JUVENTUS",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 5
+   }
+  },
+  {
+   "id": "club:ita.atalanta",
+   "name": "ATALANTA",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 6
+   }
+  },
+  {
+   "id": "club:ita.bologna",
+   "name": "BOLOGNA",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 7
+   }
+  },
+  {
+   "id": "club:ita.lazio",
+   "name": "LAZIO",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 8
+   }
+  },
+  {
+   "id": "club:ita.udinese",
+   "name": "UDINESE",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 9
+   }
+  },
+  {
+   "id": "club:ita.sassuolo",
+   "name": "SASSUOLO",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 10
+   }
+  },
+  {
+   "id": "club:ita.torino",
+   "name": "TORINO",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 11
+   }
+  },
+  {
+   "id": "club:ita.parma",
+   "name": "PARMA",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 12
+   }
+  },
+  {
+   "id": "club:ita.cagliari",
+   "name": "CAGLIARI",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 13
+   }
+  },
+  {
+   "id": "club:ita.fiorentina",
+   "name": "FIORENTINA",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 14
+   }
+  },
+  {
+   "id": "club:ita.genoa",
+   "name": "GENOA",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 15
+   }
+  },
+  {
+   "id": "club:ita.lecce",
+   "name": "LECCE",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 16
+   }
+  },
+  {
+   "id": "club:ita.venezia",
+   "name": "VENEZIA",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 17
+   }
+  },
+  {
+   "id": "club:ita.frosinone",
+   "name": "FROSINONE",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 18
+   }
+  },
+  {
+   "id": "club:ita.monza",
+   "name": "MONZA",
+   "country": "ITA",
+   "host": {
+    "file": 20,
+    "ordinal": 19
+   }
+  },
+  {
+   "id": "club:ita.palermo",
+   "name": "PALERMO",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 0
+   }
+  },
+  {
+   "id": "club:ita.catanzaro",
+   "name": "CATANZARO",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 1
+   }
+  },
+  {
+   "id": "club:ita.modena",
+   "name": "MODENA",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 2
+   }
+  },
+  {
+   "id": "club:ita.juve-stabia",
+   "name": "JUVE STABIA",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 3
+   }
+  },
+  {
+   "id": "club:ita.avellino",
+   "name": "AVELLINO",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 4
+   }
+  },
+  {
+   "id": "club:ita.padova",
+   "name": "PADOVA",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 5
+   }
+  },
+  {
+   "id": "club:ita.cesena",
+   "name": "CESENA",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 6
+   }
+  },
+  {
+   "id": "club:ita.mantova",
+   "name": "MANTOVA",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 7
+   }
+  },
+  {
+   "id": "club:ita.carrarese",
+   "name": "CARRARESE",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 8
+   }
+  },
+  {
+   "id": "club:ita.sampdoria",
+   "name": "SAMPDORIA",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 9
+   }
+  },
+  {
+   "id": "club:ita.virtus-entella",
+   "name": "VIRTUS ENTELLA",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 10
+   }
+  },
+  {
+   "id": "club:ita.empoli",
+   "name": "EMPOLI",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 11
+   }
+  },
+  {
+   "id": "club:ita.sudtirol",
+   "name": "SUDTIROL",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 12
+   }
+  },
+  {
+   "id": "club:ita.cremonese",
+   "name": "CREMONESE",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 13
+   }
+  },
+  {
+   "id": "club:ita.hellas-verona",
+   "name": "HELLAS VERONA",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 14
+   }
+  },
+  {
+   "id": "club:ita.pisa",
+   "name": "PISA",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 15
+   }
+  },
+  {
+   "id": "club:ita.vicenza",
+   "name": "VICENZA",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 16
+   }
+  },
+  {
+   "id": "club:ita.arezzo",
+   "name": "AREZZO",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 17
+   }
+  },
+  {
+   "id": "club:ita.benevento",
+   "name": "BENEVENTO",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 18
+   }
+  },
+  {
+   "id": "club:ita.ascoli",
+   "name": "ASCOLI",
+   "country": "ITA",
+   "host": {
+    "file": 21,
+    "ordinal": 19
+   }
+  }
+ ],
+ "competitions": [
+  {
+   "id": "ita.serie-a",
+   "kind": "league",
+   "country": "ITA",
+   "level": 1,
+   "names": {
+    "it": [
+     "SERIE A",
+     "SERIE A"
+    ],
+    "en": [
+     "SERIE A",
+     "SERIE A"
+    ],
+    "fr": [
+     "SERIE A",
+     "SERIE A"
+    ],
+    "de": [
+     "SERIE A",
+     "SERIE A"
+    ]
+   },
+   "participants": {
+    "count": 20,
+    "clubs": [
+     "club:ita.inter",
+     "club:ita.napoli",
+     "club:ita.roma",
+     "club:ita.como",
+     "club:ita.milan",
+     "club:ita.juventus",
+     "club:ita.atalanta",
+     "club:ita.bologna",
+     "club:ita.lazio",
+     "club:ita.udinese",
+     "club:ita.sassuolo",
+     "club:ita.torino",
+     "club:ita.parma",
+     "club:ita.cagliari",
+     "club:ita.fiorentina",
+     "club:ita.genoa",
+     "club:ita.lecce",
+     "club:ita.venezia",
+     "club:ita.frosinone",
+     "club:ita.monza"
+    ]
+   },
+   "points": {
+    "win": 3,
+    "draw": 1,
+    "loss": 0
+   },
+   "stages": [
+    {
+     "id": "table",
+     "type": "round_robin",
+     "legs": 2,
+     "tiebreakers": [
+      "points",
+      "head_to_head_points",
+      "head_to_head_goal_difference",
+      "goal_difference",
+      "goals_for",
+      "draw_lots"
+     ]
+    }
+   ],
+   "outcomes": [
+    {
+     "stage": "table",
+     "positions": "1",
+     "tag": "champion"
+    },
+    {
+     "stage": "table",
+     "positions": "18-20",
+     "tag": "relegated",
+     "zone": "RETR",
+     "to": "ita.serie-b",
+     "season": "next"
+    }
+   ],
+   "modes": [
+    "career",
+    "season",
+    "preset",
+    "friendly"
+   ]
+  },
+  {
+   "id": "ita.serie-b",
+   "kind": "league",
+   "country": "ITA",
+   "level": 2,
+   "names": {
+    "it": [
+     "SERIE B",
+     "SERIE B"
+    ],
+    "en": [
+     "SERIE B",
+     "SERIE B"
+    ],
+    "fr": [
+     "SERIE B",
+     "SERIE B"
+    ],
+    "de": [
+     "SERIE B",
+     "SERIE B"
+    ]
+   },
+   "participants": {
+    "count": 20,
+    "clubs": [
+     "club:ita.palermo",
+     "club:ita.catanzaro",
+     "club:ita.modena",
+     "club:ita.juve-stabia",
+     "club:ita.avellino",
+     "club:ita.padova",
+     "club:ita.cesena",
+     "club:ita.mantova",
+     "club:ita.carrarese",
+     "club:ita.sampdoria",
+     "club:ita.virtus-entella",
+     "club:ita.empoli",
+     "club:ita.sudtirol",
+     "club:ita.cremonese",
+     "club:ita.hellas-verona",
+     "club:ita.pisa",
+     "club:ita.vicenza",
+     "club:ita.arezzo",
+     "club:ita.benevento",
+     "club:ita.ascoli"
+    ]
+   },
+   "points": {
+    "win": 3,
+    "draw": 1,
+    "loss": 0
+   },
+   "stages": [
+    {
+     "id": "table",
+     "type": "round_robin",
+     "legs": 2,
+     "tiebreakers": [
+      "points",
+      "head_to_head_points",
+      "head_to_head_goal_difference",
+      "goal_difference",
+      "goals_for",
+      "draw_lots"
+     ]
+    },
+    {
+     "id": "playoff",
+     "type": "playoff",
+     "entrants": "table#3-8",
+     "rounds": [
+      {
+       "ties": 2,
+       "legs": 1,
+       "byes": 2,
+       "home": "better_placed",
+       "pairing": "seeded",
+       "decider": [
+        "extra_time",
+        "better_placed"
+       ]
+      },
+      {
+       "ties": 2,
+       "legs": 2,
+       "home": "better_placed_second_leg",
+       "pairing": "seeded",
+       "decider": [
+        "aggregate",
+        "better_placed"
+       ]
+      },
+      {
+       "ties": 1,
+       "legs": 2,
+       "home": "better_placed_second_leg",
+       "pairing": "bracket",
+       "decider": [
+        "aggregate",
+        "better_placed"
+       ]
+      }
+     ]
+    }
+   ],
+   "outcomes": [
+    {
+     "stage": "table",
+     "positions": "1-2",
+     "tag": "promoted",
+     "zone": "PROM",
+     "to": "ita.serie-a",
+     "season": "next"
+    },
+    {
+     "stage": "table",
+     "positions": "3-8",
+     "tag": "playoff",
+     "zone": "P.OFF"
+    },
+    {
+     "stage": "playoff",
+     "positions": "1",
+     "tag": "promoted",
+     "to": "ita.serie-a",
+     "season": "next"
+    }
+   ],
+   "modes": [
+    "career",
+    "season",
+    "preset",
+    "friendly"
+   ]
+  }
+ ]
+}

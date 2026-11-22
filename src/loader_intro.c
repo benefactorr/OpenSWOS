@@ -52,6 +52,10 @@ extern volatile uint16_t _keyCount;
  * (folded away), which is fine. */
 __attribute__((used, externally_visible))
 volatile uint8_t _skipLoaderIntro = 0;
+/* [general] skip_image_reels (SWOS 2020's --no-image-reels; SDL builds set it from SWOS.ini, the
+ * Amiga never): the intro is its title picture with the tune alone, until fire -- the pictures
+ * before and after it are SWOS 2020's "image reels", the PC loader's equivalent of these. */
+volatile uint8_t _skipLoaderReels = 0;
 extern volatile uint16_t _currentKey;
 #include "intro_chip_ram.h"     /* the title tune's samples, shared with the sprite pool on the Amiga */
 extern uint8_t _aSoundHeroSng[];
@@ -92,8 +96,14 @@ static void loaderIntroEnsureMenuMusicPlaying(void)
          * sequence byte zeroed, so passing 1 here was the cause of the
          * "music plays but no singing" symptom. */
         extern int AudioSDL_StreamStart(const char *name, int loop);
+        extern int AudioSDL_PcSongStart(const char *stem, int loop);
         extern int32_t DosMusic_Style(void);
-        /* [audio] music = pc: the PC CD release's title song, sound_dos/title.mp3. */
+        extern int32_t DosMusic_TitleMidi(void);
+        /* [audio] music = pc: [audio] title_music = midi plays sound_dos/title.xmi (SWOS 2020's
+         * floppy title song, from a mod) on the emulated card, else the PC CD release's title
+         * song, sound_dos/title.mp3. */
+        if (DosMusic_Style() && DosMusic_TitleMidi() && AudioSDL_PcSongStart("title", 0) == 0) {
+        } else
         if (DosMusic_Style() && AudioSDL_StreamStart("title", 0) == 0) {
         } else
         if (AudioSDL_StartSong(heroSongBuffer, HERO_SONG_BUFFER_BYTES,
@@ -444,6 +454,14 @@ void ShowLoaderIntroSequence(void)
     }
 
     loaderIntroLoadHeroAudioBank();
+
+    if (_skipLoaderReels) {             /* the title alone, as long as the last frame waits */
+#ifndef AGA
+        _paletteIndex = 3;
+#endif
+        loaderIntroShowFrameWithMusic((const uint8_t *)GRAFS "loader1.raw", 0x6D6);
+        goto exit_cleanup;
+    }
 
 #ifndef AGA
     _paletteIndex = 6;

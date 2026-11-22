@@ -1,4 +1,3 @@
-#include "career_plus_options.h"
 /*
  * input_sdl.c -- SDL keyboard / gamepad → Amiga input state.
  *
@@ -31,6 +30,10 @@
 #include <string.h>
 #include "match_step.h"   /* MatchStep_LocalBenchButton: the DOS second button */
 #include "dos_mode.h"     /* _gDosGameplay */
+#include "game_types.h"
+#include "replay_test.h"
+#include "rollback_rig.h"
+#include "srp_resim.h"
 #ifdef SWOS_WASM_BUILD
 #include <emscripten.h>     /* EMSCRIPTEN_KEEPALIVE: the page's on-screen controls */
 #else
@@ -48,8 +51,6 @@ extern uint8_t  _ciaa_pra;
  * the SPACE multi-role binding so SPACE during a live match falls through
  * to the Amiga highlight-capture path only, not the menu fire/skip path. */
 extern uint16_t _gameState;
-extern int16_t _gameStatePl;
-extern volatile uint16_t _playGame; /* true only inside a match */
 
 /* ---- Keyboard FIFO consumed by GetKey() ----
  * The Amiga build's level-2 ISR pushes raw scan codes into keyBuffer
@@ -111,12 +112,19 @@ extern volatile uint16_t _keyCount;
  * scancode for P, which is 0x19.)
  *
  * Deliberately NOT mapped: A and B (play), the D-pad and sticks (direction), the
- * shoulder buttons (below), and GUIDE — which is HOME on a Switch and belongs to the system. */
-static const struct { int button; uint8_t akey; const char *what; } k_padKeys[] = {
-    { SDL_CONTROLLER_BUTTON_START,         0x19, "P   pause"                    },
-    { SDL_CONTROLLER_BUTTON_BACK,          0x21, "S   statistics"               },
-    { SDL_CONTROLLER_BUTTON_Y,             0x13, "R   instant replay"           },
-    { SDL_CONTROLLER_BUTTON_X,             0x25, "H   replay after the match"   },
+ * shoulder buttons (below), and GUIDE — which is HOME on a Switch and belongs to the system.
+ *
+ * `hold` is the key a button sends once it has been held PAD_HOLD_MS. ESC is a hold
+ * because it ends the match: a handheld (Retroid) has no keyboard and no reachable
+ * ESC, so leaving training needs a pad button, and a hold is one nobody presses by
+ * accident. A button with a hold sends its `tap` key on RELEASE, and only when the
+ * hold did not fire -- so Start pauses as it did, one tap's length later. */
+#define PAD_HOLD_MS 700
+static const struct { int button; uint8_t tap, hold; const char *what; } k_padKeys[] = {
+    { SDL_CONTROLLER_BUTTON_START,      0x19, 0x45, "P   pause; hold: ESC quit the match" },
+    { SDL_CONTROLLER_BUTTON_BACK,       0x21, 0,    "S   statistics"                   },
+    { SDL_CONTROLLER_BUTTON_Y,          0x13, 0,    "R   instant replay"               },
+    { SDL_CONTROLLER_BUTTON_X,          0x25, 0,    "H   replay after the match"       },
     /* The shoulder buttons do NOTHING until there is a CONTROLS menu to assign them
      * in (ReportBot 0030, the owner's decision). They used to send UP and DOWN -- the
      * keys that call the two substitutes' benches -- but those are the cursor keys
@@ -124,8 +132,9 @@ static const struct { int button; uint8_t akey; const char *what; } k_padKeys[] 
      * mid-match. The bench is still the game's own way: three taps left or right
      * with the ball out of play, or the second fire button in the PC style. */
     /* Quit is on a stick CLICK on purpose: it ends the match, and a click is
-     * not something you hit by accident mid-game the way a face button is. */
-    { SDL_CONTROLLER_BUTTON_RIGHTSTICK,    0x45, "ESC quit the match"           },
+     * not something you hit by accident mid-game the way a face button is --
+     * except a handheld's grip can, so it is a hold too, with no tap. */
+    { SDL_CONTROLLER_BUTTON_RIGHTSTICK, 0,    0x45, "hold: ESC quit the match"         },
 };
 
 static int sdl_to_amiga(SDL_Keycode k)
@@ -152,6 +161,7 @@ static int sdl_to_amiga(SDL_Keycode k)
 
     switch (k) {
     case SDLK_ESCAPE:       return AKEY_ESC;
+    case SDLK_AC_BACK:      return AKEY_ESC;    /* (Android's back button: ESC) */
     case SDLK_RETURN:       return AKEY_ENTER;
     case SDLK_KP_ENTER:     return AKEY_ENTER;
     case SDLK_SPACE:        return AKEY_SPACE;
@@ -194,37 +204,6 @@ static int sdl_to_amiga(SDL_Keycode k)
 
 /* ---- Tracked keyboard state for joystick/fire synthesis ---- */
 static int s_kbd_up, s_kbd_down, s_kbd_left, s_kbd_right, s_kbd_fire;
-/* Career+ experimental instant shot.  A short tap stays queued for up to
- * twelve player-1 input updates, since a runner can reach the ball after the
- * key event.  Consuming the queue only when the match engine has actually
- * accepted the action avoids dropping shots during transitional animations. */
-static int s_instant_shot_pending;
-static int s_super_shot_pending;
-
-/* Return 1 for the normal instant kick (D), 2 for SWOS high kick (A). */
-int InputSDL_TakeSpecialShot(void)
-{
-    if (!_careerThreeButtonOption) {
-        s_super_shot_pending = s_instant_shot_pending = 0;
-        return 0;
-    }
-    if (s_super_shot_pending > 0) {
-        --s_super_shot_pending;
-        return 2;
-    }
-    if (s_instant_shot_pending > 0) {
-        --s_instant_shot_pending;
-        return 1;
-    }
-    return 0;
-}
-
-void InputSDL_SpecialShotCompleted(void)
-{
-    s_instant_shot_pending = 0;
-    s_super_shot_pending = 0;
-}
-
 /* The arrows as they physically are, beside the four above, which are what the game
  * is told. A keyboard, unlike a stick, can hold LEFT and RIGHT at once -- and does,
  * for a few frames, every time a player rolls from one arrow to the other. DOS SWOS
@@ -276,8 +255,8 @@ static void kbd_arrow(SDL_Keycode k, int down)
 #define KBD_FIRE_LCTRL  0x2
 #define KBD_FIRE_RETURN 0x4
 #define KBD_FIRE_BOUND  0x8     /* the player's own fire key ([input] key_fire) */
+#define KBD_FIRE_PASS   0x10
 static int s_kbd_fire_keys;
-#define KBD_FIRE_THREE_BUTTON_S 0x10
 
 /* ---- The player's own keys: [input] key_up / key_down / key_left / key_right / key_fire ----
  *
@@ -448,7 +427,178 @@ static const char *dev_name(int d)
     return nm ? nm : "controller";
 }
 
-/* A device nobody plays gets the lowest free player. -1 if both are taken. */
+/* Player 1's controller by name (SWOS 2020's getControllerName, the lobby's "USING ..."), or NULL
+ * when no pad is player 1's: the keyboard. */
+const char *InputSDL_Player1DeviceName(void)
+{
+    const int d = s_player_dev[0];
+    return d >= 0 && d < INPUTSDL_MAX_DEVICES && dev_open(d) ? dev_name(d) : NULL;
+}
+
+/* Whether player 1 / 2 (0, 1) plays with a pad (else the keyboard). */
+static int pref_no_pad(int player);
+
+/* Two players, one pad (InputSDL_PostFrame): player 1's pad is player 2's, the keyboard player 1's
+ * -- unless player 2 is set to have none. */
+static int split_pad(void)
+{
+    extern uint16_t _twoPlayers;
+    extern int32_t  NetplayMatch_Enabled(void);
+    return _twoPlayers != 0 && s_player_dev[1] < 0 && s_player_dev[0] >= 0 && !NetplayMatch_Enabled() &&
+           !pref_no_pad(1);
+}
+
+/* Whether player 1 / 2 (0, 1) plays on a pad -- as InputSDL_PostFrame reads them: when two players
+ * share one pad, it is player 2's and player 1 has the keyboard (Playaveli's, 2026-11-09). */
+int InputSDL_PlayerHasPad(int player)
+{
+    const int split = split_pad();
+    const int d = player == 0 ? (split ? -1 : s_player_dev[0]) : player == 1 ? s_player_dev[split ? 0 : 1] : -1;
+    return d >= 0 && d < INPUTSDL_MAX_DEVICES && dev_open(d);
+}
+
+/* Player 1 plays on the keyboard and his pad together (InputSDL_PostFrame): which of the two he
+ * used last, 1 the keyboard -- for what the screen calls his control (the shoot-out's JOYPAD /
+ * KEYBOARD1: a keyboard player with a pad plugged in was shown JOYPAD, Playaveli 2026-11-10). */
+static int s_p1KeyboardLast;
+
+/* Whether player 1 / 2 (0, 1) is playing on a pad now: InputSDL_PlayerHasPad, and for player 1
+ * the pad, not the keyboard, the last he used. */
+int InputSDL_PlayerUsesPad(int player)
+{
+    return InputSDL_PlayerHasPad(player) && !(player == 0 && s_p1KeyboardLast);
+}
+
+/* ---- SWOS 2020's CONTROLS MENU and CONTROLLER SETUP (SWOS 2020 port, agent A) ----
+ *
+ * SWOS 2020 (controls/joypads.cpp, controlOptionsMenu.cpp, joypadConfigMenu.cpp) lets each
+ * player choose a control -- the keyboard, none (player 2), or a joypad by its GUID, the n-th
+ * of several alike -- and keeps per joypad GUID its FIRE and BENCH buttons and four stick
+ * cut-offs. Here, in SWOS.ini [input]:
+ *
+ *   pad1, pad2        ""/auto (as before: the pads as they come), keyboard (player 1: no pad),
+ *                     none (player 2: no control), or <guid>[#n]
+ *   auto_detect_pads  AUTO-DETECT JOYPADS: a pad plugged in later is given to a free AUTO
+ *                     player (on, as before); off, it waits until SELECT JOYPAD picks it
+ *   pad_config        <guid>:<fire>:<bench>:<x+>:<x->:<y+>:<y->;...  -- a button number, -1
+ *                     the default (A or B / any button; X / none), a cut-off in percent of the
+ *                     stick's travel, 0 = stick_deadzone
+ *   shoulder_buttons  DISABLE SHOULDER BUTTONS (on): the shoulders and stick clicks cannot be
+ *                     FIRE or BENCH; off, they can
+ *   call_bench        CALL BENCH: both (the 2nd fire button or three taps), taps, button
+ *
+ * None of it touches the match: it decides which device reads as which player and how, and
+ * what a device reads goes on into the same registers / input bits as ever. All defaults are
+ * the behaviour before it existed. */
+typedef struct {
+    char    guid[33];
+    int8_t  fire, bench;        /* a button, -1 the default */
+    uint8_t cut[4];             /* x+, x-, y+, y-: percent, 0 = [input] stick_deadzone */
+} PadConfig;
+#define PAD_CONFIGS 8
+static PadConfig s_padCfg[PAD_CONFIGS];
+static int       s_padCfgCount;
+static char      s_pref[INPUTSDL_NUM_PADS][48];    /* "" auto, "keyboard", "none", guid[#n] */
+static int       s_autoDetect = 1;
+static int       s_shouldersOff = 1;
+static int       s_callBench;                       /* INPUTSDL_BENCH_* */
+static int       s_assigningAtStart;                /* InputSDL_Init: the pads already there */
+enum { INPUTSDL_BENCH_BOTH = 0, INPUTSDL_BENCH_TAPS = 1, INPUTSDL_BENCH_BUTTON = 2 };
+
+static SDL_Joystick *dev_joystick(int d)
+{
+    return s_dev_gc[d] ? SDL_GameControllerGetJoystick(s_dev_gc[d]) : s_dev_raw[d];
+}
+
+static void dev_guid(int d, char out[33])
+{
+    SDL_Joystick *j = dev_open(d) ? dev_joystick(d) : NULL;
+    out[0] = '\0';
+    if (j)
+        SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(j), out, 33);
+}
+
+/* Which of several pads alike (the same GUID) this one is, 0 the first: SWOS 2020's
+ * joypadOccurrence -- two Arduino Leonardos have one GUID between them. */
+static int dev_occurrence(int d)
+{
+    char g[33], o[33];
+    int n = 0;
+    dev_guid(d, g);
+    for (int e = 0; e < d; e++) {
+        if (!dev_open(e))
+            continue;
+        dev_guid(e, o);
+        if (strcmp(o, g) == 0)
+            n++;
+    }
+    return n;
+}
+
+/* The [input] padN value naming this device. */
+void InputSDL_DevicePref(int d, char *out, int cap)
+{
+    char g[33];
+    int n;
+    if (d < 0 || d >= INPUTSDL_MAX_DEVICES || !dev_open(d)) {
+        snprintf(out, (size_t)cap, "%s", "");
+        return;
+    }
+    dev_guid(d, g);
+    n = dev_occurrence(d);
+    if (n)
+        snprintf(out, (size_t)cap, "%s#%d", g, n);
+    else
+        snprintf(out, (size_t)cap, "%s", g);
+}
+
+static int pref_auto(int p)     { return s_pref[p][0] == '\0' || SDL_strcasecmp(s_pref[p], "auto") == 0; }
+static int pref_no_pad(int p)   { return SDL_strcasecmp(s_pref[p], "keyboard") == 0 || SDL_strcasecmp(s_pref[p], "none") == 0; }
+
+static int pref_names_dev(int p, int d)
+{
+    char mine[48];
+    if (pref_auto(p) || pref_no_pad(p))
+        return 0;
+    InputSDL_DevicePref(d, mine, sizeof mine);
+    return SDL_strcasecmp(mine, s_pref[p]) == 0;
+}
+
+static int dev_played(int d)
+{
+    for (int p = 0; p < INPUTSDL_NUM_PADS; ++p)
+        if (s_player_dev[p] == d)
+            return 1;
+    return 0;
+}
+
+/* Give player p an open device nobody plays: the one they chose, else (AUTO, and
+ * `any`) the first. */
+static void fill_player(int p, int any)
+{
+    if (s_player_dev[p] >= 0 || pref_no_pad(p))
+        return;
+    for (int d = 0; d < INPUTSDL_MAX_DEVICES; ++d) {
+        if (dev_open(d) && !dev_played(d) && pref_names_dev(p, d)) {
+            s_player_dev[p] = d;
+            return;
+        }
+    }
+    if (!any || !pref_auto(p))
+        return;
+    for (int d = 0; d < INPUTSDL_MAX_DEVICES; ++d) {
+        int wanted = 0;
+        for (int q = 0; q < INPUTSDL_NUM_PADS; ++q)
+            wanted |= q != p && pref_names_dev(q, d);   /* (the other player's own: it waits for them) */
+        if (dev_open(d) && !dev_played(d) && !wanted) {
+            s_player_dev[p] = d;
+            return;
+        }
+    }
+}
+
+/* A device that has just been opened: the player who chose it, or the lowest free AUTO
+ * player (at start, or with AUTO-DETECT JOYPADS on). -1 if it waits. */
 static int dev_assign(int d)
 {
     for (int p = 0; p < INPUTSDL_NUM_PADS; ++p) {
@@ -456,12 +606,418 @@ static int dev_assign(int d)
             return p;
     }
     for (int p = 0; p < INPUTSDL_NUM_PADS; ++p) {
-        if (s_player_dev[p] < 0) {
+        if (pref_names_dev(p, d)) {
+            s_player_dev[p] = d;            /* (an AUTO pad it displaces waits) */
+            return p;
+        }
+    }
+    if (!s_autoDetect && !s_assigningAtStart)
+        return -1;
+    for (int p = 0; p < INPUTSDL_NUM_PADS; ++p) {
+        if (s_player_dev[p] < 0 && pref_auto(p)) {
             s_player_dev[p] = d;
             return p;
         }
     }
     return -1;
+}
+
+const char *InputSDL_PlayerPref(int p)
+{
+    return p >= 0 && p < INPUTSDL_NUM_PADS ? s_pref[p] : "";
+}
+
+/* The CONTROLS MENU's choice for player p: "" auto, "keyboard", "none", or InputSDL_DevicePref's. */
+void InputSDL_SetPlayerPref(int p, const char *pref)
+{
+    int q = 1 - p, was;
+    if (p < 0 || p >= INPUTSDL_NUM_PADS)
+        return;
+    snprintf(s_pref[p], sizeof s_pref[p], "%s", pref && SDL_strcasecmp(pref, "auto") != 0 ? pref : "");
+    was = s_player_dev[p];
+    s_player_dev[p] = -1;
+    for (int d = 0; d < INPUTSDL_MAX_DEVICES; ++d) {
+        if (dev_open(d) && pref_names_dev(p, d)) {
+            if (s_player_dev[q] == d)
+                s_player_dev[q] = -1;       /* the other player had it: they look again below */
+            s_player_dev[p] = d;
+            break;
+        }
+    }
+    fill_player(p, 1);
+    fill_player(q, s_autoDetect);
+    (void)was;
+    fprintf(stderr, "[input] P%d control: %s -> %s\n", p + 1, s_pref[p][0] ? s_pref[p] : "auto",
+            s_player_dev[p] >= 0 ? dev_name(s_player_dev[p]) : p ? "none" : "keyboard");
+}
+
+int  InputSDL_AutoDetect(void)          { return s_autoDetect; }
+void InputSDL_SetAutoDetect(int on)     { s_autoDetect = on != 0; }
+int  InputSDL_ShouldersOff(void)        { return s_shouldersOff; }
+void InputSDL_SetShouldersOff(int on)   { s_shouldersOff = on != 0; }
+int  InputSDL_CallBench(void)           { return s_callBench; }
+void InputSDL_SetCallBench(int mode)    { s_callBench = mode >= 0 && mode <= 2 ? mode : 0; }
+
+/* The device's config, NULL when it has none (all defaults). */
+static PadConfig *dev_cfg(int d)
+{
+    char g[33];
+    if (d < 0 || d >= INPUTSDL_MAX_DEVICES || !dev_open(d))
+        return NULL;
+    dev_guid(d, g);
+    for (int i = 0; i < s_padCfgCount; i++)
+        if (strcmp(s_padCfg[i].guid, g) == 0)
+            return &s_padCfg[i];
+    return NULL;
+}
+
+/* ... made when a setting of it changes. */
+static PadConfig *dev_cfg_make(int d)
+{
+    PadConfig *c = dev_cfg(d);
+    if (c || d < 0 || d >= INPUTSDL_MAX_DEVICES || !dev_open(d))
+        return c;
+    if (s_padCfgCount == PAD_CONFIGS)
+        memmove(&s_padCfg[0], &s_padCfg[1], sizeof s_padCfg[0] * (PAD_CONFIGS - 1)), s_padCfgCount--;
+    c = &s_padCfg[s_padCfgCount++];
+    memset(c, 0, sizeof *c);
+    dev_guid(d, c->guid);
+    c->fire = c->bench = -1;
+    return c;
+}
+
+static int cfg_is_default(const PadConfig *c)
+{
+    return c->fire < 0 && c->bench < 0 && !c->cut[0] && !c->cut[1] && !c->cut[2] && !c->cut[3];
+}
+
+/* [input] pad_config. Returns how many were read. */
+int InputSDL_ParsePadConfig(const char *s)
+{
+    s_padCfgCount = 0;
+    while (s && *s && s_padCfgCount < PAD_CONFIGS) {
+        PadConfig c;
+        int f, b, xp, xn, yp, yn, used = 0;
+        char g[33];
+        memset(&c, 0, sizeof c);
+        if (sscanf(s, "%32[0-9a-fA-F]:%d:%d:%d:%d:%d:%d%n", g, &f, &b, &xp, &xn, &yp, &yn, &used) == 7 && used > 0) {
+            snprintf(c.guid, sizeof c.guid, "%s", g);
+            for (char *k = c.guid; *k; k++)
+                if (*k >= 'A' && *k <= 'F') *k = (char)(*k - 'A' + 'a');   /* (SDL writes lower case) */
+            c.fire = (int8_t)(f >= 0 && f < 64 ? f : -1);
+            c.bench = (int8_t)(b >= 0 && b < 64 && b != f ? b : -1);
+            c.cut[0] = (uint8_t)(xp >= 5 && xp <= 95 ? xp : 0);
+            c.cut[1] = (uint8_t)(xn >= 5 && xn <= 95 ? xn : 0);
+            c.cut[2] = (uint8_t)(yp >= 5 && yp <= 95 ? yp : 0);
+            c.cut[3] = (uint8_t)(yn >= 5 && yn <= 95 ? yn : 0);
+            if (!cfg_is_default(&c))
+                s_padCfg[s_padCfgCount++] = c;
+            s += used;
+        }
+        s = strchr(s, ';');
+        if (s)
+            s++;
+    }
+    return s_padCfgCount;
+}
+
+void InputSDL_FormatPadConfig(char *out, int cap)
+{
+    int at = 0;
+    out[0] = '\0';
+    for (int i = 0; i < s_padCfgCount && at < cap; i++) {
+        const PadConfig *c = &s_padCfg[i];
+        if (cfg_is_default(c))
+            continue;
+        at += snprintf(out + at, (size_t)(cap - at), "%s%s:%d:%d:%d:%d:%d:%d", at ? ";" : "", c->guid,
+                       c->fire, c->bench, c->cut[0], c->cut[1], c->cut[2], c->cut[3]);
+    }
+    if (at >= cap)
+        out[cap - 1] = '\0';
+}
+
+/* The stick, its cut-offs applied: each half of each axis scaled so that its own cut-off
+ * lands on [input] stick_deadzone's radius, then the eight-way reading below as ever. All
+ * four at 0 (or at the dead zone itself) is the reading before cut-offs existed. */
+static void stick_directions(int32_t ax, int32_t ay, int *_up, int *_down, int *left, int *right);
+static int32_t s_stickDeadzone;
+static void stick_directions_cut(const PadConfig *c, int32_t ax, int32_t ay,
+                                 int *_up, int *_down, int *left, int *right)
+{
+    if (c) {
+        const int k = ax >= 0 ? 0 : 1, l = ay >= 0 ? 2 : 3;
+        if (c->cut[k])
+            ax = (int32_t)((int64_t)ax * s_stickDeadzone / (32768 * c->cut[k] / 100));
+        if (c->cut[l])
+            ay = (int32_t)((int64_t)ay * s_stickDeadzone / (32768 * c->cut[l] / 100));
+    }
+    stick_directions(ax, ay, _up, _down, left, right);
+}
+
+/* A shoulder button or a stick click (SWOS 2020's processEvent list): with DISABLE SHOULDER
+ * BUTTONS on, never FIRE or BENCH. A plain joystick's buttons have no names: none is one. */
+static int dev_is_shoulder(int d, int b)
+{
+    if (!s_dev_gc[d])
+        return 0;
+    return b == SDL_CONTROLLER_BUTTON_LEFTSHOULDER || b == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER ||
+           b == SDL_CONTROLLER_BUTTON_LEFTSTICK || b == SDL_CONTROLLER_BUTTON_RIGHTSTICK
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+           || (b >= SDL_CONTROLLER_BUTTON_PADDLE1 && b <= SDL_CONTROLLER_BUTTON_PADDLE4)
+#endif
+           ;
+}
+
+/* Buttons that are the menus' and the system's on a mapped pad (START, BACK, GUIDE, R3's hold):
+ * never FIRE or BENCH. */
+static int dev_is_reserved(int d, int b)
+{
+    return s_dev_gc[d] && (b == SDL_CONTROLLER_BUTTON_START || b == SDL_CONTROLLER_BUTTON_BACK ||
+                           b == SDL_CONTROLLER_BUTTON_GUIDE || b == SDL_CONTROLLER_BUTTON_RIGHTSTICK);
+}
+
+static int dev_button_count(int d)
+{
+    if (s_dev_gc[d])
+        return SDL_CONTROLLER_BUTTON_MAX;
+    return s_dev_raw[d] ? SDL_JoystickNumButtons(s_dev_raw[d]) : 0;
+}
+
+static int dev_button(int d, int b)
+{
+    if (b < 0)
+        return 0;
+    if (s_dev_gc[d])
+        return b < SDL_CONTROLLER_BUTTON_MAX && SDL_GameControllerGetButton(s_dev_gc[d], (SDL_GameControllerButton)b);
+    return s_dev_raw[d] && b < SDL_JoystickNumButtons(s_dev_raw[d]) && SDL_JoystickGetButton(s_dev_raw[d], b);
+}
+
+/* The configured button, -1 the default, and -1 too for a shoulder while they are off. */
+static int cfg_button(int d, const PadConfig *c, int bench)
+{
+    const int b = c ? (bench ? c->bench : c->fire) : -1;
+    return b >= 0 && !(s_shouldersOff && dev_is_shoulder(d, b)) ? b : -1;
+}
+
+/* ---- for the CONTROLS MENU and CONTROLLER SETUP (src/controls_menu.c) ---- */
+
+int InputSDL_PlayerDevice(int p)
+{
+    const int d = p >= 0 && p < INPUTSDL_NUM_PADS ? s_player_dev[p] : -1;
+    return d >= 0 && dev_open(d) ? d : -1;
+}
+
+int InputSDL_DeviceOpen(int d) { return d >= 0 && d < INPUTSDL_MAX_DEVICES && dev_open(d); }
+int InputSDL_MaxDevices(void)  { return INPUTSDL_MAX_DEVICES; }
+
+/* The device's name, numbered when several alike are open ("ARDUINO LEONARDO 2"). */
+void InputSDL_DeviceLabel(int d, char *out, int cap)
+{
+    int total = 0, rank = 0;
+    const char *nm;
+    if (!InputSDL_DeviceOpen(d)) {
+        snprintf(out, (size_t)cap, "%s", "<NONE>");
+        return;
+    }
+    nm = dev_name(d);
+    for (int e = 0; e < INPUTSDL_MAX_DEVICES; e++) {
+        if (dev_open(e) && strcmp(dev_name(e), nm) == 0) {
+            total++;
+            if (e == d)
+                rank = total;
+        }
+    }
+    if (total > 1)
+        snprintf(out, (size_t)cap, "%s %d", nm, rank);
+    else
+        snprintf(out, (size_t)cap, "%s", nm);
+}
+
+/* NAME / GUID / ID / BUTTONS / AXES / POWER / RAW X / RAW Y, and what the stick reads now. */
+void InputSDL_DeviceInfo(int d, char guid[33], int *id, int *buttons, int *axes, const char **power,
+                         int *rawX, int *rawY, int dirs[4])
+{
+    SDL_Joystick *j = InputSDL_DeviceOpen(d) ? dev_joystick(d) : NULL;
+    int up = 0, down = 0, left = 0, right = 0;
+    dev_guid(d, guid);
+    *id = j ? (int)SDL_JoystickInstanceID(j) : -1;
+    *buttons = j ? SDL_JoystickNumButtons(j) : 0;
+    *axes = j ? SDL_JoystickNumAxes(j) : 0;
+    *rawX = j && *axes >= 1 ? SDL_JoystickGetAxis(j, 0) : 0;
+    *rawY = j && *axes >= 2 ? SDL_JoystickGetAxis(j, 1) : 0;
+    if (s_dev_gc[d]) {
+        *rawX = SDL_GameControllerGetAxis(s_dev_gc[d], SDL_CONTROLLER_AXIS_LEFTX);
+        *rawY = SDL_GameControllerGetAxis(s_dev_gc[d], SDL_CONTROLLER_AXIS_LEFTY);
+    }
+    *power = "UNKNOWN";
+    switch (j ? SDL_JoystickCurrentPowerLevel(j) : SDL_JOYSTICK_POWER_UNKNOWN) {
+    case SDL_JOYSTICK_POWER_EMPTY:  *power = "EMPTY"; break;
+    case SDL_JOYSTICK_POWER_LOW:    *power = "LOW"; break;
+    case SDL_JOYSTICK_POWER_MEDIUM: *power = "MEDIUM"; break;
+    case SDL_JOYSTICK_POWER_FULL:   *power = "FULL"; break;
+    case SDL_JOYSTICK_POWER_WIRED:  *power = "WIRED"; break;
+    case SDL_JOYSTICK_POWER_MAX:    *power = "MAX"; break;
+    default: break;
+    }
+    stick_directions_cut(dev_cfg(d), *rawX, *rawY, &up, &down, &left, &right);
+    dirs[0] = up; dirs[1] = down; dirs[2] = left; dirs[3] = right;
+}
+
+/* FIRE (bench 0) or BENCH (1): the button, -1 the default. */
+int InputSDL_PadButton(int d, int bench)
+{
+    const PadConfig *c = dev_cfg(d);
+    return c ? (bench ? c->bench : c->fire) : -1;
+}
+
+/* What a button is called on this device: SDL's name for a mapped pad's, a number for a
+ * plain joystick's; the default when b is -1. */
+void InputSDL_PadButtonName(int d, int bench, int b, char *out, int cap)
+{
+    const char *n;
+    if (b < 0) {
+        if (InputSDL_DeviceOpen(d) && s_dev_gc[d])
+            snprintf(out, (size_t)cap, "%s", bench ? "X" : "A OR B");
+        else
+            snprintf(out, (size_t)cap, "%s", bench ? "NONE" : "ANY");
+        return;
+    }
+    n = InputSDL_DeviceOpen(d) && s_dev_gc[d] ? SDL_GameControllerGetStringForButton((SDL_GameControllerButton)b) : NULL;
+    if (n)
+        snprintf(out, (size_t)cap, "%s", n);
+    else
+        snprintf(out, (size_t)cap, "BUTTON %d", b);
+}
+
+/* Set FIRE or BENCH; the other one, if it was that button, takes the old one's place
+ * (SWOS 2020's selectButton swaps). Returns 0, 1 for a button that cannot be either. */
+int InputSDL_SetPadButton(int d, int bench, int b)
+{
+    PadConfig *c;
+    if (b >= 0 && (dev_is_reserved(d, b) || (s_shouldersOff && dev_is_shoulder(d, b))))
+        return 1;
+    c = dev_cfg_make(d);
+    if (!c)
+        return 1;
+    if (bench) {
+        if (b >= 0 && c->fire == b)
+            c->fire = c->bench;
+        c->bench = (int8_t)b;
+    } else {
+        if (b >= 0 && c->bench == b)
+            c->bench = c->fire;
+        c->fire = (int8_t)b;
+    }
+    return 0;
+}
+
+/* The cut-offs: k 0 x+, 1 x-, 2 y+, 3 y-; percent, 0 = stick_deadzone. */
+int InputSDL_PadCut(int d, int k)
+{
+    const PadConfig *c = dev_cfg(d);
+    return c && k >= 0 && k < 4 ? c->cut[k] : 0;
+}
+
+void InputSDL_SetPadCut(int d, int k, int pct)
+{
+    PadConfig *c = k >= 0 && k < 4 ? dev_cfg_make(d) : NULL;
+    if (c)
+        c->cut[k] = (uint8_t)(pct >= 5 && pct <= 95 ? pct : 0);
+}
+
+int InputSDL_StickDeadzonePercent(void)
+{
+    return (int)((s_stickDeadzone * 100 + 16384) / 32768);
+}
+
+/* "Press any button": the buttons down when it began, so a press is a NEW one. */
+static uint64_t s_pressBase[INPUTSDL_MAX_DEVICES];
+
+static uint64_t dev_buttons_now(int d)
+{
+    uint64_t m = 0;
+    const int n = dev_open(d) ? dev_button_count(d) : 0;
+    for (int b = 0; b < n && b < 64; b++)
+        if (dev_button(d, b))
+            m |= (uint64_t)1 << b;
+    return m;
+}
+
+void InputSDL_PadPressBegin(void)
+{
+    SDL_JoystickUpdate();
+    for (int d = 0; d < INPUTSDL_MAX_DEVICES; d++)
+        s_pressBase[d] = dev_buttons_now(d);
+}
+
+/* A button pressed since InputSDL_PadPressBegin, on device `only` (or any, -1): 1 and the
+ * device and button, else 0. A button let go is forgotten, so pressing it again counts. */
+int InputSDL_PadPressPoll(int only, int *dev, int *button)
+{
+    SDL_JoystickUpdate();
+    for (int d = 0; d < INPUTSDL_MAX_DEVICES; d++) {
+        uint64_t now, fresh;
+        if (!dev_open(d) || (only >= 0 && d != only))
+            continue;
+        now = dev_buttons_now(d);
+        fresh = now & ~s_pressBase[d];
+        s_pressBase[d] &= now;
+        for (int b = 0; b < 64; b++) {
+            if (fresh & ((uint64_t)1 << b)) {
+                *dev = d;
+                *button = b;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* SELECT JOYPAD: device d is player p's (by name: the choice is kept), swapping with the other player. */
+void InputSDL_GivePlayerDevice(int p, int d)
+{
+    char pref[48];
+    if (p < 0 || p >= INPUTSDL_NUM_PADS || !InputSDL_DeviceOpen(d))
+        return;
+    InputSDL_DevicePref(d, pref, sizeof pref);
+    if (s_player_dev[1 - p] == d) {
+        s_player_dev[1 - p] = s_player_dev[p];          /* (theirs was mine: swap) */
+        if (!pref_auto(1 - p)) {
+            if (s_player_dev[1 - p] >= 0)
+                InputSDL_DevicePref(s_player_dev[1 - p], s_pref[1 - p], sizeof s_pref[1 - p]);
+            else
+                s_pref[1 - p][0] = '\0';               /* (nothing to swap: they are AUTO again) */
+        }
+    }
+    snprintf(s_pref[p], sizeof s_pref[p], "%s", pref);
+    s_player_dev[p] = d;
+    fprintf(stderr, "[input] SELECT JOYPAD: P%d is \"%s\" (%s)\n", p + 1, dev_name(d), pref);
+}
+
+/* SWOS.ini [input]: pad1, pad2, auto_detect_pads, pad_config, shoulder_buttons, call_bench. */
+void InputSDL_Configure(const PlatformInitOptions *o)
+{
+    for (int p = 0; p < INPUTSDL_NUM_PADS; p++)
+        snprintf(s_pref[p], sizeof s_pref[p], "%s", SDL_strcasecmp(o->pad_pref[p], "auto") == 0 ? "" : o->pad_pref[p]);
+    if (SDL_strcasecmp(s_pref[0], "none") == 0)
+        snprintf(s_pref[0], sizeof s_pref[0], "keyboard");      /* (player 1 always has the keyboard) */
+    if (SDL_strcasecmp(s_pref[1], "keyboard") == 0)
+        snprintf(s_pref[1], sizeof s_pref[1], "none");          /* (and player 2 never has it) */
+    s_autoDetect = o->auto_detect_pads != 0;
+    s_shouldersOff = o->shoulder_buttons_off != 0;
+    InputSDL_SetCallBench(o->call_bench);
+    InputSDL_ParsePadConfig(o->pad_config);
+}
+
+/* ... and back, for Settings_Save. */
+void InputSDL_StoreConfig(PlatformInitOptions *o)
+{
+    for (int p = 0; p < INPUTSDL_NUM_PADS; p++)
+        snprintf(o->pad_pref[p], sizeof o->pad_pref[p], "%s", s_pref[p][0] ? s_pref[p] : "auto");
+    o->auto_detect_pads = s_autoDetect;
+    o->shoulder_buttons_off = s_shouldersOff;
+    o->call_bench = s_callBench;
+    InputSDL_FormatPadConfig(o->pad_config, (int)sizeof o->pad_config);
 }
 
 /* Push a raw Amiga scancode into the FIFO GetKey() drains, exactly as a
@@ -500,6 +1056,69 @@ EMSCRIPTEN_KEEPALIVE void InputSDL_TouchKey(int32_t akey)
         push_amiga_key((uint8_t)akey);
 }
 
+/* RAW TEXT (InputText's, for a password): the characters themselves, as typed -- small
+ * letters, symbols -- from SDL's text input, where the game's keys only give capitals and
+ * digits. A queue the editor empties each frame. */
+static uint8_t s_rawq[64];
+static int     s_rawHead, s_rawTail, s_rawOn;
+
+void InputSDL_RawText(int on)
+{
+    s_rawHead = s_rawTail = 0;
+    s_rawOn = on;
+#ifndef SWOS_WASM_BUILD
+    if (on)
+        SDL_StartTextInput();
+#endif
+}
+
+static void raw_push(int ch)
+{
+    if (ch < 0x20 || ch > 0x7E || ((s_rawTail + 1) & 63) == s_rawHead)
+        return;
+    s_rawq[s_rawTail] = (uint8_t)ch;
+    s_rawTail = (s_rawTail + 1) & 63;
+}
+
+int InputSDL_RawChar(void)
+{
+    int ch;
+    if (s_rawHead == s_rawTail)
+        return -1;
+    ch = s_rawq[s_rawHead];
+    s_rawHead = (s_rawHead + 1) & 63;
+    return ch;
+}
+
+/* A character the page's hidden text field got from a phone's on-screen keyboard
+ * (wasm/shell.html), while the game asks for text (InputText): the key that types it
+ * into the FIFO, as a key press does. `ch`: a printable ASCII character, or 8 BACKSPACE,
+ * 13 ENTER, 27 ESC. A character no key types is dropped. */
+EMSCRIPTEN_KEEPALIVE void InputSDL_WebChar(int32_t ch)
+{
+    int a;
+    if (s_rawOn && ch >= 0x20 && ch <= 0x7E) {     /* a password: the character itself */
+        raw_push(ch);
+        return;
+    }
+    if (ch == 8)
+        a = sdl_to_amiga(SDLK_BACKSPACE);
+    else if (ch == 13)
+        a = sdl_to_amiga(SDLK_RETURN);
+    else if (ch == 27)
+        a = sdl_to_amiga(SDLK_ESCAPE);
+    else if (ch >= 'A' && ch <= 'Z')
+        a = sdl_to_amiga((SDL_Keycode)(ch - 'A' + 'a'));    /* (the field is capitals anyway) */
+    else if (ch > ' ' && ch < 0x7F)
+        a = sdl_to_amiga((SDL_Keycode)ch);
+    else if (ch == ' ')
+        a = sdl_to_amiga(SDLK_SPACE);
+    else
+        a = -1;
+    if (a >= 0)
+        push_amiga_key((uint8_t)a);
+}
+
 static void touch_controls(int *_up, int *_down, int *left, int *right, int *_fire)
 {
     if (s_touch_dirs & 1) *_up    = 1;
@@ -507,6 +1126,36 @@ static void touch_controls(int *_up, int *_down, int *left, int *right, int *_fi
     if (s_touch_dirs & 4) *left   = 1;
     if (s_touch_dirs & 8) *right  = 1;
     if (s_touch_fire)     *_fire  = 1;
+}
+
+/* The one k_padKeys button being held for its `hold` key (-1: none): the entry,
+ * the pad, when it went down, and whether the hold has already been sent. */
+static struct { int entry; SDL_JoystickID which; uint32_t since; int sent; } s_pad_hold = { -1, 0, 0, 0 };
+
+static void pad_hold_poll(uint32_t now)
+{
+    if (s_pad_hold.entry >= 0 && !s_pad_hold.sent && now - s_pad_hold.since >= PAD_HOLD_MS) {
+        push_amiga_key(k_padKeys[s_pad_hold.entry].hold);
+        s_pad_hold.sent = 1;
+    }
+}
+
+static void pad_key_button(int entry, SDL_JoystickID which, int down, uint32_t now)
+{
+    if (!k_padKeys[entry].hold) {
+        if (down)
+            push_amiga_key(k_padKeys[entry].tap);
+    } else if (down) {
+        s_pad_hold.entry = entry;
+        s_pad_hold.which = which;
+        s_pad_hold.since = now;
+        s_pad_hold.sent = 0;
+    } else if (s_pad_hold.entry == entry && s_pad_hold.which == which) {
+        pad_hold_poll(now);
+        if (!s_pad_hold.sent && k_padKeys[entry].tap)
+            push_amiga_key(k_padKeys[entry].tap);
+        s_pad_hold.entry = -1;
+    }
 }
 
 /* Open a device and give it a player if one is free. Returns the player (0 or 1),
@@ -642,6 +1291,7 @@ int InputSDL_Init(void)
 
     int n = SDL_NumJoysticks();
     fprintf(stderr, "[input] SDL_NumJoysticks=%d\n", n);
+    s_assigningAtStart = 1;         /* (AUTO-DETECT JOYPADS is about pads plugged in later) */
     for (int i = 0; i < n; ++i) {
         const char *name = SDL_JoystickNameForIndex(i);
         int is_gc = SDL_IsGameController(i);
@@ -649,16 +1299,25 @@ int InputSDL_Init(void)
                 i, name ? name : "(null)",
                 is_gc ? "→ game controller" : "→ raw joystick (no mapping)");
         int slot = pad_open_into_first_empty(i);
+        char pref[48];
+        {   /* (its [input] pad1/pad2 name: SETTINGS -> CONTROLS chooses by it) */
+            const int d = dev_find_instance(SDL_JoystickGetDeviceInstanceID(i));
+            InputSDL_DevicePref(d, pref, sizeof pref);
+        }
         if (slot >= 0)
-            fprintf(stderr, "[input]     opened as P%d (%s)\n",
-                    slot + 1, is_gc ? "GameController" : "raw Joystick");
+            fprintf(stderr, "[input]     opened as P%d (%s, %s)\n",
+                    slot + 1, is_gc ? "GameController" : "raw Joystick", pref);
         else if (slot == -1)
-            fprintf(stderr, "[input]     opened, not played: both players have a pad "
-                            "(press fire on it during the intro to play it as P1)\n");
+            fprintf(stderr, "[input]     opened, not played (%s): both players have a pad or chose "
+                            "their control (press fire on it during the intro to play it as P1)\n", pref);
         else
             fprintf(stderr, "[input]     skipped (open failed, or %d devices already open)\n",
                     INPUTSDL_MAX_DEVICES);
     }
+    s_assigningAtStart = 0;
+    /* A player who chose a pad by name that opened after an AUTO one took their place. */
+    for (int p = 0; p < INPUTSDL_NUM_PADS; ++p)
+        fill_player(p, 1);
     return 0;
 }
 
@@ -678,9 +1337,98 @@ void InputSDL_Shutdown(void)
     s_player_dev[0] = s_player_dev[1] = -1;
 }
 
+/* ESC PRESSING TO QUIT (SWOS 2020's MULTIPLAYER SETTINGS, [netplay] esc_presses): how many ESC
+ * presses, each within two seconds of the last, leave a live match -- 1 as before, or 2 or 3 so a
+ * stray one does not end it. Each press short of the count says so in the chat box. */
+static int      s_escPresses = 1;
+static int      s_escCount;
+static uint32_t s_escAt;
+void InputSDL_SetEscPresses(int n) { s_escPresses = n >= 1 && n <= 3 ? n : 1; }
+int  InputSDL_EscPresses(void)     { return s_escPresses; }
+
+/* F6's quick save: when it was pressed (0 none). Taken by the next menu frame, and only if it
+ * is fresh -- a press that waited out a match or a long load is no request any more. */
+static uint32_t s_quickSaveAt;
+int InputSDL_TakeQuickSave(void)
+{
+    const uint32_t at = s_quickSaveAt;
+    s_quickSaveAt = 0;
+    return at && SDL_GetTicks() - at < 500;
+}
+
+static void esc_press_in_match(void (*leave)(void))
+{
+    extern void MatchChat_Notice(const char *text);     /* match_chat.c */
+    const uint32_t now = SDL_GetTicks();
+    if (s_escCount && now - s_escAt > 2000)
+        s_escCount = 0;
+    s_escAt = now;
+    if (++s_escCount >= s_escPresses) {
+        s_escCount = 0;
+        leave();
+        return;
+    }
+    {
+        char line[64];
+        const int left = s_escPresses - s_escCount;
+        snprintf(line, sizeof line, "Press ESC %d more time%s to leave the match", left, left > 1 ? "s" : "");
+        MatchChat_Notice(line);
+    }
+}
+
+static int s_threeButton, s_shot, s_shotTicks;
+
+static int threeButtonActive(void)
+{
+    extern int32_t GameLoop_MatchRunning(void), NetplayMatch_Enabled(void);
+    extern uint16_t _gameStatePl;
+    extern volatile uint16_t _playGame;
+    return s_threeButton && _playGame && GameLoop_MatchRunning() && !_gTextInputActive &&
+        _gameStatePl >= ST_GAME_IN_PROGRESS && _gameStatePl <= ST_WAITING_ON_PLAYER &&
+        !NetplayMatch_Enabled() && !ReplayTest_Running() && !SrpResim_Armed() && !Rollback_Enabled();
+}
+
+void InputSDL_SpecialShotCompleted(void)
+{
+    s_shot = s_shotTicks = 0;
+}
+
+void InputSDL_SetThreeButton(int on)
+{
+    s_threeButton = !!on;
+    InputSDL_SpecialShotCompleted();
+    s_kbd_fire_keys &= ~KBD_FIRE_PASS;
+    s_kbd_fire = s_kbd_fire_keys != 0;
+}
+
+int InputSDL_TakeSpecialShot(void)
+{
+    if (!s_shotTicks)
+        return 0;
+    if (!threeButtonActive()) {
+        InputSDL_SpecialShotCompleted();
+        return 0;
+    }
+    --s_shotTicks;
+    return s_shot;
+}
+
+static void queueSpecialShot(int kind)
+{
+    s_shot = kind;
+    s_shotTicks = 12;
+}
+
 void InputSDL_HandleEvent(const SDL_Event *e)
 {
     switch (e->type) {
+    case SDL_TEXTINPUT:
+        if (s_rawOn) {
+            const char *t;
+            for (t = e->text.text; *t; t++)
+                raw_push((uint8_t)*t);
+        }
+        break;
     case SDL_KEYDOWN: {
         /* The CONTROLS menu is waiting for a key: this is it. */
         if (s_capture) {
@@ -690,35 +1438,31 @@ void InputSDL_HandleEvent(const SDL_Event *e)
             }
             break;
         }
-        /* Career+ three-button keys, customisable in CONTROLS and SWOS.ini.
-         * These are active only in offline live matches. */
-        if (_careerThreeButtonOption && !_gTextInputActive && _playGame &&
-            (_gameStatePl == 100 || _gameStatePl == 101 || _gameStatePl == 102)) {
-            const SDL_Scancode sc = e->key.keysym.scancode;
+        /* F6 in a menu: SWOS 2020's quick save (src/settings_menus.c takes it in MenuProc). Not in
+         * a match, nor while a text field types: there it is no request at all. */
+        if (e->key.keysym.sym == SDLK_F6 && e->key.repeat == 0 && !_gTextInputActive &&
+            !(e->key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_SHIFT | KMOD_GUI))) {
+            extern int32_t GameLoop_Active(void);
             extern int32_t NetplayMatch_Enabled(void);
-            extern int ReplayTest_Running(void);
-            if (!NetplayMatch_Enabled() && !ReplayTest_Running() &&
-                ((sc != SDL_SCANCODE_UNKNOWN && sc == s_bind[BIND_PASS]) ||
-                 (sc != SDL_SCANCODE_UNKNOWN && sc == s_bind[BIND_SHOOT]) ||
-                 (sc != SDL_SCANCODE_UNKNOWN && sc == s_bind[BIND_HIGH_SHOT]))) {
-                if (sc == s_bind[BIND_PASS]) {
-                    s_kbd_fire_keys |= KBD_FIRE_THREE_BUTTON_S;
-                    s_kbd_fire = 1;
-                    if (e->key.repeat == 0) s_fire_event = 1;
-                } else if (e->key.repeat == 0) {
-                    if (sc == s_bind[BIND_HIGH_SHOT]) {
-                        s_super_shot_pending = 12;
-                        s_instant_shot_pending = 0;
-                    } else {
-                        s_instant_shot_pending = 12;
-                        s_super_shot_pending = 0;
-                    }
-                }
+            if (!GameLoop_Active() && !NetplayMatch_Enabled())
+                s_quickSaveAt = SDL_GetTicks() | 1u;
+        }
+        /* One of the player's own keys ([input] key_*): a control, and nothing else. */
+        const SDL_Scancode sc = e->key.keysym.scancode;
+        int act = bound_action(sc);
+        if (act < 0 && sc != SDL_SCANCODE_UNKNOWN && threeButtonActive()) {
+            if (sc == s_bind[BIND_PASS]) {
+                s_kbd_fire_keys |= KBD_FIRE_PASS;
+                s_kbd_fire = 1;
+                if (!e->key.repeat) s_fire_event = 1;
+                break;
+            }
+            if (sc == s_bind[BIND_SHOOT] || sc == s_bind[BIND_HIGH_SHOT]) {
+                if (!e->key.repeat)
+                    queueSpecialShot(sc == s_bind[BIND_HIGH_SHOT] ? 2 : 1);
                 break;
             }
         }
-        /* One of the player's own keys ([input] key_*): a control, and nothing else. */
-        int act = bound_action(e->key.keysym.scancode);
         if (act >= 0) {
             static const SDL_Keycode arrow[4] = { SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT };
             if (act == BIND_FIRE) {
@@ -770,8 +1514,8 @@ void InputSDL_HandleEvent(const SDL_Event *e)
         extern int32_t NetplayMatch_Enabled(void);
         extern void    NetplayMatch_RequestLeave(void);
         int in_match = NetplayMatch_Enabled();
-        if (in_match && e->key.keysym.sym == SDLK_ESCAPE && e->key.repeat == 0)
-            NetplayMatch_RequestLeave();
+        if (in_match && (e->key.keysym.sym == SDLK_ESCAPE || e->key.keysym.sym == SDLK_AC_BACK) && e->key.repeat == 0)
+            esc_press_in_match(NetplayMatch_RequestLeave);
         if (is_alt || in_match) {
             /* Don't record keyState, don't push to keyBuffer, don't
              * trigger fire. Alt is purely a modifier on this build. */
@@ -849,23 +1593,10 @@ void InputSDL_HandleEvent(const SDL_Event *e)
         }
     } break;
     case SDL_KEYUP: {
-        /* A held PASS key must release fire even if the mode changed. */
-        if (e->key.keysym.scancode != SDL_SCANCODE_UNKNOWN &&
-            e->key.keysym.scancode == s_bind[BIND_PASS] &&
-            (s_kbd_fire_keys & KBD_FIRE_THREE_BUTTON_S)) {
-            s_kbd_fire_keys &= ~KBD_FIRE_THREE_BUTTON_S;
+        if (e->key.keysym.scancode == s_bind[BIND_PASS] && (s_kbd_fire_keys & KBD_FIRE_PASS)) {
+            s_kbd_fire_keys &= ~KBD_FIRE_PASS;
             s_kbd_fire = s_kbd_fire_keys != 0;
             break;
-        }
-        if (_careerThreeButtonOption && !_gTextInputActive && _playGame &&
-            (_gameStatePl == 100 || _gameStatePl == 101 || _gameStatePl == 102)) {
-            SDL_Scancode sc = e->key.keysym.scancode;
-            extern int32_t NetplayMatch_Enabled(void);
-            extern int ReplayTest_Running(void);
-            if (!NetplayMatch_Enabled() && !ReplayTest_Running() &&
-                ((sc != SDL_SCANCODE_UNKNOWN && sc == s_bind[BIND_SHOOT]) ||
-                 (sc != SDL_SCANCODE_UNKNOWN && sc == s_bind[BIND_HIGH_SHOT])))
-                break;
         }
         /* Released whatever a text field says: a key held when one opened must not stick. */
         {
@@ -906,34 +1637,47 @@ void InputSDL_HandleEvent(const SDL_Event *e)
         }
     } break;
     case SDL_CONTROLLERBUTTONDOWN: {
-        /* Optional instant shot on the LEFT SHOULDER of player 1's pad.
-         * In a two-human match with one pad, that pad belongs to player 2,
-         * so never accidentally shoot on behalf of the keyboard player. */
-        if (e->cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER &&
-            _playGame &&
-            (_gameStatePl == 100 || _gameStatePl == 101 || _gameStatePl == 102) &&
-            s_player_dev[0] >= 0 && s_dev_gc[s_player_dev[0]] &&
-            s_dev_id[s_player_dev[0]] == e->cbutton.which) {
-            extern uint16_t _twoPlayers;
-            extern int32_t NetplayMatch_Enabled(void);
-            extern int ReplayTest_Running(void);
-            int split = _twoPlayers != 0 && s_player_dev[1] < 0;
-            if (!split && !NetplayMatch_Enabled() && !ReplayTest_Running())
-                if (_careerThreeButtonOption)
-                    s_instant_shot_pending = 12;
-        }
         /* A fire button of player 1's pad went down (the latch and the recording's
          * evidence, above). A plain joystick has no such event and is read as before. */
-        if ((e->cbutton.button == SDL_CONTROLLER_BUTTON_A || e->cbutton.button == SDL_CONTROLLER_BUTTON_B) &&
+        const int bd = dev_find_instance(e->cbutton.which);
+        const int bFire = bd >= 0 ? cfg_button(bd, dev_cfg(bd), 0) : -1;
+        const int bBench = bd >= 0 ? cfg_button(bd, dev_cfg(bd), 1) : -1;
+        if ((bFire >= 0 ? e->cbutton.button == bFire
+                        : e->cbutton.button == SDL_CONTROLLER_BUTTON_A || e->cbutton.button == SDL_CONTROLLER_BUTTON_B) &&
             s_player_dev[0] >= 0 && s_dev_gc[s_player_dev[0]] && s_dev_id[s_player_dev[0]] == e->cbutton.which)
             s_fire_event_pad = 1;
+        /* A button CONTROLLER SETUP made FIRE or BENCH is that and nothing else (Y is no replay). */
+        if (e->cbutton.button == bFire || e->cbutton.button == bBench)
+            break;
+        if (e->cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER &&
+            bd >= 0 && InputSDL_PlayerHasPad(0) && bd == s_player_dev[0] &&
+            threeButtonActive()) {
+            queueSpecialShot(1);
+            break;
+        }
         /* Only for pads SDL has a GameController mapping for — the raw
          * joystick path has no button NAMES to key off, so a gameport adapter
          * keeps working exactly as before and simply has no key buttons. */
         size_t i;
         for (i = 0; i < sizeof k_padKeys / sizeof k_padKeys[0]; i++) {
             if (e->cbutton.button == k_padKeys[i].button) {
-                push_amiga_key(k_padKeys[i].akey);
+                pad_key_button((int)i, e->cbutton.which, 1, SDL_GetTicks());
+                break;
+            }
+        }
+        break;
+    }
+    case SDL_CONTROLLERBUTTONUP: {
+        size_t i;
+        {
+            const int bd = dev_find_instance(e->cbutton.which);
+            if (bd >= 0 && (e->cbutton.button == cfg_button(bd, dev_cfg(bd), 0) ||
+                            e->cbutton.button == cfg_button(bd, dev_cfg(bd), 1)))
+                break;
+        }
+        for (i = 0; i < sizeof k_padKeys / sizeof k_padKeys[0]; i++) {
+            if (e->cbutton.button == k_padKeys[i].button) {
+                pad_key_button((int)i, e->cbutton.which, 0, SDL_GetTicks());
                 break;
             }
         }
@@ -962,7 +1706,9 @@ void InputSDL_HandleEvent(const SDL_Event *e)
                 name ? name : "(null)",
                 is_gc ? "GameController" : "raw Joystick",
                 slot >= 0 ? (slot == 0 ? "→ P1" : "→ P2")
-                          : slot == -1 ? "(not played: both players have a pad)" : "(not opened)");
+                          : slot == -1 ? (s_autoDetect ? "(not played: both players have a pad)"
+                                                       : "(waits: AUTO-DETECT JOYPADS is off -- SELECT JOYPAD)")
+                                       : "(not opened)");
     } break;
     case SDL_JOYDEVICEREMOVED: {
         int d = dev_find_instance(e->jdevice.which);
@@ -981,14 +1727,11 @@ void InputSDL_HandleEvent(const SDL_Event *e)
                     continue;
                 s_player_dev[p] = -1;
                 fprintf(stderr, "[input] pad P%d removed\n", p + 1);
-                /* A device that was waiting steps in. */
-                for (int w = 0; w < INPUTSDL_MAX_DEVICES; ++w) {
-                    if (dev_open(w) && s_player_dev[0] != w && s_player_dev[1] != w) {
-                        s_player_dev[p] = w;
-                        fprintf(stderr, "[input] P%d is now \"%s\"\n", p + 1, dev_name(w));
-                        break;
-                    }
-                }
+                /* A device that was waiting steps in: the one this player chose, or (AUTO,
+                 * with AUTO-DETECT JOYPADS on) the first. */
+                fill_player(p, s_autoDetect);
+                if (s_player_dev[p] >= 0)
+                    fprintf(stderr, "[input] P%d is now \"%s\"\n", p + 1, dev_name(s_player_dev[p]));
             }
         }
     } break;
@@ -1029,6 +1772,55 @@ static void stick_directions(int32_t ax, int32_t ay, int *_up, int *_down, int *
     if (vertical)   { if (ay < 0) *_up  = 1; else *_down = 1; }
 }
 
+#ifdef SWOS_WASM_BUILD
+/* The web: a pad the browser does not map as a "standard" gamepad, read from the Gamepad API
+ * itself. SDL's web port gives every pad its default Standard Gamepad mapping (directions on
+ * axes 0/1 and buttons 12-15, fire on 0/1) and has no hats; a retro stick or a converter is
+ * rarely standard, and Chrome on a Mac gives its POV hat as one more AXIS -- resting at 3.29, the
+ * eight directions -1 .. 1 in steps of 2/7 -- which nothing read: the directions did not
+ * register (tester report, 2026-11-08: two Macs, Chrome and Firefox, a USB stick and a Zipstick
+ * on a converter, both fine on the desktop build). So for such a pad: axes 0/1 as a stick, any
+ * axis seen resting above 1 as a hat, any button as fire -- the desktop's raw path. Bits: 1 up,
+ * 2 down, 4 left, 8 right, 16 fire; -1 a standard pad (SDL's mapping is right), -2 not found. */
+EM_JS(int, web_pad_bits, (const char *idPtr, int nth), {
+    const id = UTF8ToString(idPtr);
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const hats = (Module.swosHatAxes = Module.swosHatAxes || {});
+    let k = 0;
+    for (let i = 0; i < pads.length; i++) {
+        const p = pads[i];
+        /* (SDL's name for it: the id trimmed, its spaces single -- SDL_CreateJoystickName) */
+        if (!p || !p.connected || p.id.trim().replace(/ +/g, ' ') !== id || k++ !== nth) continue;
+        if (p.mapping === 'standard') return -1;
+        let bits = 0;
+        const key = p.index + ':' + p.id;
+        const seen = (hats[key] = hats[key] || {});
+        if (!seen.logged) {
+            seen.logged = 1;
+            console.log('[input] web pad "' + p.id + '": mapping "' + p.mapping + '", ' + p.axes.length +
+                        ' axes, ' + p.buttons.length + ' buttons: read from the Gamepad API');
+        }
+        for (let a = 0; a < p.axes.length; a++) {
+            const v = p.axes[a];
+            if (v > 1.05) { seen[a] = 1; continue; }        /* a hat at rest */
+            if (seen[a]) {                                   /* a hat: eight steps of 2/7 */
+                const step = Math.round((v + 1) * 3.5);
+                if (step < 0 || step > 7) continue;
+                const dirs = [1, 1 | 8, 8, 2 | 8, 2, 2 | 4, 4, 1 | 4];
+                bits |= dirs[step];
+            } else if (a < 2) {                              /* the stick */
+                if (v < -0.5) bits |= a ? 1 : 4;
+                if (v > 0.5) bits |= a ? 2 : 8;
+            }
+        }
+        for (let b = 0; b < p.buttons.length; b++)
+            if (p.buttons[b] && p.buttons[b].pressed) { bits |= 16; break; }
+        return bits;
+    }
+    return -2;
+});
+#endif
+
 /* Read directional + fire state from a single pad slot. `skip` (may be
  * NULL) is set when the conventional "second button" (B on mapped pads,
  * button index 1 on raw joysticks) is pressed — used for the SDL-only
@@ -1045,16 +1837,44 @@ static void read_device_state(int d,
     pad = s_dev_gc[d];
     raw = s_dev_raw[d];
 
+#ifdef SWOS_WASM_BUILD
+    {   /* (a pad the browser does not map as standard: read as the desktop reads a raw one) */
+        /* (the JOYSTICK's name, the browser's id: a controller's is "Standard Gamepad" for all) */
+        SDL_Joystick *j = pad ? SDL_GameControllerGetJoystick(pad) : raw;
+        const char *nm = j ? SDL_JoystickName(j) : NULL;
+        int nth = 0, bits;
+        for (int e = 0; e < d && nm; e++) {
+            SDL_Joystick *je = s_dev_gc[e] ? SDL_GameControllerGetJoystick(s_dev_gc[e]) : s_dev_raw[e];
+            const char *ne = je ? SDL_JoystickName(je) : NULL;
+            if (ne && strcmp(ne, nm) == 0)
+                nth++;
+        }
+        bits = nm ? web_pad_bits(nm, nth) : -2;
+        if (bits >= 0) {
+            if (bits & 1)  *_up = 1;
+            if (bits & 2)  *_down = 1;
+            if (bits & 4)  *left = 1;
+            if (bits & 8)  *right = 1;
+            if (bits & 16) *_fire = 1;
+            return;
+        }
+    }
+#endif
+
+    const PadConfig *cfg = dev_cfg(d);      /* CONTROLLER SETUP's, NULL: as it always was */
+    const int cfgFire = cfg_button(d, cfg, 0), cfgBench = cfg_button(d, cfg, 1);
+
     if (pad) {
         Sint16 ax = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
         Sint16 ay = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
-        stick_directions(ax, ay, _up, _down, left, right);
+        stick_directions_cut(cfg, ax, ay, _up, _down, left, right);
         if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP))    *_up    = 1;
         if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN))  *_down  = 1;
         if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT))  *left  = 1;
         if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) *right = 1;
-        if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) ||
-            SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B))
+        if (cfgFire >= 0 ? dev_button(d, cfgFire)
+                         : SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A) ||
+                           SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B))
             *_fire = 1;
         if (skip && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B))
             *skip = 1;
@@ -1075,7 +1895,7 @@ static void read_device_state(int d,
         if (naxes >= 2) {
             Sint16 ax = SDL_JoystickGetAxis(raw, 0);
             Sint16 ay = SDL_JoystickGetAxis(raw, 1);
-            stick_directions(ax, ay, _up, _down, left, right);
+            stick_directions_cut(cfg, ax, ay, _up, _down, left, right);
         }
         if (nhats >= 1) {
             Uint8 h = SDL_JoystickGetHat(raw, 0);
@@ -1084,8 +1904,9 @@ static void read_device_state(int d,
             if (h & SDL_HAT_LEFT)  *left  = 1;
             if (h & SDL_HAT_RIGHT) *right = 1;
         }
+        /* FIRE: CONTROLLER SETUP's button, else any but the BENCH one. */
         for (int b = 0; b < nbtns; ++b) {
-            if (SDL_JoystickGetButton(raw, b)) {
+            if ((cfgFire >= 0 ? b == cfgFire : b != cfgBench) && SDL_JoystickGetButton(raw, b)) {
                 *_fire = 1;
                 break;
             }
@@ -1195,12 +2016,12 @@ void InputSDL_ClearKeyState(void)
     s_kbd_up = s_kbd_down = s_kbd_left = s_kbd_right = s_kbd_fire = 0;
     s_kbd_held_up = s_kbd_held_down = s_kbd_held_left = s_kbd_held_right = 0;
     s_kbd_fire_keys = 0;
-    s_instant_shot_pending = 0;
-    s_super_shot_pending = 0;
+    InputSDL_SpecialShotCompleted();
     s_fire_event = s_fire_event_pad = 0;    /* a press from before is not one in what comes next */
     s_kbd_skip = 0;
     s_touch_dirs = s_touch_fire = 0;
     _pauseSkipRequested = 0;
+    s_pad_hold.entry = -1;                  /* its release must not pause what comes next */
     /* joy0Dat / joy1Dat / ciaa_pra are recomputed each frame by
      * InputSDL_PostFrame from the cleared s_kbd_* + read_pad_state, so
      * they don't need explicit clearing here. */
@@ -1238,8 +2059,15 @@ static int pad_secondary(int slot)
     if (slot < 0 || slot >= INPUTSDL_NUM_PADS)
         return 0;
     d = s_player_dev[slot];
-    if (d >= 0 && s_dev_gc[d])
-        return SDL_GameControllerGetButton(s_dev_gc[d], SDL_CONTROLLER_BUTTON_X) ? 1 : 0;
+    if (s_callBench == INPUTSDL_BENCH_TAPS)     /* CALL BENCH: TRIPLE TAP ONLY -- the button is no bench */
+        return 0;
+    if (d >= 0 && dev_open(d)) {
+        const int b = cfg_button(d, dev_cfg(d), 1);     /* CONTROLLER SETUP's BENCH */
+        if (b >= 0)
+            return dev_button(d, b);
+        if (s_dev_gc[d])
+            return SDL_GameControllerGetButton(s_dev_gc[d], SDL_CONTROLLER_BUTTON_X) ? 1 : 0;
+    }
     return 0;
 }
 
@@ -1255,6 +2083,11 @@ static int pad_secondary(int slot)
  * and S all LEAVE the match loop, which a session cannot roll back
  * (docs/NETPLAY.md section 5). Sending no key at all is how they stay out,
  * rather than filtering them one at a time and missing one. */
+static int s_chatPadOff;                        /* [chat] controller_off */
+void InputSDL_SetChatPadOff(int on) { s_chatPadOff = on != 0; }
+int  InputSDL_ChatPadOff(void)      { return s_chatPadOff; }
+extern int32_t MatchChat_Typing(void);          /* match_chat.c */
+
 uint8_t InputSDL_LocalMatchControls(void)
 {
     int up = s_kbd_up, down = s_kbd_down, left = s_kbd_left, right = s_kbd_right;
@@ -1262,7 +2095,11 @@ uint8_t InputSDL_LocalMatchControls(void)
     uint8_t bits = 0;
 
     touch_controls(&up, &down, &left, &right, &fire);
-    read_pad_state(0, &up, &down, &left, &right, &fire, &skip);
+    /* DISABLE CONTROLLER IN CHAT (SWOS 2020's MULTIPLAYER SETTINGS): while this player types a
+     * line, the pad steers nobody -- what it sends is an input like any other, so this is the
+     * player's own choice and the other game plays what arrives. */
+    if (!(s_chatPadOff && MatchChat_Typing()))
+        read_pad_state(0, &up, &down, &left, &right, &fire, &skip);
     fire = sample_fire(fire, 1, &s_fire_evidence);
 
     if (up)    bits |= 0x01;    /* MATCH_UP    */
@@ -1290,6 +2127,9 @@ static void selftest_key(SDL_Scancode sc, SDL_Keycode sym, int down)
     e.key.keysym.sym = sym;
     InputSDL_HandleEvent(&e);
 }
+
+static int32_t s_selftestLeaves;
+static void selftest_leave(void) { s_selftestLeaves++; }
 
 int InputSDL_SelfTest(void)
 {
@@ -1380,6 +2220,76 @@ int InputSDL_SelfTest(void)
     selftest_key(SDL_SCANCODE_W, SDLK_w, 0);
     _gTextInputActive = 0;
 
+    /* Pad keys, on a made-up clock: Start taps pause on release, a hold sends ESC
+     * once and no pause, R3 sends nothing but its hold. */
+#define PAD(btn, down, now) do { size_t k_; for (k_ = 0; k_ < sizeof k_padKeys / sizeof k_padKeys[0]; k_++) \
+        if (k_padKeys[k_].button == (btn)) pad_key_button((int)k_, 0, (down), (now)); } while (0)
+    InputSDL_ClearKeyState();
+    PAD(SDL_CONTROLLER_BUTTON_START, 1, 1000);
+    EXPECT(_keyCount == 0, "Start: nothing while it is down");
+    PAD(SDL_CONTROLLER_BUTTON_START, 0, 1150);
+    EXPECT(_keyCount == 1 && _keyBuffer[0] == 0x19, "Start tapped: P on release");
+    InputSDL_ClearKeyState();
+    PAD(SDL_CONTROLLER_BUTTON_START, 1, 2000);
+    pad_hold_poll(2000 + PAD_HOLD_MS - 1);
+    EXPECT(_keyCount == 0, "Start: no ESC before the hold time");
+    pad_hold_poll(2000 + PAD_HOLD_MS);
+    pad_hold_poll(2000 + PAD_HOLD_MS + 500);
+    EXPECT(_keyCount == 1 && _keyBuffer[0] == 0x45, "Start held: ESC, once");
+    PAD(SDL_CONTROLLER_BUTTON_START, 0, 4000);
+    EXPECT(_keyCount == 1, "Start held: no P on release");
+    InputSDL_ClearKeyState();
+    PAD(SDL_CONTROLLER_BUTTON_RIGHTSTICK, 1, 5000);
+    PAD(SDL_CONTROLLER_BUTTON_RIGHTSTICK, 0, 5100);
+    EXPECT(_keyCount == 0, "R3 tapped: nothing");
+    PAD(SDL_CONTROLLER_BUTTON_RIGHTSTICK, 1, 6000);
+    PAD(SDL_CONTROLLER_BUTTON_RIGHTSTICK, 0, 6000 + PAD_HOLD_MS);
+    EXPECT(_keyCount == 1 && _keyBuffer[0] == 0x45, "R3 held: ESC, even when the release is the first look");
+    InputSDL_ClearKeyState();
+    PAD(SDL_CONTROLLER_BUTTON_Y, 1, 7000);
+    EXPECT(_keyCount == 1 && _keyBuffer[0] == 0x13, "Y: R on the press, as before");
+    InputSDL_ClearKeyState();
+#undef PAD
+
+    /* SWOS 2020's CONTROLLER SETUP: [input] pad_config reads back as written, nonsense is
+     * dropped, and the stick's cut-offs scale each half of an axis. */
+    {
+        char out[512];
+        int up, down, left, right;
+        PadConfig c;
+        EXPECT(InputSDL_ParsePadConfig("03000000c82d00000090000011010000:1:3:40:0:0:30;zz:1;"
+                                       "0300000000f000000300000000010000:-1:-1:0:0:0:0") == 1,
+               "pad_config: one real config read, the default one and the nonsense dropped");
+        InputSDL_FormatPadConfig(out, sizeof out);
+        EXPECT(strcmp(out, "03000000c82d00000090000011010000:1:3:40:0:0:30") == 0, "pad_config written back as read");
+        memset(&c, 0, sizeof c);
+        up = down = left = right = 0;
+        stick_directions_cut(&c, s_stickDeadzone + 400, 0, &up, &down, &left, &right);
+        EXPECT(right && !left && !up && !down, "no cut-offs: just past the dead zone is RIGHT, as before");
+        c.cut[0] = (uint8_t)(InputSDL_StickDeadzonePercent() + 20);
+        up = down = left = right = 0;
+        stick_directions_cut(&c, s_stickDeadzone + 400, 0, &up, &down, &left, &right);
+        EXPECT(!right, "a higher x+ cut-off: the same push is not RIGHT yet");
+        up = down = left = right = 0;
+        stick_directions_cut(&c, -(s_stickDeadzone + 400), 0, &up, &down, &left, &right);
+        EXPECT(left, "... and x- still has the dead zone: LEFT");
+        InputSDL_ParsePadConfig("");
+    }
+    /* ESC PRESSING TO QUIT: 1 leaves at once, 3 on the third press within two seconds. */
+    {
+        s_selftestLeaves = 0;
+        InputSDL_SetEscPresses(1);
+        esc_press_in_match(selftest_leave);
+        EXPECT(s_selftestLeaves == 1, "esc_presses 1: one ESC leaves");
+        InputSDL_SetEscPresses(3);
+        esc_press_in_match(selftest_leave);
+        esc_press_in_match(selftest_leave);
+        EXPECT(s_selftestLeaves == 1, "esc_presses 3: two ESCs do not");
+        esc_press_in_match(selftest_leave);
+        EXPECT(s_selftestLeaves == 2, "esc_presses 3: the third does");
+        InputSDL_SetEscPresses(1);
+    }
+
     for (i = 0; i < BIND_COUNT; i++)
         InputSDL_SetKeyBinding(i, "");
     InputSDL_ClearKeyState();
@@ -1390,10 +2300,25 @@ int InputSDL_SelfTest(void)
 
 void InputSDL_PostFrame(void)
 {
+    if ((s_shotTicks || (s_kbd_fire_keys & KBD_FIRE_PASS)) && !threeButtonActive()) {
+        InputSDL_SpecialShotCompleted();
+        s_kbd_fire_keys &= ~KBD_FIRE_PASS;
+        s_kbd_fire = s_kbd_fire_keys != 0;
+    }
+    /* CALL BENCH: 2ND FIRE BUTTON ONLY -- BenchCheckControls (bench_subs.c) counts no taps. Only
+     * where there is a second button (the DOS style: the Amiga has none, so its bench stays the
+     * taps), and only in a match of this machine's alone: off for a rig's and a netplay match,
+     * both of which return below before it is set (two games must agree on what a tap does,
+     * and a recording is played by the rules it was made with). */
+    { extern int32_t _gBenchTapsOff; _gBenchTapsOff = 0; }
     /* The replay rig writes joy0Dat/joy1Dat/ciaa_pra itself, once per game
      * loop iteration. Recomputing them from the real keyboard/pads here
      * would overwrite the recorded stick with whatever is physically held. */
     { extern int ReplayTest_Running(void); if (ReplayTest_Running()) return; }
+
+    /* A held Start/R3 sends its key here, on the same terms as a press always has:
+     * k_padKeys pushes from HandleEvent, which a netplay match does not stop. */
+    pad_hold_poll(SDL_GetTicks());
 
     /* A netplay match owns them for the same reason, and more sharply: they
      * carry the SYNCED inputs of both players, so recomputing them from this
@@ -1403,7 +2328,7 @@ void InputSDL_PostFrame(void)
 
     s_frames++;
     virtual_pads_frame();
-    if (s_intro_claim)
+    if (s_intro_claim && pref_auto(0))      /* (not when player 1 chose a control on CONTROLS) */
         intro_claim_poll();
 
     /* A KEYBOARD AND ONE PAD ARE TWO PLAYERS. Player 1 is the keyboard plus the first
@@ -1415,10 +2340,7 @@ void InputSDL_PostFrame(void)
      * and player 2 has no pad of their own, player 1's pad goes to player 2 and the
      * keyboard stays player 1's. One player, two pads, or an online match (which reads
      * InputSDL_LocalMatchControls, not these registers): as before. */
-    extern uint16_t _twoPlayers;
-    extern int32_t  NetplayMatch_Enabled(void);
-    int split = _twoPlayers != 0 && s_player_dev[1] < 0 && s_player_dev[0] >= 0 &&
-                !NetplayMatch_Enabled();
+    int split = split_pad();
     {
         static int s_wasSplit;
         if (split != s_wasSplit) {
@@ -1437,8 +2359,20 @@ void InputSDL_PostFrame(void)
     int p1_fire = s_kbd_fire;
     int skip = s_kbd_skip;
     touch_controls(&p1_up, &p1_down, &p1_left, &p1_right, &p1_fire);
-    if (!split)
-        read_pad_state(0, &p1_up, &p1_down, &p1_left, &p1_right, &p1_fire, &skip);
+    {
+        const int keys = p1_up | p1_down | p1_left | p1_right | p1_fire;
+        int pu = 0, pd = 0, pl = 0, pr = 0, pf = 0;
+        if (!split)
+            read_pad_state(0, &pu, &pd, &pl, &pr, &pf, &skip);
+        const int pad = pu | pd | pl | pr | pf;
+        if (keys != pad)                        /* (the one pressed alone: the one in use) */
+            s_p1KeyboardLast = keys;
+        p1_up |= pu;
+        p1_down |= pd;
+        p1_left |= pl;
+        p1_right |= pr;
+        p1_fire |= pf;
+    }
     p1_fire = sample_fire(p1_fire, !split, NULL);       /* a press is never lost between two reads */
 
     /* Player 2: pad 1 only -- or pad 0 when split. No keyboard binding — keeping the
@@ -1468,6 +2402,7 @@ void InputSDL_PostFrame(void)
     /* DOS's second button in LOCAL play. The registers above carry what the Amiga has;
      * this is the one input DOS has and the Amiga does not, so it goes in beside them
      * rather than through them, and only in DOS mode. */
+    { extern int32_t _gBenchTapsOff; _gBenchTapsOff = _gDosGameplay && s_callBench == INPUTSDL_BENCH_BUTTON; }
     if (_gDosGameplay) {
         MatchStep_LocalBenchButton(1, split ? 0 : pad_secondary(0));
         MatchStep_LocalBenchButton(2, pad_secondary(split ? 0 : 1));

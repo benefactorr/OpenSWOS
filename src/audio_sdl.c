@@ -54,6 +54,9 @@ static int          sfx_act(void)        { return s_sfx_use_second ? s_sfx_activ
 static void         sfx_set_act(int v)   { if (s_sfx_use_second) s_sfx_active = v; else s_player_active = v; }
 
 static int               s_master_volume;   /* 0..64, scales final output */
+static int               s_fade_ticks, s_fade_left, s_fade_from;   /* AudioSDL_FadeOutSong */
+static void fade_finish_locked(void);
+static void stop_song_locked(void);
 /* Down-mix flag. The Amiga's 4 channels are hard-panned (1,2 → left ;
  * 0,3 → right) by Paula and so by the cyxx player ported to rjp1.c. On
  * speakers without strong stereo separation that hard pan sounds
@@ -97,6 +100,12 @@ typedef struct {
 } PcmVoice;
 static PcmVoice s_pcm[PCM_VOICES];
 static int      s_pcm_master = 64;   /* 0..64: the match's fades */
+/* The player's volumes ([audio] music_volume ... effects_volume; SWOS 2020's AUDIO OPTIONS), 0..256:
+ * the music (the Amiga's songs, the PC menu music and title song), the crowd chants, the
+ * commentary and the ball and whistle (the effects). The Amiga's match sounds: its chant channel
+ * (2) the chants', the rest -- the crowd with the effects -- the effects'. */
+static int      s_vol_music = 256, s_vol_chants = 256, s_vol_comment = 256, s_vol_fx = 256;
+static int      s_player_song;       /* the shared player holds a song (else the match's sounds) */
 
 /* Queue-mode mix scratch. Sized for one game tick (50 Hz) of stereo S8
  * at the highest plausible negotiated rate (48 kHz) plus a little slack. */
@@ -272,6 +281,13 @@ void AudioSDL_Tick(void)
         return;
     }
 
+    if (s_fade_left > 0) {
+        s_fade_left--;
+        s_master_volume = s_fade_from * s_fade_left / s_fade_ticks;
+        if (s_fade_left == 0)
+            stop_song_locked();
+    }
+
     if (s_player_active) {
         SDL_memset(s_mix_buf, 0, (size_t)samples_per_tick);
         RJP1_HandleTick(&s_player);
@@ -342,7 +358,8 @@ void AudioSDL_Tick(void)
                 continue;
             /* PCM_HEADROOM/256: the PC game's crowd, a chant, a line of commentary and
              * an effect or two sound together, each recorded near full scale. */
-            const int gain = pv->volume * s_pcm_master * s_master_volume * PCM_HEADROOM / 256;
+            const int kind = vi == 1 ? s_vol_chants : vi == 2 ? s_vol_comment : vi >= 4 ? s_vol_fx : 256;
+            const int gain = pv->volume * s_pcm_master * s_master_volume * PCM_HEADROOM / 256 * kind / 256;
             for (int i = 0; i < frames; i++) {
                 uint32_t at = (uint32_t)(pv->pos >> 16);
                 if (at >= pv->len) {
@@ -377,10 +394,10 @@ void AudioSDL_Tick(void)
 
     /* The PC menu music, under the same master volume: the menus fade it in and out. */
     if (DosMusic_Playing())
-        DosMusic_Render(s_out_buf, samples_per_tick / 2, freq, PC_MUSIC_GAIN * s_master_volume / 64);
+        DosMusic_Render(s_out_buf, samples_per_tick / 2, freq, PC_MUSIC_GAIN * s_master_volume / 64 * s_vol_music / 256);
     /* A streamed track (the PC CD's title song), under the master volume too. */
     if (MusicStream_Playing())
-        MusicStream_Render(s_out_buf, samples_per_tick / 2, freq, 256 * s_master_volume / 64);
+        MusicStream_Render(s_out_buf, samples_per_tick / 2, freq, 256 * s_master_volume / 64 * s_vol_music / 256);
 
     /* Mix the one-shot WAV overlay (coin-insert jingle etc.) on top at full level,
      * independent of the music's master volume. */
@@ -434,6 +451,30 @@ static int audio_pump_thread(void *unused)
  * the caller has loaded into one of the big BSS banks (menuSongData /
  * menuInsBank etc.). The player references them by pointer — don't
  * free or move them while a song is active. */
+/* The players' channels at the volumes chosen: a song all at the music's; the match's sounds the
+ * chant channel at the chants', the others at the effects'. With s_mtx held. */
+static void apply_player_gains_locked(void)
+{
+    for (int c = 0; c < RJP1_NUM_CHANNELS; c++) {
+        s_player.channel_gain[c] = s_player_song ? s_vol_music : c == 2 ? s_vol_chants : s_vol_fx;
+        s_sfx_player.channel_gain[c] = c == 2 ? s_vol_chants : s_vol_fx;
+    }
+}
+
+/* The player's volumes, each 0..100 (SWOS.ini [audio] *_volume). */
+void AudioSDL_SetKindVolumes(int music, int chants, int commentary, int effects)
+{
+#define PCT(v) ((v) < 0 ? 0 : (v) > 100 ? 256 : (v) * 256 / 100)
+    SDL_LockMutex(s_mtx);
+    s_vol_music = PCT(music);
+    s_vol_chants = PCT(chants);
+    s_vol_comment = PCT(commentary);
+    s_vol_fx = PCT(effects);
+    apply_player_gains_locked();
+    SDL_UnlockMutex(s_mtx);
+#undef PCT
+}
+
 int AudioSDL_StartSong(const uint8_t *song_data, int song_size,
                        const uint8_t *ins_data,  int ins_size,
                        int subsong)
@@ -443,6 +484,7 @@ int AudioSDL_StartSong(const uint8_t *song_data, int song_size,
     return 0;
 #endif
     SDL_LockMutex(s_mtx);
+    fade_finish_locked();
     DosMusic_Stop();
     MusicStream_Stop();
 
@@ -465,6 +507,8 @@ int AudioSDL_StartSong(const uint8_t *song_data, int song_size,
     if (subsong < 0) subsong = 0;
     RJP1_StartSong(&s_player, (uint8_t)subsong);
     s_player_active = 1;
+    s_player_song = 1;
+    apply_player_gains_locked();
     s_loop_subsong  = (uint8_t)subsong;  /* remembered so a looping song can restart */
     s_loop_song     = 0;                 /* off by default; caller opts in via AudioSDL_SetSongLoop */
 
@@ -477,19 +521,50 @@ int AudioSDL_StartSong(const uint8_t *song_data, int song_size,
     return 0;
 }
 
-void AudioSDL_StopSong(void)
+static void stop_song_locked(void)
 {
-#if SWOS_AUDIO_DISABLED
-    return;
-#endif
-    SDL_LockMutex(s_mtx);
     DosMusic_Stop();
     MusicStream_Stop();
     if (s_player_active)
         RJP1_StopAll(&s_player);
     s_player_active = 0;
     s_loop_song = 0;
+}
+
+void AudioSDL_StopSong(void)
+{
+#if SWOS_AUDIO_DISABLED
+    return;
+#endif
+    SDL_LockMutex(s_mtx);
+    s_fade_left = 0;
+    stop_song_locked();
     SDL_UnlockMutex(s_mtx);
+}
+
+/* Fade the song out over `ticks` mixer ticks (50 a second), then stop it: StopMusic's
+ * fade, run by the mixer so the caller does not wait (OPTIONS -> MENU MUSIC off). */
+void AudioSDL_FadeOutSong(int ticks)
+{
+#if SWOS_AUDIO_DISABLED
+    (void)ticks;
+    return;
+#endif
+    SDL_LockMutex(s_mtx);
+    s_fade_from = s_master_volume;
+    s_fade_ticks = s_fade_left = ticks > 0 ? ticks : 1;
+    SDL_UnlockMutex(s_mtx);
+}
+
+/* Anything else that plays or sets the volume ends a fade at once: the song it was
+ * fading is stopped (never left playing at the new volume), and the fade's last tick
+ * cannot stop what is started after it (a match's effects share the player). */
+static void fade_finish_locked(void)
+{
+    if (s_fade_left > 0) {
+        s_fade_left = 0;
+        stop_song_locked();
+    }
 }
 
 /* Start sound_dos/<name>.mp3 in place of an Amiga song. Returns 0 when it is playing,
@@ -504,6 +579,7 @@ int AudioSDL_StreamStart(const char *name, int loop)
     if (!s_audio_dev || !s_mtx)
         return -1;
     SDL_LockMutex(s_mtx);
+    fade_finish_locked();
     DosMusic_Stop();
     ok = MusicStream_Start(name, loop);
     if (ok) {
@@ -519,20 +595,29 @@ int AudioSDL_StreamStart(const char *name, int loop)
 
 /* Start the PC game's menu music in place of the Amiga's menu song. Returns 0 when it
  * is playing, -1 when its files are missing (the caller starts the Amiga's). */
+int AudioSDL_PcSongStart(const char *stem, int loop);
+
 int AudioSDL_PcMusicStart(void)
+{
+    return AudioSDL_PcSongStart("menu", 1);
+}
+
+/* sound_dos/<stem>.xmi on the emulated chip ("menu" repeats; "title" once, the intro's). */
+int AudioSDL_PcSongStart(const char *stem, int loop)
 {
 #if SWOS_AUDIO_DISABLED
     return -1;
 #endif
-    if (!s_audio_dev || !s_mtx || !DosMusic_Load())
+    if (!s_audio_dev || !s_mtx || !DosMusic_Load() || !DosMusic_LoadSong(stem))
         return -1;
     SDL_LockMutex(s_mtx);
+    fade_finish_locked();
     if (s_player_active)
         RJP1_StopAll(&s_player);
     s_player_active = 0;
     s_loop_song = 0;
     MusicStream_Stop();
-    DosMusic_Start();
+    DosMusic_StartSong(stem, loop);
     SDL_ClearQueuedAudio(s_audio_dev);
     SDL_UnlockMutex(s_mtx);
     return DosMusic_Playing() ? 0 : -1;
@@ -741,12 +826,17 @@ int AudioSDL_LoadSfxBank(const uint8_t *song_data, int song_size,
     return 0;
 #endif
     SDL_LockMutex(s_mtx);
+    fade_finish_locked();
 
     if (!s_sfx_use_second)
         MusicStream_Stop();
     if (!s_sfx_use_second)
         DosMusic_Stop();        /* a match's sounds take the menus' music away, as on the Amiga */
     int ok = RJP1_Load(sfx_tgt(), song_data, song_size, ins_data, ins_size);
+    if (ok && !s_sfx_use_second)
+        s_player_song = 0;
+    if (ok)
+        apply_player_gains_locked();
     if (!ok) {
         fprintf(stderr, "[audio] SFX RJP1_Load failed (song_size=%d ins_size=%d)\n",
                 song_size, ins_size);
@@ -860,6 +950,11 @@ void AudioSDL_SetMasterVolume(int vol_0_64)
 {
     if (vol_0_64 < 0) vol_0_64 = 0;
     if (vol_0_64 > 64) vol_0_64 = 64;
+    if (s_fade_left > 0 && s_mtx) {
+        SDL_LockMutex(s_mtx);
+        fade_finish_locked();
+        SDL_UnlockMutex(s_mtx);
+    }
     /* int write is atomic enough for a volume gate — no need to lock. */
     s_master_volume = vol_0_64;
 }

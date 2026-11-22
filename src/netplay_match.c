@@ -11,6 +11,7 @@
 
 #include <SDL.h>        /* SDL_GetTicks, SDL_Delay */
 
+#include "mod_hooks.h"    /* the mods' hooks */
 #include "netplay_match.h"
 #include "audio_sfx_filter.h"
 #include "dos_gameplay.h"   /* DosGameplay_TargetFps: the match's frame rate */
@@ -23,6 +24,7 @@
 #include "match_prediction.h"   /* both players' PRED and SEEN, after the match */
 #include "netplay_ghost.h"  /* what this peer drew against what finally happened */
 #include "netplay_lobby.h"
+#include "match_chat.h"     /* chatting during the match: never match state */
 #include "p2p_link.h"
 #include "record_proto.h"
 #include "replay_v2.h"     /* the resumable recording: kick-off state, inputs, hashes */
@@ -36,7 +38,6 @@
 
 extern int      Platform_Present(void);
 extern void     Platform_DelayNextFrame(uint32_t us);
-extern void     Platform_SetCatchUpFrames(int frames);
 extern void     Platform_QuiesceTimerThread(void);
 extern void     Platform_ResumeTimerThread(void);
 extern void     _Int3TimerHandler(void);
@@ -98,6 +99,7 @@ static struct {
     uint32_t         guessedFrames;       /* frames first played on a guess */
     uint32_t         guessNotRepeat;      /* ... whose guess was not the last input known */
     uint32_t         saves, loads;
+    uint32_t         loadsBySize[8];      /* loads by frames rolled back, 7 = 7 or more (an overlay's) */
     uint32_t         unidentified;        /* checksums that met a pointer with no identity */
     int32_t          lastConfirmed;       /* p2p */
     int32_t          resultFrame;         /* live: the frame a whistle went at, until it is confirmed; -1 */
@@ -126,9 +128,6 @@ static struct {
     int32_t          slowPct;             /* live: SWOS_LIVE_SLOW_PCT, a slow clock for a test */
     int32_t          slowCount;
     int32_t          noPacing;            /* live: SWOS_LIVE_NO_PACING, to measure what pacing does */
-    /* live: the prediction balance (docs/NETPLAY_BALANCE.md) */
-    uint32_t         balanceWaits;        /* waits GGPO-X asked for */
-    int64_t          balanceUs;           /* all of them */
     int32_t          hashEvery;           /* live: SWOS_LIVE_HASH_EVERY, frames between hash lines */
     int32_t          dumpFrames[LIVE_DUMP_FRAMES_MAX];  /* live: SWOS_LIVE_DUMP_FRAME, dump the state at these */
     int32_t          dumpFrameCount;
@@ -334,9 +333,43 @@ void NetplayMatch_SetPacketKey(const uint8_t *key)
 /* A match played between two machines -- or one of those played again from its
  * recording (--srp-resim), which has to be played the same way: controls assigned
  * without the pre-match menu, no goal replay. */
+/* A line of chat to the other player, while a live match is running (match_chat.c). */
+int32_t NetplayMatch_SendChat(const char *text)
+{
+    if (s_np.mode != NETPLAY_MATCH_P2P || !s_np.live || !s_np.running || !s_np.session)
+        return -1;
+    return Netplay_Chat(s_np.session, text) == 0 ? 0 : -1;
+}
+
 int32_t NetplayMatch_IsLive(void)
 {
     return (s_np.mode == NETPLAY_MATCH_P2P && s_np.live) || s_np.mode == NETPLAY_MATCH_RESIM;
+}
+
+/* A frame GGPO re-simulates is being played (cbAdvance): the mods' match hooks are not told it
+ * (src/mod_match.c ModMatch_Quiet) -- it is played again, not for the first time. */
+static int32_t s_resimulating;
+int32_t NetplayMatch_Resimulating(void) { return s_resimulating; }
+
+/* The connection as this game sees it, for a draw-only overlay (ModApi_NetStats, mod_extras.c):
+ * the ping and jitter logStats samples once a second, GGPO's timesync both ways, the rollbacks and
+ * holds. Read only; 0 when no live match is on. */
+int32_t NetplayMatch_Stats(int32_t *pingMs, int32_t *jitterMs, int32_t *localX10, int32_t *remoteX10,
+                           int32_t *delay, uint32_t *rollbacks, uint32_t *holds, uint32_t *frame,
+                           uint32_t bySize[8])
+{
+    if (!(s_np.mode == NETPLAY_MATCH_P2P && s_np.live) || !s_np.session || !s_np.running)
+        return 0;
+    *pingMs = s_np.statLastPing;
+    *jitterMs = s_np.statN > 1 ? (int32_t)(s_np.statJitSum / (s_np.statN - 1))
+              : s_np.statAllN > 1 ? (int32_t)(s_np.statAllJitSum / (s_np.statAllN - 1)) : 0;
+    Netplay_FramesBehind(s_np.session, 3 - s_np.player, localX10, remoteX10);
+    *delay = s_np.delay;
+    *rollbacks = s_np.loads;
+    *holds = s_np.predictionWaits;
+    *frame = s_np.frames;
+    memcpy(bySize, s_np.loadsBySize, sizeof s_np.loadsBySize);
+    return 1;
 }
 
 int32_t NetplayMatch_IsP2P(void)
@@ -484,23 +517,8 @@ static void checkFirstRun(int32_t frame, int32_t checksum, const uint8_t *state)
 
 /* ---- the step ---- */
 
-/* ---- the prediction balance (docs/NETPLAY_BALANCE.md) ----
- *
- * GGPO-X's own (third_party/ggpo-x, lib/ggpo/prediction_balance.h): the two peers send
- * each other their average prediction depth in the quality report, and the one predicting
- * two frames or more deeper gets NETPLAY_EVENT_BALANCE -- wait this much of a frame,
- * spread over that many. The wait is all that is done here, as for the time sync, which
- * is left exactly as it was: wall time only. [netplay] balance = yes turns it on in the
- * library (Netplay_SetBalance; off by default; SWOS_LIVE_BALANCE=1 / =0 for a test), and
- * a peer with it off sends no depth, so both players must have it on -- which in a match
- * from the lobby is the host's BALANCE switch, played by both (below). */
-static int32_t s_balanceSetting;    /* this player's [netplay] balance */
-static int32_t s_balanceOn;         /* what the match being played goes by */
-
-void NetplayMatch_SetBalance(int32_t on)
-{
-    s_balanceSetting = on != 0;
-}
+/* (GGPO-X's prediction balance, docs/NETPLAY_BALANCE.md, is not used: the host's BALANCE
+ * switch and [netplay] balance were removed 2026-10-30 -- it caused netplay problems.) */
 
 /* The host's switches (netplay_match.h), set by the lobby at kick-off on both machines. */
 static int32_t s_hostSwitches = -1;
@@ -511,7 +529,6 @@ void NetplayMatch_SetHostSwitches(int32_t switches)
 }
 
 int32_t NetplayMatch_HostSwitches(void) { return s_hostSwitches; }
-int32_t NetplayMatch_BalanceSetting(void) { return s_balanceSetting; }
 
 /* Whether switch `sw` is ON for the match: the host's, or as this build plays. */
 static int32_t switchOn(int32_t sw)
@@ -597,6 +614,8 @@ static void soundFrameBegin(int32_t frame, int32_t again)
     /* The replay recorder numbers frames the same way, so a re-simulated frame replaces
      * what was recorded for it (src/replay_v2.c). */
     { extern void ReplayRec_SetFrame(uint32_t frame); ReplayRec_SetFrame((uint32_t)frame); }
+    if (s_np.live)
+        ModHooks_NetFrame(frame);       /* (the mods: a frame played again voids what it said) */
     SoundFrame *f = &s_sound[(uint32_t)frame & (SOUND_FRAMES - 1)];
     if (f->frame != frame) {
         f->frame = frame;
@@ -719,11 +738,11 @@ static int32_t cbSave(void *ctx, uint8_t **state, int32_t *len, int32_t *checksu
 static int32_t cbLoad(void *ctx, const uint8_t *state, int32_t len, int32_t framesToRollback)
 {
     (void)ctx;
-    (void)framesToRollback;
     if ((uint32_t)len != s_np.stateSize)
         return 0;
     SimState_Load(state, SIM_TIER_ALL);
     s_np.loads++;
+    s_np.loadsBySize[framesToRollback < 1 ? 1 : framesToRollback > 7 ? 7 : framesToRollback]++;
     return 1;
 }
 
@@ -747,7 +766,9 @@ static int32_t cbAdvance(void *ctx)
     int32_t resimFrame = 0;
     Netplay_CurrentFrame(s_np.session, &resimFrame);
     soundFrameBegin(resimFrame, 1);
+    s_resimulating = 1;
     r = step(inputs, -1, 0);
+    s_resimulating = 0;
     soundFrameEnd();
     if (s_np.mode == NETPLAY_MATCH_P2P) {
         Ghost_Played(resimFrame, 0);        /* the correction replaces what was drawn */
@@ -787,6 +808,12 @@ static void cbEvent(void *ctx, const NetplayEvent *ev)
                  * agreed from (p2p_link.c propose_delay). */
                 fprintf(stderr, "[netplay] kick-off: ping %d ms, jitter %d ms (measured by the link), "
                                 "input delay %d\n", s_np.linkPing, s_np.linkJitter, s_np.delay);
+                if (s_np.mode == NETPLAY_MATCH_P2P) {
+                    const int32_t me = NetplayLobby_LocalPlayer();
+                    const LobbyPlayer *mine = (me == 1 || me == 2) ? NetplayLobby_Player(me) : NULL;
+                    const LobbyPlayer *theirs = (me == 1 || me == 2) ? NetplayLobby_Player(3 - me) : NULL;
+                    MatchChat_Begin(mine ? mine->name : "", theirs ? theirs->name : "");
+                }
             }
         }
         s_np.running = 1;
@@ -808,6 +835,10 @@ static void cbEvent(void *ctx, const NetplayEvent *ev)
         ringDump(ev->desyncFrame);
         if (!s_np.abortWhy)
             s_np.abortWhy = "THE TWO GAMES WENT OUT OF STEP";
+        break;
+    case NETPLAY_EVENT_CHAT:
+        if (s_np.live && ev->chat)
+            MatchChat_Received(ev->chat);
         break;
     case NETPLAY_EVENT_DISCONNECTED:
         s_np.peerGone = 1;
@@ -861,21 +892,6 @@ static void cbEvent(void *ctx, const NetplayEvent *ev)
                 s_np.paceKind = SRP_READ_TIMESYNC;
                 s_np.timeSyncs++;
             }
-        }
-        break;
-    case NETPLAY_EVENT_BALANCE:
-        if (getenv("SWOS_LIVE_PACING_LOG"))
-            fprintf(stderr, "[balance] frame %u: predicting %d.%02d frames deep here, %d.%02d there: waiting %d.%03d of a frame\n",
-                    s_np.frames, ev->balanceLocalX100 / 100, ev->balanceLocalX100 % 100,
-                    ev->balanceRemoteX100 / 100, ev->balanceRemoteX100 % 100,
-                    ev->balanceWaitMilli / 1000, ev->balanceWaitMilli % 1000);
-        if (s_np.live && !s_np.noPacing && ev->balanceWaitMilli > 0 && ev->balanceSpread > 0) {
-            int64_t frameUs = 1000000 / DosGameplay_TargetFps();
-            s_np.paceUsPerFrame = (int32_t)(frameUs * ev->balanceWaitMilli / 1000 / ev->balanceSpread);
-            s_np.paceFramesLeft = ev->balanceSpread;
-            s_np.paceKind = SRP_READ_BALANCE;
-            s_np.balanceUs += frameUs * ev->balanceWaitMilli / 1000;
-            s_np.balanceWaits++;
         }
         break;
     case NETPLAY_EVENT_NETWORK_ERROR:
@@ -956,24 +972,11 @@ int32_t NetplayMatch_Start(void)
             return 1;
         }
     }
-    {
-        /* The host's BALANCE switch when the lobby set one, else this player's own.
-         * SWOS_LIVE_BALANCE=1 / =0: for the tests, whatever either says. */
-        const char *e = getenv("SWOS_LIVE_BALANCE");
-        s_balanceOn = s_hostSwitches >= 0 ? switchOn(NETPLAY_SW_BALANCE) : s_balanceSetting;
-        if (e)
-            s_balanceOn = atoi(e) != 0;
-        if (getenv("SWOS_LIVE_NO_BALANCE"))
-            s_balanceOn = 0;
-    }
-    Netplay_SetBalance(s_np.session, s_balanceOn);      /* GGPO-X's prediction balance */
     /* KICK-OFF SYNC: before the first input, as ggpo_set_kickoff_prediction wants. */
     Netplay_SetKickoffPrediction(s_np.session, switchOn(NETPLAY_SW_KICKOFF_SYNC));
     if (s_hostSwitches >= 0)
-        fprintf(stderr, "[netplay] the host's switches: short presses %s, catch up %s, kick-off sync %s, "
-                "balance %s, cards/injuries %s\n",
-                switchOn(NETPLAY_SW_SHORT_PRESSES) ? "ON" : "OFF", switchOn(NETPLAY_SW_CATCH_UP) ? "ON" : "OFF",
-                switchOn(NETPLAY_SW_KICKOFF_SYNC) ? "ON" : "OFF", s_balanceOn ? "ON" : "OFF",
+        fprintf(stderr, "[netplay] the host's switches: short presses %s, kick-off sync %s, cards/injuries %s\n",
+                switchOn(NETPLAY_SW_SHORT_PRESSES) ? "ON" : "OFF", switchOn(NETPLAY_SW_KICKOFF_SYNC) ? "ON" : "OFF",
                 switchOn(NETPLAY_SW_CARDS_INJURIES) ? "ON" : "OFF");
 
     Audio_SetSfxFilter(soundFilter);      /* sound during a rollback, above */
@@ -1015,7 +1018,7 @@ static void team_name(char *out, size_t cap, const TeamFileEx *t)
 
 static void recordBegin(int32_t localPlayer, int32_t delay, int32_t simWidth)
 {
-    extern TeamFileEx _selectedTeams[100];
+    extern TeamFileEx _selectedTeams[SELECTED_TEAMS_MAX];
     const LobbyPlayer *me = NetplayLobby_Player(localPlayer);
     const LobbyPlayer *them = NetplayLobby_Player(3 - localPlayer);
     char team1[20], team2[20];
@@ -1054,8 +1057,10 @@ static void recordConfirmed(int32_t confirmed)
         MatchRecord_Frame(s_np.recordNext, s_np.traceSim[s_np.recordNext]);
         s_np.recordNext++;
     }
-    if (confirmed >= 0)
+    if (confirmed >= 0) {
         MatchRecord_Replay((uint32_t)confirmed);
+        ModHooks_NetConfirmed(confirmed);
+    }
     MatchRecord_Pump();
 }
 
@@ -1128,10 +1133,6 @@ int32_t NetplayMatch_StartLive(int32_t localPlayer, const char *peerIp, uint16_t
         const char *slow = getenv("SWOS_LIVE_SLOW_PCT");
         s_np.slowPct = (slow && slow[0]) ? atoi(slow) : 0;
         s_np.noPacing = getenv("SWOS_LIVE_NO_PACING") != NULL;
-        if (getenv("SWOS_LIVE_NO_BALANCE"))
-            s_balanceOn = 0;
-        s_np.balanceWaits = 0;
-        s_np.balanceUs = 0;
         streamNewMatch();
         ringNewMatch();
         {
@@ -1539,7 +1540,6 @@ static void logStats(uint32_t now, int32_t force)
 
 static void liveEnd(int32_t outcome, const char *why)
 {
-    Platform_SetCatchUpFrames(1);       /* off-line pacing again: drop a backlog */
     /* A match that ends EARLY has its frames written too, whatever ended it. The peer
      * that notices the desync first ends the match, and the other one then sees the
      * disconnect before its own desync event and would never write its half -- and half a
@@ -1564,11 +1564,6 @@ static void liveEnd(int32_t outcome, const char *why)
             s_np.endFrame >= 0 ? s_np.endFrame : (int32_t)s_np.frames, why ? ": " : "", why ? why : "",
             s_np.frames, s_np.resimulated, s_np.loads, s_np.predictionWaits, s_np.timeSyncs,
             (long long)(s_np.pacedUs / 1000), (long long)s_np.paceBiasUs);
-    if (s_balanceOn)
-        fprintf(stderr, "[balance] this player was predicting two frames or more deeper than the other %u times, "
-                "and waited %lld ms in all to close it\n", s_np.balanceWaits, (long long)(s_np.balanceUs / 1000));
-    else
-        fprintf(stderr, "[balance] off\n");
     /* PRED's premise, measured: every guessed frame's guess was the last input known. */
     fprintf(stderr, "[pred] %u frames first played on a guess of the other player's input; "
                     "%u of the guesses were not their last known input%s\n",
@@ -1922,12 +1917,8 @@ static int32_t p2pFrame(void)
         if (s_np.live) {
             s_np.prepared = 1;
             s_np.lastProgressMs = now;
-            /* A stall (the OS, a hitch) is caught up on, as far as the other game can be
-             * ahead, so the player who stalled pays for it and not the other one
-             * (Platform_SetCatchUpFrames). Back to 1 in liveEnd. The host's CATCH UP
-             * switch OFF leaves it at 1: the backlog dropped, as before fd911618. */
-            if (switchOn(NETPLAY_SW_CATCH_UP))
-                Platform_SetCatchUpFrames(MAX_PREDICTION);
+            /* (A stall's backlog is dropped, as off line: CATCH UP, which played it back to
+             * back -- fd911618 -- was removed 2026-10-30; it caused netplay problems.) */
             resetControlHistory();      /* before GGPO saves frame 0 */
             /* And the clock, AGAIN, here. StartLive zeroed it, but the pre-match screens
              * run in between -- the stadium line-up and its waits -- and the SDL timer
@@ -2191,7 +2182,7 @@ prepared:
         uint8_t evidence = (s_np.live && !s_np.chaseInput && !s_inputSource && !s_np.randomInput)
                                ? InputSDL_LastFireEvidence() : 0;
         Ghost_Read(frame, local[0], SDL_GetTicks(), s_np.delay,
-                   (uint8_t)((s_np.paceFramesLeft > 0 ? s_np.paceKind : 0) | evidence), s_balanceOn);
+                   (uint8_t)((s_np.paceFramesLeft > 0 ? s_np.paceKind : 0) | evidence), 0);
     }
     rc = Netplay_SyncInput(s_np.session, synced, &disconnect);
     if (rc != NETPLAY_OK) {
@@ -2658,6 +2649,7 @@ int32_t NetplayMatch_Finish(void)
         fprintf(stderr, "[netplay] wrote %s\n", s_np.soundTracePath);
     }
     if (s_np.session) {
+        MatchChat_End();
         Netplay_Close(s_np.session);
         s_np.session = NULL;
     }

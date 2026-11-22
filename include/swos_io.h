@@ -23,7 +23,6 @@
 #define SWOS_IO_H
 
 #include "swos_types.h"
-#include <sys/stat.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,6 +36,9 @@ extern "C" {
  * short read). On failure *out_buf is not modified. */
 int  swos_io_load_alloc(const uint8_t *name, uint8_t **out_buf, uint32_t *out_size);
 
+/* Read a runtime file relative to the data root, rather than save/. */
+int  swos_io_load_data_alloc(const char *name, uint8_t **out_buf, uint32_t *out_size);
+
 /* Save `size` bytes from `buf` to file `name`. Overwrites if it
  * exists. Returns 0 on success, non-zero on failure. */
 int  swos_io_save(const uint8_t *name, const uint8_t *buf, uint32_t _size);
@@ -46,6 +48,8 @@ int  swos_io_save(const uint8_t *name, const uint8_t *buf, uint32_t _size);
  * swos_save_dir_init(). Both the save reader and writer consult this so they
  * always agree. Returns a stable, NUL-terminated string (no trailing slash). */
 const char *swos_save_dir(void);
+/* Point the save folder elsewhere (the golden career test, src/career_autopilot.c). */
+void swos_set_save_dir(const char *dir);
 
 /* The user's game folder — the PARENT of swos_save_dir() (so SWOS.ini can sit
  * beside the save/ folder in one per-user location). "." until
@@ -61,6 +65,7 @@ const char *swos_ini_path(void);
  * save/load. Creates the per-user dir + its save/ subfolder. Safe on every
  * platform; on WASM it is a no-op (relative "save" / "." are already correct). */
 void swos_save_dir_init(void);
+int swos_select_world_save_dir(const char *tag);
 
 /* Resolve a path that is relative to the game's DATA root (data/, grafs/,
  * sound/, data_json/, …).
@@ -82,6 +87,10 @@ void swos_save_dir_init(void);
  * whichever of those the caller owns. */
 const char *swos_data_path(const char *rel, char *buf, uint32_t buf_sz);
 
+/* swos_data_path without the mods (include/mods.h): for a WRITE or a delete, which must land
+ * in the game's own folders, never in a mod's. swos_data_path looks in each enabled mod first. */
+const char *swos_data_path_base(const char *rel, char *buf, uint32_t buf_sz);
+
 /* The other way: the part of an anchored data path below its root ("grafs/X"
  * for ".../assets/grafs/X" or "rom:/grafs/X"), or `path` itself when it has
  * no root. For code that reasons about a path swos_data_path() has built. */
@@ -98,9 +107,10 @@ int swos_data_exists(const char *rel);
 extern int _gNoAmigaSound;
 extern int _gNoAmigaScreens;
 
-/* The assets folder: $SWOS_ASSETS when it is set, else "assets" in the user's
- * game folder (swos_user_dir()). "" before swos_save_dir_init() and on targets
- * that have none (WASM, the Switch, the Amiga). No trailing slash. */
+/* Runtime assets directory: SWOS_ASSETS override if supplied, otherwise
+ * assets/ beside SWOS.exe if present, otherwise the legacy user assets folder.
+ * Individual missing files can still fall back to the legacy folder.
+ * Saves and SWOS.ini remain in the user directory. */
 const char *swos_assets_dir(void);
 
 /* The prefix swos_data_path() adds, with no trailing separator: "" on every

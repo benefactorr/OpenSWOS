@@ -1,0 +1,10 @@
+{
+  "pack": "sample",
+  "version": "1.0.0",
+  "schema": "swc/1",
+  "title": "Sample pack: one league and one cup",
+  "licence": "CC0-1.0",
+  "credits": "Invented clubs and places (no real club, no third-party data). Written for the SWOS Competition Engine.",
+  "world": "world.json",
+  "profiles": ["swos9697", "openswos"]
+}

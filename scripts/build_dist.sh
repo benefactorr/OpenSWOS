@@ -40,6 +40,9 @@
 #   linux-x86      make                 -> bin/SWOS          (32-bit, -m32)
 #   linux-x86_64   make X86_64=1        -> bin/SWOS.x86_64
 #   linux-arm64    make ARM64=1         -> bin/SWOS.aarch64
+#   portmaster     scripts/build_portmaster.sh --no-build -> dist/portmaster/swos.zip (that binary, for
+#                  PortMaster handhelds; also portmaster/swos.zip in SWOS-portable.zip, where
+#                  the setup's Handheld screen finds it)
 #   linux-armhf    make ARM=1           -> bin/SWOS.armhf
 #   wasm           make WASM=1          -> dist/web/SWOS.html/.js/.wasm/.data
 #   amiga          make -f Makefile.amiga -> bin/SWOS2
@@ -161,7 +164,7 @@ SDL_SWITCH_ROOT="${SDL_SWITCH_ROOT:-D:\\Projects\\GitHub\\SDL-switch}"
 
 # `installer` is a packaging step rather than a compile, but it lives in this
 # list so --only/--skip and the summary treat it like everything else.
-ALL_TARGETS="linux-x86 linux-x86_64 linux-arm64 linux-armhf wasm amiga windows setup switch installer"
+ALL_TARGETS="linux-x86 linux-x86_64 linux-arm64 portmaster linux-armhf wasm amiga windows setup switch installer"
 
 # Binaries that go into the zip. The WASM outputs are deliberately excluded:
 # SWOS.html/.js/.wasm/.data are a web deployment, not something a tester runs
@@ -182,17 +185,23 @@ ZIP_MEMBERS="SWOS SWOS.x86_64 SWOS.aarch64 SWOS.armhf SWOS.exe SWOS2"
 # save/ is deliberately EXCLUDED: it is 24 MB of test careers here, and saves go
 # to a per-user directory anyway (swos_io.c), so shipping it would both bloat the
 # zip and drop stale saves on testers.
-FULL_DATA_DIRS="data grafs grafs_aga grafs_dos grafs_2020 grafs_arcade grafs_jag sound sound_dos data_json setup"
+FULL_DATA_DIRS="data grafs grafs_aga grafs_dos grafs_2020 grafs_arcade grafs_jag sound sound_dos data_json setup mods"
 # The data setup, built by the `setup` target.
 SETUP_CLI="tools/swosdata/build/swosdata"
 SETUP_EXE="tools/swosdata/build_win_static/bin/Release/openswos-setup.exe"
-# Cygwin runtime for SWOS.exe. FOUR files, and only two of them are visible to
-# cygcheck:
+# Cygwin runtime for SWOS.exe. FIVE files, and only some of them are visible to
+# cygcheck on the exe:
 #
 #   cygwin1.dll         the Cygwin runtime
 #   cygSDL2-2-0-0.dll   NOT SDL2 -- it is sdl2-compat, a ~350 KB SHIM
 #   cygSDL3-0.dll       the actual SDL, dlopen'd BY that shim at runtime
-#   cygiconv-2.dll      a link-time import of cygSDL3-0.dll
+#   cygiconv-2.dll      a link-time import of cygSDL3-0.dll (and of the exe since the shaders)
+#   cygintl-8.dll       gettext: the static libstdc++'s locale code, in the exe since the shader
+#                       compiler (glslang, SPIRV-Cross) came in -- a beta shipped without it and
+#                       would not start ("cygintl-8.dll was not found", a tester, 2026-11-09)
+#
+# scripts/check_win_dlls.sh checks this list against cygcheck (the exe and cygSDL3-0.dll) before
+# the zip is made, and fails the drop when a DLL is missing.
 #
 # Cygwin now ships SDL2 as sdl2-compat, which implements the SDL2 API on top of
 # SDL3 and loads cygSDL3-0.dll with dlopen. A dlopen is invisible to cygcheck
@@ -215,7 +224,7 @@ SETUP_EXE="tools/swosdata/build_win_static/bin/Release/openswos-setup.exe"
 #
 # NOT the SDL2.dll from a normal SDL release: that is a native MSVC/MinGW build
 # with no cygwin1.dll import, and a Cygwin binary cannot load it.
-FULL_DLLS="cygwin1.dll cygSDL2-2-0-0.dll cygSDL3-0.dll cygiconv-2.dll"
+FULL_DLLS="cygwin1.dll cygSDL2-2-0-0.dll cygSDL3-0.dll cygiconv-2.dll cygintl-8.dll"
 
 # Linux runtime for the four ELFs, the counterpart of FULL_DLLS above. Each
 # binary links libSDL2-2.0.so.0 for its own architecture, so a tester who has
@@ -290,6 +299,9 @@ LINUX_LIBDIR="${LINUX_LIBDIR:-/usr/lib}"
 # level s/ would replace that drive's own S:startup-sequence. Inside the drawer they
 # do nothing until the drawer itself is mounted as the boot volume, when
 # s/startup-sequence runs SYS:SWOS2 and then c/UAEquit.
+# No data_json/: the Amiga parses no JSON (docs/DATA_BSON.md). The menus of the mods it runs --
+# the MODES screen's and their own -- are baked into SWOS2 (include/menu_baked.h), and OpenSWOS
+# Setup converts the rest of a mod's JSON when it copies the mod into the drawer (SwosData_AmigaMod).
 AMIGA_DATA_DIRS="data grafs grafs_aga sound"
 AMIGA_BOOT_DIRS="c s"
 AMIGA_PKG_DIR="packaging/amiga"
@@ -306,6 +318,7 @@ AMIGA_ZIP_PATH="dist/SWOS-Amiga.zip"
 INSTALLER_PATH="dist/SWOS-Setup.exe"
 DO_FULL=1
 DO_INSTALLER=1
+DO_STRIP=1
 ONLY=""
 SKIP=""
 
@@ -325,6 +338,7 @@ Options:
       --no-zip        build but don't package (no zips, no installer)
       --no-full       skip SWOS-portable.zip (binaries-only SWOS.zip still written)
       --no-installer  skip dist/SWOS-Setup.exe
+      --no-strip      ship the binaries with their debug info (SWOS.exe ~40 MB, not ~10)
       --full-zip PATH full-dist output path (default: $FULL_ZIP_PATH)
       --amiga-zip PATH Amiga-dist output path (default: $AMIGA_ZIP_PATH)
       --installer PATH installer output path (default: $INSTALLER_PATH)
@@ -346,6 +360,7 @@ while [ $# -gt 0 ]; do
         --no-zip)    DO_ZIP=0; DO_FULL=0; DO_INSTALLER=0; shift ;;
         --no-full)   DO_FULL=0; shift ;;
         --no-installer) DO_INSTALLER=0; shift ;;
+        --no-strip)  DO_STRIP=0; shift ;;
         --installer) INSTALLER_PATH="$2"; shift 2 ;;
         --full-zip)  FULL_ZIP_PATH="$2"; shift 2 ;;
         --amiga-zip) AMIGA_ZIP_PATH="$2"; shift 2 ;;
@@ -477,6 +492,14 @@ if wanted linux-arm64; then
             make ARM64=1 $MAKE_FLAGS -j"$JOBS"
     else
         record linux-arm64 "SKIP (no aarch64-linux-gnu-gcc)"
+    fi
+fi
+
+if wanted portmaster; then
+    if [ -f bin/SWOS.aarch64 ] && [ "${STATUS[linux-arm64]:-}" != "FAIL" ]; then
+        run portmaster "portmaster         -> dist/portmaster/swos.zip" scripts/build_portmaster.sh --no-build
+    else
+        record portmaster "SKIP (no bin/SWOS.aarch64: the linux-arm64 target)"
     fi
 fi
 
@@ -621,6 +644,41 @@ if wanted switch; then
     fi
 fi
 
+# ---- strip: the debug info out of what ships, kept in dist/symbols/<commit>/ ---
+# SWOS.exe is ~40 MB with its DWARF and ~10 MB without; the Linux ELFs likewise. Nothing in the
+# game reads its own symbols (no crash handler prints them), so the drop carries none -- but a
+# tester's crash address still has to be readable, so each binary's debug info is kept first,
+# with a debug link from the binary to it: gdb finds it copied beside the binary, or takes
+# `symbol-file dist/symbols/<commit>/<name>.debug` (docs/TRIAGE.md).
+# bin/ is stripped in place: the zips, the installer and the copies made from them ship it.
+# (The PortMaster port has packed its zip from bin/SWOS.aarch64 already; macOS is
+# build_macos.sh's; the Amiga's SWOS2 is a hunk file, left alone.)
+strip_one() {   # binary objcopy
+    local bin=$1 oc=$2 dbg="$SYM_DIR/$(basename "$1").debug" before after
+    before=$(stat -c %s "$bin")
+    "$oc" --only-keep-debug "$bin" "$dbg" &&
+        "$oc" --strip-debug --strip-unneeded --add-gnu-debuglink="$dbg" "$bin" || return 1
+    after=$(stat -c %s "$bin")
+    echo "-- $(basename "$bin"): $((before / 1048576)) MB -> $((after / 1048576)) MB (debug info: $dbg)"
+}
+if [ "$DO_STRIP" = 1 ] && [ "$DO_ZIP" = 1 ]; then
+    banner "strip -> dist/symbols/$BUILD_COMMIT/"
+    SYM_DIR="dist/symbols/$BUILD_COMMIT"
+    mkdir -p "$SYM_DIR"
+    for pair in "SWOS:objcopy" "SWOS.x86_64:x86_64-linux-gnu-objcopy" "SWOS.aarch64:aarch64-linux-gnu-objcopy" \
+                "SWOS.armhf:arm-linux-gnueabihf-objcopy" "SWOS.exe:$CYGWIN_BIN/objcopy.exe"; do
+        b="bin/${pair%%:*}"; oc="${pair#*:}"
+        [ -f "$b" ] || continue
+        command -v "$oc" >/dev/null 2>&1 || [ -x "$oc" ] || { echo "-- NOTE: $b left as built (no $oc)"; continue; }
+        # (a binary already stripped -- a rerun with --only -- has nothing left to keep)
+        if ! "$oc" --dump-section .debug_info=/dev/null "$b" >/dev/null 2>&1 &&
+           ! readelf -S "$b" 2>/dev/null | grep -q debug_info; then
+            echo "-- $(basename "$b"): already stripped"; continue
+        fi
+        strip_one "$b" "$oc" || echo "-- FAIL: stripping $b (shipping it as built)"
+    done
+fi
+
 # ---- package ----------------------------------------------------------------
 ZIPPED=""
 MISSING=""
@@ -670,8 +728,22 @@ if [ "$DO_FULL" = 1 ] && [ -n "$ZIPPED" ] && command -v zip >/dev/null 2>&1; the
         else
             echo "-- NOTE: no data setup built (the setup target): the drop needs it to be played"
         fi
+        # The PortMaster port, for the setup's Handheld screen to put on a card.
+        if [ -f dist/portmaster/swos.zip ]; then
+            unzip -Z1 dist/portmaster/swos.zip | grep -xc "Sensible World of Soccer.sh" >/dev/null ||
+                { echo "!! dist/portmaster/swos.zip is not the PortMaster port (no launcher)" >&2; exit 1; }
+            PM_TMP="$(mktemp -d)" && mkdir -p "$PM_TMP/portmaster" && cp dist/portmaster/swos.zip "$PM_TMP/portmaster/" &&
+                ( cd "$PM_TMP" && zip -q -0 "$ROOT/$FULL_ZIP_PATH" portmaster/swos.zip ) &&
+                echo "-- port:     portmaster/swos.zip"
+            rm -rf "$PM_TMP"
+        fi
 
-        # Windows runtime beside SWOS.exe. Skipped cleanly off-Cygwin hosts.
+        # Windows runtime beside SWOS.exe. Skipped cleanly off-Cygwin hosts. The list first checked
+        # against what the exe needs (scripts/check_win_dlls.sh): a short one is a drop that will not start.
+        if [ -f bin/SWOS.exe ]; then
+            scripts/check_win_dlls.sh "$FULL_DLLS"
+            [ $? = 1 ] && { echo "!! FULL_DLLS is missing a DLL SWOS.exe needs: the drop would not start" >&2; exit 1; }
+        fi
         DLL_ADDED=""; DLL_MISS=""
         for d in $FULL_DLLS; do
             if [ -f "$CYGWIN_BIN/$d" ]; then DLL_ADDED="$DLL_ADDED $CYGWIN_BIN/$d"

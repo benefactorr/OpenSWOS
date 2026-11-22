@@ -1,0 +1,47 @@
+[build] OpenSWOS unknown (2026-11-21, windows x86, tester build)
+[mods] on: autoplay (Autoplay 1.0, modes, canonical 0b0505e6-f36b-57b2-b7ab-0a69af05eb51) from mods/autoplay
+[mods] on: backgrounds (Menu backgrounds 1.0, cosmetic, canonical 1eecf5bb-1c99-5158-ad4a-11e586fcca59) from mods/backgrounds
+[mods] on: challenges (Challenges 1.0, modes, canonical ca0cb256-e65f-5b14-90f0-d1c3dac245cb) from mods/challenges
+[mods] on: classics (Historic Tournaments 1.2, modes, canonical 14e2f6d4-962f-5088-9187-19e107d1b8e3) from mods/classics
+[mods] on: dosmenus (PC menu shading 1.0, cosmetic, canonical 4557372a-8e3c-55c5-a366-bea1de501a07) from mods/dosmenus
+[mods] on: flags (Flags 1.0, cosmetic, canonical f9ef7c0d-749b-5799-8d98-04c1aee365d1) from mods/flags
+[mods] on: netstats (Network quality 1.0, cosmetic, canonical 6246d072-dfd6-5b5d-bc6b-35dbff8661c2) from mods/netstats
+[mods] on: petarku-practice (Petarku's Practice 1.0, modes, canonical dc0bac4c-0fb8-5bed-8458-7b8f16918cf6) from mods/petarku-practice
+[mods] on: practice (Practice 1.1, modes, canonical 8b9b9c96-91ad-52ee-baff-052f28e2a5d3) from mods/practice
+[mods] on: speedrun (Speedrun 1.0, modes, canonical 9eb2e1b1-f3a6-568e-8f09-71510c57220a) from mods/speedrun
+[mods] speedrun offers the service speedrun
+[mods] challenges offers the service challenges
+[mods] dosmenus: F5 switches the menus between the PC's shading and the Amiga's
+[mods] netstats: F7 the network quality strip: when poor / always / never
+[tactics] the built-in formations: SWOS 2020's improved (expert) set, off line
+[tweaks] on: league_crash_fixes three_points_for_a_win (off line only)
+[i18n] loaded 1025 strings + 91 countries from data_json/translations/en.json (1116 address-mapped)
+[i18n] localized 83 country names
+[modern-rosters] loaded; 2401 clubs; 62794 players
+[world] 2627
+[video] DOS view: 484x272 in a match -- widescreen, showing more pitch; the simulation is the PC release's 320x200 either way
+[video] render 484x272 (screen 0/2, resolution 1920x1080, 1.78:1)
+[video] window 968x544 @476,268 scale=2 display=0 usable=1920x1032
+[gpu] presenter up: OpenGL 4.1 core, AMD Radeon 780M Graphics, vsync off
+[render] driver=gpu (sokol) vsync: requested=off actual=off
+[render] display=0 1920x1080 @59Hz, game paces at 70Hz (not a multiple — some pulldown judder is inherent)
+[render] scaling=smooth | subpixel_scroll=on | pacing: software timer
+[render] SDL_Delay(1) sleeps up to 2.0 ms
+[render] hud_layer=on
+[input] gamecontrollerdb.txt not loaded: Invalid RWops
+[input] SDL_NumJoysticks=0
+[screenshot] hotkeys: F9 / F11 / F12 / PrintScreen (env SWOS_SCREENSHOT_INTERVAL=N for auto-capture every N frames, SWOS_PRESENT_CAPTURE=N for the presented output)
+[gpu] output 968x544
+[data-json] dynamic tournament '_copaLibertadores' compId=162 -> heap record + careerContests
+[data-json]   region '_europeTable': JSON != compiled (kept compiled)
+[data-json] competition graph installed: 65 simple countries swapped, 0 complex countries loaded in place (cups=76 leagues=66); standalone globals in place: 13 tournaments, 7 playoffs, 26 special records, 9 region tables (1 kept-compiled); 1 dynamic competition(s)
+[data-json] career params loaded from data_json/career_params.json
+[tweaks] cpu_cards ON by mod Career+
+[tweaks] more_fouls ON by mod Career+
+[tweaks] ai_injury_subs ON by mod Career+
+[national-pool] modern fallback from 63 to 145 records
+[menu-json] SWOS_MENU_JSON set — installing menus from data_json/menus/*.json (relative to the binary dir)
+[menu-json] showPlayerMarketMenu: keeping compiled Career+ TYPE/SORT menu (ignoring legacy SKILLS JSON)
+[menu-json] install: 46/47 menus loaded from JSON in place (0 edited vs compiled, 0 too-large-skipped, 0 error)
+[tactics-json] SWOS_TACTICS_JSON — installing formations from data_json/tactics/*.json (relative to the binary dir)
+[tactics-json] install: 12/12 formations loaded from JSON in place (0 edited vs compiled, 0 error)

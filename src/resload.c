@@ -11,6 +11,8 @@
  * `FixSnoopBug`, etc.) — those keep their signatures so linking is
  * unchanged.
  * ============================================================ */
+#include "mods.h"         /* the enabled mods: a read looks in them first (both targets) */
+
 #ifdef SWOS_SDL_BUILD
 
 #include "resload.h"
@@ -61,7 +63,14 @@ static int has_save_ext(const char *name)
     return 0;
 }
 
+static void resolve_path_for(const uint8_t *amiga_name, char *out, size_t out_sz, int write);
 static void resolve_path(const uint8_t *amiga_name, char *out, size_t out_sz)
+{
+    resolve_path_for(amiga_name, out, out_sz, 0);
+}
+
+/* write: a save or a delete -- the game's own folders, never a mod's (include/mods.h). */
+static void resolve_path_for(const uint8_t *amiga_name, char *out, size_t out_sz, int write)
 {
     const char *src = (const char *)amiga_name;
     const char *colon = strchr(src, ':');
@@ -76,8 +85,8 @@ static void resolve_path(const uint8_t *amiga_name, char *out, size_t out_sz)
         /* Relative to the data root. Identity everywhere the game chdir()s to
          * its own directory; anchored at rom:/ on the Switch (swos_io.h). */
         char anchored[1024];
-        snprintf(out, out_sz, "%s",
-                 swos_data_path(src, anchored, (uint32_t)sizeof anchored));
+        snprintf(out, out_sz, "%s", write ? swos_data_path_base(src, anchored, (uint32_t)sizeof anchored)
+                                          : swos_data_path(src, anchored, (uint32_t)sizeof anchored));
     }
 }
 
@@ -278,7 +287,7 @@ static void wasm_persist_saves(void)
 static uint32_t rob_save(uint8_t *name, uint8_t *src, uint32_t fileSize)
 {
     char path[512];
-    resolve_path(name, path, sizeof(path));
+    resolve_path_for(name, path, sizeof(path), 1);
     uint32_t put = fs_save(path, src, fileSize);
     size = put;
     _rnl_d1_return = put;
@@ -294,10 +303,23 @@ static uint32_t rob_save(uint8_t *name, uint8_t *src, uint32_t fileSize)
     return put ? 0 : 1;
 }
 
+/* A file at a full path, saved as the game saves (include/mod_api.h ModApi_SaveFile): written
+ * whole, then made durable as rob_save makes a save -- the web's IndexedDB sync, the Switch's
+ * commit. 0 on success. */
+int32_t Resload_SaveFileAt(const char *path, const uint8_t *src, uint32_t n)
+{
+    const uint32_t put = fs_save(path, src, n);
+    if (put) {
+        wasm_persist_saves();
+        swos_save_commit();
+    }
+    return put ? 0 : -1;
+}
+
 static uint32_t rob_delete(uint8_t *name)
 {
     char path[512];
-    resolve_path(name, path, sizeof(path));
+    resolve_path_for(name, path, sizeof(path), 1);
     fs_delete(path);
     wasm_persist_saves();     /* a deletion has to stick too */
     swos_save_commit();       /* ... on both of the targets that need telling */
@@ -844,6 +866,22 @@ static inline void os_GfxLoadView(void *gfxBase, void *view)
     );
 }
 
+/* --- Intuition library calls (a6=intuitionBase) --- */
+
+/* RemakeDisplay: rebuilds every screen's display from scratch -- including the
+ * beam (PAL/NTSC/DblPAL...) of the Workbench screen's monitor, which LoadView
+ * of a saved View alone does not reliably put back once BEAMCON0 was changed. */
+static inline void os_IntuiRemakeDisplay(void *intuiBase)
+{
+    register void *_a6 __asm("a6") = intuiBase;
+    __asm volatile (
+        "jsr -384(%%a6)"
+        :
+        : "r"(_a6)
+        : "d0", "d1", "a0", "a1", "cc", "memory"
+    );
+}
+
 /* WaitTOF */
 static inline void os_GfxWaitTOF(void *gfxBase)
 {
@@ -1071,6 +1109,78 @@ static uint8_t *make_data_path(uint8_t *name)
     return data_path_buf;
 }
 
+/* ---- mods (include/mods.h): a read looks in each enabled mod's folder first ---- */
+
+static uint8_t mod_path_buf[256];
+static uint8_t s_modsRead;
+
+/* data/MODS, once, at the first read: with the DOS (or WHDLoad) calls the read is already
+ * inside -- going through the file calls from here would nest their interrupt swap. */
+static void read_mods_list(void)
+{
+    static char list[MODS_MAX * (MODS_ID_MAX + 2) + 1];
+    uint32_t n = 0;
+    s_modsRead = 1;
+    if (whd()) {
+        const uint8_t *name = (const uint8_t *)"data/MODS";
+        const uint32_t sz = whd_GetFileSize(name);
+        if (sz && sz < sizeof list)
+            n = whd_LoadFile(name, (uint8_t *)list);
+    } else {
+        void *dosBase = (void *)S_DosBase;
+        const uint32_t h = os_DosOpen(dosBase, (const uint8_t *)"PROGDIR:data/MODS", MODE_OLDFILE);
+        if (h) {
+            const int32_t r = os_DosRead(dosBase, h, list, sizeof list - 1);
+            os_DosClose(dosBase, h);
+            if (r > 0)
+                n = (uint32_t)r;
+        }
+    }
+    list[n < sizeof list ? n : sizeof list - 1] = '\0';
+    if (n)
+        Mods_Init(list, (const char *)0);
+}
+
+/* make_data_path for a READ: the first enabled mod with the file, else the game's own.
+ * Saves (save/...) and names with a device are the game's own. */
+static uint8_t *make_read_path(uint8_t *name)
+{
+    if (!s_modsRead)
+        read_mods_list();
+    if (*name && Mods_Count()) {
+        const uint8_t *rel = name;
+        for (const uint8_t *p = name; *p; p++)
+            if (*p == ':') {
+                if (!whd())
+                    return make_data_path(name);
+                rel = p + 1;
+            }
+        if (!(rel[0] == 's' && rel[1] == 'a' && rel[2] == 'v' && rel[3] == 'e' && rel[4] == '/'))
+            for (int32_t i = 0; i < Mods_Count(); i++) {
+                uint8_t *dst = mod_path_buf, *end = mod_path_buf + sizeof mod_path_buf - 1;
+                const char *src;
+                if (!whd())
+                    for (src = "PROGDIR:"; *src; ) *dst++ = (uint8_t)*src++;
+                for (src = Mods_Dir(i); *src && dst < end; ) *dst++ = (uint8_t)*src++;
+                if (dst < end) *dst++ = '/';
+                for (const uint8_t *q = rel; *q && dst < end; ) *dst++ = *q++;
+                *dst = '\0';
+                if (whd()) {
+                    if (whd_GetFileSize(mod_path_buf))
+                        return mod_path_buf;
+                } else {
+                    void *dosBase = (void *)S_DosBase;
+                    const uint32_t lock = os_DosLock(dosBase, mod_path_buf, ACCESS_READ);
+                    if (lock) {
+                        os_DosUnLock(dosBase, lock);
+                        return mod_path_buf;
+                    }
+                }
+            }
+    }
+    return make_data_path(name);
+}
+
 /* Swap interrupt vector 2 to OS (restore saved) */
 static void swap_int2_to_os(void)
 {
@@ -1190,13 +1300,34 @@ void SafeStart(void)
 /* ================================================================
  * DetachOSDisplay
  * ================================================================ */
+/* The game's display is PAL: a 272-line window from line 36 to 308 (display.c's
+ * copper list, the same DIWSTRT/DIWSTOP as SWOS2.s) and 50 Hz game timing. The
+ * original never had to say so -- it booted from its own disk, and WHDLoad sets
+ * the beam itself. Started from a Workbench in NTSC (or DblPAL, Multiscan...),
+ * the chipset keeps THAT beam after LoadView(NULL): an NTSC frame is 262 lines,
+ * so the picture stopped at game line ~226, under LOAD OLD COMPETITION, and an
+ * LCD stretched what was left; menus and matches also ran at 60 Hz. Reported on
+ * a real A1200 + BenQ, Workbench "NTSC: High Res", 2026-11-01. BEAMCON0 = PAL
+ * with every programmable-beam bit clear is the plain PAL beam; ExitToDos
+ * gives Workbench its own back. */
+#define BEAMCON0_PAL 0x0020u
+static uint8_t S_BeamForced;
+
+static void force_pal_beam(void)
+{
+    /* $DFF1DC; the project's struct Custom stops short of it (cf. FixSnoopBug) */
+    *(volatile uint16_t *)(CUSTOM_BASE + 0x1DCu) = BEAMCON0_PAL;
+    S_BeamForced = 1;
+}
+
 __attribute__((used, externally_visible))
 void DetachOSDisplay(void)
 {
-    if (S_FromWB == 0) return;
-
     void *gfxBase = (void *)S_GfxBase;
-    if (!gfxBase) return;
+    if (S_FromWB == 0 || !gfxBase) {
+        force_pal_beam();
+        return;
+    }
 
     /* Save current View from gfxbase */
     S_SavedView = *(uint32_t *)((uint8_t *)gfxBase + GFX_ACTIVIEW);
@@ -1217,6 +1348,8 @@ void DetachOSDisplay(void)
     /* Disable all DMA and interrupts */
     _custom->dmacon = 0x01FFu;
     _custom->intena = 0x3FFFu;
+
+    force_pal_beam();
 }
 
 
@@ -1309,6 +1442,17 @@ void ExitToDos(void)
         os_GfxWaitTOF(gfxBase);
     }
 
+    /* Put Workbench's own beam back (force_pal_beam). The OS is whole again by
+     * now -- vectors, DMA, interrupts, the View -- so Intuition can rebuild. */
+    if (S_BeamForced) {
+        void *intuiBase = os_OldOpenLibrary("intuition.library", 0);
+        if (intuiBase) {
+            os_IntuiRemakeDisplay(intuiBase);
+            os_CloseLibrary(intuiBase);
+        }
+        S_BeamForced = 0;
+    }
+
     if (S_FromWB == 0) return;
 
     /* Reply WB message */
@@ -1330,7 +1474,7 @@ void ExitToDos(void)
 /* GetFileSize: open, seek to end, seek back, close */
 static uint32_t resload_getfilesize(uint8_t *name)
 {
-    name = make_data_path(name);
+    name = make_read_path(name);
     if (whd()) return whd_GetFileSize(name);
     void *dosBase = (void *)S_DosBase;
 
@@ -1349,7 +1493,7 @@ static uint32_t resload_getfilesize(uint8_t *name)
 /* LoadFile: open, read, close */
 static uint32_t resload_loadfile(uint8_t *name, uint8_t *dest, uint32_t *outError)
 {
-    name = make_data_path(name);
+    name = make_read_path(name);
     if (whd()) {
         uint32_t n = whd_LoadFile(name, dest);
         if (n == 0) _custom->color[0] = 0x0F00u; /* red flash */
@@ -1382,7 +1526,7 @@ static uint32_t resload_loadfile(uint8_t *name, uint8_t *dest, uint32_t *outErro
 /* LoadFileDEC: load to temp buffer, RNC decompress or copy raw, free temp */
 static uint32_t resload_loadfiledec(uint8_t *name, uint8_t *dest, uint32_t *outError)
 {
-    name = make_data_path(name);
+    name = make_read_path(name);
 
     /* Get file size */
     uint32_t fileSize = resload_getfilesize(name);
@@ -1620,6 +1764,26 @@ static void file_LoadFile(uint8_t *name, uint8_t *dest)
     size = len;
 }
 
+/* A small file that may well be missing (data/WORLD: include/world.h): its size, or 0 when
+ * it is not there or does not fit `cap` -- without LoadFile's red flash and error, since a
+ * missing file is no error here. */
+uint32_t Resload_ReadSmallFile(const char *name, uint8_t *dest, uint32_t cap)
+{
+    file_GetFileSize((uint8_t *)name);
+    if (size == 0 || size > cap)
+        return 0;
+    file_LoadFile((uint8_t *)name, dest);
+    return size;
+}
+
+/* A file's size, 0 when it is not there (Career_PeekTeam: whether a team file is, before
+ * LoadTeamFile, which halts on a missing one). */
+uint32_t Resload_FileSize(const char *name)
+{
+    file_GetFileSize((uint8_t *)name);
+    return size;
+}
+
 static void file_SaveFile(uint32_t fileSize, uint8_t *name, uint8_t *src)
 {
     disable_vblank_and_wait();
@@ -1637,6 +1801,46 @@ static void file_Deletefile(uint8_t *name)
     resload_deletefile(name, (uint32_t *)0);
     swap_int2_to_game();
     enable_vblank();
+}
+
+/* The files (not folders) in a directory of the game's drawer -- each enabled mod's
+ * copy of it first, then the game's own -- as NUL-terminated names one after another
+ * in `buffer`; how many fitted. A name is listed once per folder that has it; a read
+ * of it then takes the first mod's, as every read does (make_read_path). For data
+ * folders that are not the save folder: a mod's competitions, say. */
+__attribute__((used, externally_visible))
+uint32_t Resload_ListDir(const uint8_t *dirname, uint8_t *buffer, uint32_t buffersize)
+{
+    static uint8_t modDir[256];
+    uint32_t count = 0, used = 0;
+
+    disable_vblank_and_wait();
+    swap_int2_to_os();
+    if (!s_modsRead)
+        read_mods_list();
+    for (int32_t i = 0; i <= Mods_Count(); i++) {
+        uint8_t *dir = (uint8_t *)dirname;
+        uint32_t n;
+        if (i < Mods_Count()) {
+            uint8_t *dst = modDir, *end = modDir + sizeof modDir - 1;
+            for (const char *src = Mods_Dir(i); *src && dst < end; ) *dst++ = (uint8_t)*src++;
+            if (dst < end) *dst++ = '/';
+            for (const uint8_t *q = dirname; *q && dst < end; ) *dst++ = *q++;
+            *dst = '\0';
+            dir = modDir;
+        }
+        if (used >= buffersize)
+            break;
+        n = resload_listfiles(buffersize - used, dir, buffer + used, (uint32_t *)0);
+        count += n;
+        while (n--) {                       /* past the names this folder gave */
+            while (used < buffersize && buffer[used]) used++;
+            used++;
+        }
+    }
+    swap_int2_to_game();
+    enable_vblank();
+    return count;
 }
 
 static void file_ListFiles(uint32_t buffersize, uint8_t *dirname, uint8_t *buffer)
@@ -1686,6 +1890,15 @@ static uint8_t *fix_filename(uint8_t *name)
     /* Need at least 4 chars for extension check */
     if (end - a0 < 4)
         return a0;
+
+    /* A name with a folder in it already says where it is: a .DIY in a data folder
+     * (a mod's competitions, say) is not a save, so it is not sent to save/. */
+    {
+        const uint8_t *s;
+        for (s = a0; s < end; s++)
+            if (*s == '/')
+                return a0;
+    }
 
     /* Read last 4 chars as big-endian uint32_t */
     uint32_t ext = ((uint32_t)end[-4] << 24) | ((uint32_t)end[-3] << 16) |

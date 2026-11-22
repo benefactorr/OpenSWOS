@@ -1,0 +1,11 @@
+sample.swc: format 2, engine >= 1, world 250, 1084 bytes, hash b7f1b55c, arena 4784
+  pack sample version 1.0.0
+  8 clubs, 2 competitions, 2 stages, 3 rounds, 2 outcomes, 2 modes entries, 2 names, 4 fixed pairs
+  smp.league                   kind 1 level 1, 1 stages, 6 fixed clubs, 1 outcomes  [SAMPLE LEAGUE / LEAGUE]
+    smp.league:table                   type 1, 6 clubs, legs 2, 0 rounds
+  smp.cup                      kind 2 level 0, 1 stages, 8 fixed clubs, 1 outcomes  [SAMPLE CUP / CUP]
+    smp.cup:ko                         type 4, 8 clubs, legs 0, 3 rounds
+      round 1: ASHBY ROVERS v NORTHGATE
+      round 1: FENWICK TOWN v RIVERSIDE
+      round 1: HILLFORD v WESTHAVEN
+      round 1: OAKMERE v STONEBRIDGE

@@ -107,6 +107,9 @@ int32_t     Netplay_AddLocalInput(NetplaySession *s, int32_t player, const void 
 /* inputs receives inputSize bytes for each of NETPLAY_MAX_PLAYERS players. */
 int32_t     Netplay_SyncInput(NetplaySession *s, void *inputs, int32_t *disconnectFlags);
 int32_t     Netplay_AdvanceFrame(NetplaySession *s, uint16_t checksum);
+/* A line of chat to the other player (GGPO-X's ggpo_client_chat: one datagram, not
+ * resent; under 120 bytes). It arrives as NETPLAY_EVENT_CHAT. match_chat.c. */
+int32_t     Netplay_Chat(NetplaySession *s, const char *text);
 /* The frame GGPO simulates next. */
 int32_t     Netplay_CurrentFrame(NetplaySession *s, int32_t *frame);
 /* The last frame whose input from every player is known, so that nothing up to it will be
@@ -116,15 +119,15 @@ int32_t     Netplay_ConfirmedFrame(NetplaySession *s, int32_t *frame);
 int32_t     Netplay_UnackedInputs(NetplaySession *s, int32_t remotePlayer, int32_t *count);
 /* GGPO's view of the link to `remotePlayer`: its round-trip ping in ms, and how many
  * frames this peer is ahead of the other, in tenths (negative = behind). For the log. */
-/* GGPO-X's prediction balance (docs/NETPLAY_BALANCE.md) off or on for this session;
- * on by default. Off here is off for both peers. */
-int32_t     Netplay_SetBalance(NetplaySession *s, int32_t on);
 /* GGPO-X predicting 1 frame until the other player's first input is confirmed (the
  * kick-off fix, ggpo_set_kickoff_prediction); on by default. Before the first input,
  * and the same on both peers. */
 int32_t     Netplay_SetKickoffPrediction(NetplaySession *s, int32_t on);
 int32_t     Netplay_NetStats(NetplaySession *s, int32_t remotePlayer, int32_t *pingMs,
                              int32_t *framesAheadX10);
+/* GGPO's timesync, frames x 10: how far this game runs behind the other, and the other behind it. */
+int32_t     Netplay_FramesBehind(NetplaySession *s, int32_t remotePlayer, int32_t *localX10,
+                                 int32_t *remoteX10);
 /* Whether a refused call is only to be tried again next tick: the session is not
  * synchronized yet, or this peer is as far ahead of the other's input as GGPO allows. */
 int32_t     Netplay_ShouldWait(int32_t code);

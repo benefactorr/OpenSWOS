@@ -1,0 +1,39 @@
+{
+  "contract": "swc-contract/1",
+  "name": "Sample league: points, goal difference, goals for, then head-to-head points",
+  "pack": "packs/sample",
+  "season": 1,
+  "_note": "Every league match not listed ends 0-0. Expected table checked by hand and by tests/contract/check.py.",
+  "results": {
+    "smp.league:table": {
+      "default": [0, 0],
+      "matches": [
+        {"home": "club:smp.northgate", "away": "club:smp.stonebridge", "score": [2, 0]},
+        {"home": "club:smp.hillford",  "away": "club:smp.oakmere",     "score": [1, 0]},
+        {"home": "club:smp.westhaven", "away": "club:smp.hillford",    "score": [1, 0]},
+        {"home": "club:smp.oakmere",   "away": "club:smp.riverside",   "score": [1, 0]}
+      ]
+    }
+  },
+  "expect": {
+    "tables": {
+      "smp.league:table": {
+        "columns": ["club", "played", "won", "drawn", "lost", "goals_for", "goals_against", "points", "zone"],
+        "rows": [
+          ["club:smp.northgate",   10, 1, 9, 0, 2, 0, 12, "CL"],
+          ["club:smp.westhaven",   10, 1, 9, 0, 1, 0, 12, null],
+          ["club:smp.hillford",    10, 1, 8, 1, 1, 1, 11, null],
+          ["club:smp.oakmere",     10, 1, 8, 1, 1, 1, 11, null],
+          ["club:smp.riverside",   10, 0, 9, 1, 0, 1,  9, null],
+          ["club:smp.stonebridge", 10, 0, 9, 1, 0, 2,  9, null]
+        ]
+      }
+    },
+    "champions": {"smp.league": "club:smp.northgate"},
+    "why": [
+      "NORTHGATE above WESTHAVEN: same points, goal difference +2 v +1",
+      "HILLFORD above OAKMERE: same points, goal difference and goals for; head-to-head points 4 v 1 (1-0 at Hillford, 0-0 at Oakmere)",
+      "RIVERSIDE above STONEBRIDGE: same points, goal difference -1 v -2"
+    ]
+  }
+}

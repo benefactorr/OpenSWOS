@@ -6,6 +6,9 @@
 #include "swos_types.h"
 #include "game_types.h"   /* CompetitionSlotBuffer (Phase B raw-save size) */
 #include "file_io.h"
+#ifdef SWOS_SDL_BUILD
+#include "diy_import_dos.h"
+#endif
 #include "display.h"
 #include "menus.h"
 #include "audio.h"
@@ -286,7 +289,7 @@ int16_t LoadFileEx(uint8_t *filename, uint8_t *dest, uint32_t *outFileSize)
             /* RNC header offset 4 = unpacked size (big-endian). A
              * native uint32 load on LE would byte-swap it (e.g.
              * 0x00007AEA becomes 0xEA7A0000 ≈ 3.9 GB) and trip the
-             * > 64000 sanity check at LoadTeamFile. */
+             * size sanity check at LoadTeamFile. */
             fileSize = BE_READ_U32(frontbuf + 4);
             if (magic == RNC_MAGIC_V1)
                 RncDecompressV1(rncSrc, dest);
@@ -373,6 +376,11 @@ void ShowFsErrorByCode(uint16_t errCode)
  * Returns: 0 = success, 1 = error
  * ================================================================ */
 #include "save_format_json.h"
+#ifdef SWOS_SDL_BUILD
+#include "modern_career_runtime.h"
+#include "modern_career_save.h"
+#include "modern_national.h"
+#endif
 
 __attribute__((used, externally_visible))
 int16_t LoadCareerFile(uint8_t *filename)
@@ -386,13 +394,65 @@ int16_t LoadCareerFile(uint8_t *filename)
      * unsupported (graceful error). The JSON load path runs its own pointer
      * fixups (RebuildPointersAfterLoad inside SaveJson_LoadCareer). See docs/
      * SAVE_DATA.md "Format migration / read-support policy". */
-    if (SaveJson_FileIsJson(filename) != 1 ||
-        SaveJson_LoadCareer(filename, NULL, 0) != 0) {
+#if !defined(SWOS_SDL_BUILD) && defined(SWOS_AMIGA_LOAD_TIMING)
+    /* The career load timed on the Amiga -> save/T_<career>.TXT (save_format_json.c) */
+    extern volatile uint16_t _currentTick;
+    extern void SaveJson_TimingReset(void), SaveJson_TimingWrite(const uint8_t *career);
+    extern void SaveJson_TimingAdd(const char *name, uint16_t ticks);
+    SaveJson_TimingReset();
+    uint16_t t0 = _currentTick;
+    int16_t isJson = SaveJson_FileIsJson(filename);
+    SaveJson_TimingAdd("is_json_check", (uint16_t)(_currentTick - t0));
+    uint16_t t1 = _currentTick;
+    int16_t bad = isJson != 1 || SaveJson_LoadCareer(filename, NULL, 0) != 0;
+    SaveJson_TimingAdd("load_career_all", (uint16_t)(_currentTick - t1));
+    SaveJson_TimingAdd("whole_load", (uint16_t)(_currentTick - t0));
+    SaveJson_TimingWrite(filename);
+    if (bad) {
+        ShowErrorMenu(_aFileSavedByDif);
+        RestoreOptions();
+        InitUserTactics();
+        return 1;
+    } else {
+        CycleMenuMusic();
+        return 0;
+    }
+#endif
+#ifdef SWOS_SDL_BUILD
+    ModernWorld pending_world={0};
+    if (ModernRuntime_Enabled() &&
+        (!ModernSave_PrepareLoad(filename,&pending_world) ||
+         !ModernCareer_ValidateWorld(&pending_world))) {
+        ModernWorld_Free(&pending_world);
         ShowErrorMenu(_aFileSavedByDif);
         RestoreOptions();
         InitUserTactics();
         return 1;
     }
+#endif
+    if (SaveJson_FileIsJson(filename) != 1 ||
+        SaveJson_LoadCareer(filename, NULL, 0) != 0) {
+#ifdef SWOS_SDL_BUILD
+        ModernWorld_Free(&pending_world);
+#endif
+        ShowErrorMenu(_aFileSavedByDif);
+        RestoreOptions();
+        InitUserTactics();
+        return 1;
+    }
+#ifdef SWOS_SDL_BUILD
+    if (ModernRuntime_Enabled()) {
+        ModernWorld *world=ModernWorld_Active();
+        ModernWorld_Free(world);
+        *world=pending_world;
+        ModernRuntime_Reset();
+        ModernNational_Refresh(world);
+        extern TeamFileEx _careerTeam;
+        extern volatile uint16_t _isNationalSelector;
+        if (!_isNationalSelector && !SaveJson_RebindModernCareerSquad())
+            ModernRuntime_ExpandCareerSquad(world, &_careerTeam);
+    }
+#endif
     CycleMenuMusic();
     return 0;
 }
@@ -415,8 +475,114 @@ int16_t SaveCareerFile(uint8_t *filename)
      * SaveJson_WriteCareer surfaces WriteFile errors via
      * ShowFsErrorByCode internally, so we just propagate its 0/1
      * result here. */
-    return SaveJson_WriteCareer(filename);
+#if !defined(SWOS_SDL_BUILD) && defined(SWOS_AMIGA_LOAD_TIMING)
+    {   /* The career save timed on the Amiga -> save/T_SAVE_<career>.TXT (save_format_json.c) */
+        extern volatile uint16_t _currentTick;
+        extern void SaveJson_TimingReset(void), SaveJson_TimingWrite(const uint8_t *career);
+        extern void SaveJson_TimingAdd(const char *name, uint16_t ticks);
+        extern int swos_io_snprintf(char *buf, uint32_t bufsz, const char *fmt, ...);
+        char nm[48];
+        uint16_t t0 = _currentTick;
+        SaveJson_TimingReset();                 /* (the writer's laps go in first) */
+        int16_t r = SaveJson_WriteCareer(filename);
+        SaveJson_TimingAdd("whole_save", (uint16_t)(_currentTick - t0));
+        swos_io_snprintf(nm, sizeof nm, "SAVE_%s", (const char *)filename);
+        SaveJson_TimingWrite((const uint8_t *)nm);
+        return r;
+    }
+#endif
+#ifdef SWOS_SDL_BUILD
+    if (ModernRuntime_Enabled() &&
+        !ModernRuntime_FlushAll(ModernWorld_Active())) {
+        ShowErrorMenu(_aDiskError);
+        return 1;
+    }
+#endif
+#ifdef SWOS_SDL_BUILD
+    if (ModernRuntime_Enabled() && !ModernSave_BeginCheckpoint(filename)) {
+        ShowErrorMenu(_aDiskError);
+        return 1;
+    }
+#endif
+    if (SaveJson_WriteCareer(filename) != 0) {
+#ifdef SWOS_SDL_BUILD
+        if (ModernRuntime_Enabled()) ModernSave_RollbackCheckpoint();
+#endif
+        return 1;
+    }
+#ifdef SWOS_SDL_BUILD
+    if (ModernRuntime_Enabled()) {
+        if (!ModernSave_Write(filename,ModernWorld_Active())) {
+            ModernSave_RollbackCheckpoint();
+            ShowErrorMenu(_aDiskError);
+            return 1;
+        }
+        ModernSave_EndCheckpoint();
+    }
+#endif
+    return 0;
 }
+
+#ifdef SWOS_SDL_BUILD
+/* One-based season of the last successful end checkpoint in this career.
+ * Persist it so reloading the checkpoint cannot overwrite it in the rollover. */
+uint16_t _modernSeasonEndAutosave;
+
+static int careerAutosaveApplicable(void)
+{
+    extern uint16_t _gameType;
+    return _gameType == 4 && ModernRuntime_Enabled();
+}
+
+static int careerAtLastManagedFixture(void)
+{
+    extern uint8_t _teamSelectionKeyCache[KEYCACHE_CAPACITY];
+    extern uint16_t _teamSelectionKeyCacheIndex, _teamSelectionKeyCacheOffset;
+    extern uint16_t _teamSelectionKeyCacheCount;
+
+    size_t offset = _teamSelectionKeyCacheOffset;
+    unsigned pending = 0;
+    for (unsigned i = _teamSelectionKeyCacheIndex; i < _teamSelectionKeyCacheCount; ++i) {
+        if (offset > KEYCACHE_CAPACITY - sizeof(TeamSelectionKeyCacheEntry))
+            return 0;
+        size_t remaining = KEYCACHE_CAPACITY - offset;
+        const TeamSelectionKeyCacheEntry *entry = (const void *)(_teamSelectionKeyCache + offset);
+        if (!KeyCacheEntryFits(entry, remaining))
+            return 0;
+        if (!entry->phaseFlag && entry->remainingElements > 0) {
+            pending += (unsigned)entry->remainingElements;
+            if (pending > 1)
+                return 0;
+        }
+        offset += entry->entryStride;
+    }
+    return pending == 1;
+}
+
+void CareerAutosave_SeasonEnd(int finishingSeason)
+{
+    extern uint16_t _currentSeasonShowing, _careerFinished, _seasonFinished;
+    uint16_t season = (uint16_t)(_currentSeasonShowing + 1u);
+    if (!season || !careerAutosaveApplicable() || _modernSeasonEndAutosave == season)
+        return;
+    if (!finishingSeason && !_careerFinished && !_seasonFinished && !careerAtLastManagedFixture())
+        return;
+
+    uint16_t previous = _modernSeasonEndAutosave;
+    uint8_t filename[] = "AUTO-END.CAR";
+    _modernSeasonEndAutosave = season;
+    if (SaveCareerFile(filename) != 0)
+        _modernSeasonEndAutosave = previous;
+}
+
+void CareerAutosave_SeasonStart(void)
+{
+    if (careerAutosaveApplicable()) {
+        uint8_t filename[] = "AUTO-NEW.CAR";
+        SaveCareerFile(filename);
+    }
+}
+#endif
 
 /* ================================================================
  * LoadPresetFile  (SWOS2.s line 121272)
@@ -510,8 +676,16 @@ int16_t LoadDIYFile(uint8_t *filename)
      * deliberately does NOT run the career RebuildPointersAfterLoad (a routed
      * .DIY goes to the DIY menu, not the career contestMenu). See
      * docs/SAVE_DATA.md "Format migration / read-support policy". */
+    /* A .DIY from the PC game or SWOS 2020 (their raw DOS dump) is imported
+     * into the same state (diy_import_dos.c, SDL only: the Amiga refuses it). */
+#ifdef SWOS_SDL_BUILD
+    if (SaveJson_FileIsJson(filename) == 1
+            ? SaveJson_LoadDIY(filename, NULL, 0) != 0
+            : DiyImportDos_Load(filename) != 0) {
+#else
     if (SaveJson_FileIsJson(filename) != 1 ||
         SaveJson_LoadDIY(filename, NULL, 0) != 0) {
+#endif
         ShowErrorMenu(_aFileSavedByDif);
         RestoreOptions();
         InitUserTactics();
@@ -656,6 +830,15 @@ int16_t LoadHilFile(uint8_t *filename)
     int16_t result;
 
     if (SaveJson_FileIsJson(filename) == 1) {
+#ifdef SWOS_SDL_BUILD
+        {   /* as the other branches: our own recording's geometry and rate (the JSON sets its
+             * rate) -- not a DOS / SWOS 2020 file's, left by the one watched before */
+            extern int _replayRecordingIsWide;
+            extern int _replayPlaybackFps;
+            _replayRecordingIsWide = 0;
+            _replayPlaybackFps = 50;
+        }
+#endif
         int16_t jr = SaveJson_LoadHighlights(filename, NULL, 0);
         if (jr != 0) {
             _hilNumGoals = 0;
@@ -926,6 +1109,25 @@ void ExitDisk(void)
     SetExitMenuFlag();
 }
 
+/* Only the terminal extension identifies the save type.  Modern 2026/27
+ * companion files end in .r04 and .link, and must not be shown as .CAR.
+ * Restrict reads to the 32-byte file-list entry. */
+static uint32_t terminalFileExtension(const uint8_t *filename)
+{
+    const uint8_t *lastDot = 0;
+    uint32_t len = 0;
+    while (len < FILENAME_ENTRY_SIZE && filename[len]) {
+        if (filename[len] == '.')
+            lastDot = filename + len;
+        ++len;
+    }
+    if (!lastDot || (uint32_t)(filename + len - lastDot) != 4)
+        return 0;
+    return ((uint32_t)lastDot[0] << 24) |
+           ((uint32_t)lastDot[1] << 16) |
+           ((uint32_t)lastDot[2] << 8) | lastDot[3];
+}
+
 /* ================================================================
  * SelectFileToSaveDialog  (SWOS2.s line 89141)
  *
@@ -949,7 +1151,6 @@ int16_t SelectFileToSaveDialog(uint32_t filterExt, uint8_t *defaultFilename,
     uint8_t *fileEntry;
     void **ptrTableCursor;
     uint32_t *extTableCursor;
-    uint8_t *scan;
     uint32_t ext;
     uint16_t i;
 
@@ -974,16 +1175,7 @@ int16_t SelectFileToSaveDialog(uint32_t filterExt, uint8_t *defaultFilename,
         extTableCursor = _extensionsBuffer;
 
         for (i = count; ; i--) {
-            /* Find the '.' in the filename */
-            scan = fileEntry;
-            while (*scan != 0x2E) /* '.' */
-                scan++;
-
-            /* Build 4-byte extension from '.' + 3 chars */
-            ext = ((uint32_t)scan[0] << 24) |
-                  ((uint32_t)scan[1] << 16) |
-                  ((uint32_t)scan[2] << 8) |
-                  (uint32_t)scan[3];
+            ext = terminalFileExtension(fileEntry);
 
             /* Check against known extensions */
             if (ext == 0x2E444959u || /* .DIY */
@@ -991,6 +1183,9 @@ int16_t SelectFileToSaveDialog(uint32_t filterExt, uint8_t *defaultFilename,
                 ext == 0x2E534541u || /* .SEA */
                 ext == 0x2E434152u || /* .CAR */
                 ext == 0x2E544143u || /* .TAC */
+#ifdef SWOS_SDL_BUILD
+                ext == 0x2E535250u || /* .SRP: a whole-match replay kept by SAVE HIGHLIGHTS */
+#endif
                 ext == 0x2E48494Cu)   /* .HIL */
             {
                 _totalNumberOfFiles++;
@@ -1029,6 +1224,8 @@ int16_t SelectFileToSaveDialog(uint32_t filterExt, uint8_t *defaultFilename,
  *   out: d0 = 0 (file selected) or 1 (error/no selection)
  *        selectedFilename global contains the chosen filename
  * ================================================================ */
+extern uint8_t _aLoadEditedTact[];
+
 __attribute__((used, externally_visible))
 int16_t GetFilenameAndExtension(uint32_t preferredExt, uint8_t *defaultFilename,
                                  uint8_t *menuTitleStr)
@@ -1038,9 +1235,14 @@ int16_t GetFilenameAndExtension(uint32_t preferredExt, uint8_t *defaultFilename,
     uint8_t *fileEntry;
     void **ptrTableCursor;
     uint32_t *extTableCursor;
-    uint8_t *scan;
     uint32_t ext;
     uint16_t i;
+
+    /* The common load-file dialog is also used by the tactics editor.
+     * Do not present .TAC files as careers, seasons or other game saves,
+     * while retaining dedicated tactic loading and the Delete File menu. */
+    const int tacticsDialog = menuTitleStr == _aLoadEditedTact;
+    const int deleteDialog = menuTitleStr == _aDeleteFile;
 
     _extension = preferredExt;
     _menuTitle = (uintptr_t)menuTitleStr;
@@ -1063,16 +1265,16 @@ int16_t GetFilenameAndExtension(uint32_t preferredExt, uint8_t *defaultFilename,
         extTableCursor = _extensionsBuffer;
 
         for (i = count; ; i--) {
-            /* Find the '.' in the filename */
-            scan = fileEntry;
-            while (*scan != 0x2E) /* '.' */
-                scan++;
+            ext = terminalFileExtension(fileEntry);
 
-            /* Build 4-byte extension from '.' + 3 chars */
-            ext = ((uint32_t)scan[0] << 24) |
-                  ((uint32_t)scan[1] << 16) |
-                  ((uint32_t)scan[2] << 8) |
-                  (uint32_t)scan[3];
+            /* A tactics file is only a load choice inside Load Tactics.
+             * Delete File intentionally continues to display all formats. */
+            if ((tacticsDialog && ext != 0x2E544143u) ||
+                (!tacticsDialog && !deleteDialog && ext == 0x2E544143u)) {
+                fileEntry += FILENAME_ENTRY_SIZE;
+                if (i == 0) break;
+                continue;
+            }
 
             /* Check against known extensions */
             /* The menu has 45 slots (_foundFilesPtrTable, _extensionsBuffer) and
@@ -1092,10 +1294,14 @@ int16_t GetFilenameAndExtension(uint32_t preferredExt, uint8_t *defaultFilename,
 #endif
                 )
             {
-                _totalNumberOfFiles++;
-                _numMatchedFiles++;
-                *ptrTableCursor++ = fileEntry;
-                *extTableCursor++ = ext;
+                /* In a filtered Load Career dialog, show only requested type.
+                 * Companion files (.r04/.link) are never career choices. */
+                if (preferredExt == 0 || ext == preferredExt) {
+                    _totalNumberOfFiles++;
+                    _numMatchedFiles++;
+                    *ptrTableCursor++ = fileEntry;
+                    *extTableCursor++ = ext;
+                }
             }
 
             fileEntry += FILENAME_ENTRY_SIZE;
@@ -1121,16 +1327,10 @@ extern uint8_t *StringCopy(const uint8_t *src, uint8_t *dst);
    and signal menu exit. Extension is packed as: '.', c1, c2, c3 (big-endian). */
 static void CopyFilenameExtensionAndSetExitMenuFlag(uint8_t *filename) {
     StringCopy(filename, _selectedFilename);
-    /* Scan for '.' in the copied filename */
-    uint8_t *p = _selectedFilename;
-    while (*p++ != '.')
-        ;
-    /* Build packed 4-byte extension: '.', char1, char2, char3 */
-    uint32_t ext = '.';
-    ext = (ext << 8) | *p++;
-    ext = (ext << 8) | *p++;
-    ext = (ext << 8) | *p++;
-    _extension = ext;
+    /* The last extension, not the first dot: guard missing extensions. */
+    uint32_t ext = terminalFileExtension(_selectedFilename);
+    if (ext)
+        _extension = ext;
     SetExitMenuFlag();
 }
 
@@ -1307,10 +1507,29 @@ void SelectFilesInputSaveFilenameOnSelect(MenuEntry *entry)
  * and assigns filenames to visible menu entries.
  * ================================================================ */
 __attribute__((used, externally_visible))
+/* SWOS 2020's file list SORT OPTION ([general] file_sort; SelectFilesSort below) */
+#ifdef SWOS_SDL_BUILD
+#include "platform_sdl.h"
+#include "swos_io.h"
+#include <sys/stat.h>
+extern PlatformInitOptions *g_arcadeOpts;
+static int32_t files_by_date(void)
+{
+    return g_arcadeOpts && !strcmp(g_arcadeOpts->file_sort, "date");
+}
+static char s_sortLabel[20];
+#endif
+
 void SelectFilesOnReturn(void)
 {
     /* Set menu title in entry 0 */
     _menuEntries[0].fg = _menuTitle;
+#ifdef SWOS_SDL_BUILD
+    snprintf(s_sortLabel, sizeof s_sortLabel, "%s", files_by_date() ? "SORTED BY DATE" : "SORTED BY NAME");
+    _menuEntries[51].fg = (uintptr_t)s_sortLabel;
+#else
+    _menuEntries[51].isInvisible = 1;   /* (the Amiga's listing has no dates: the game's order alone) */
+#endif
 
     if (_savingFile != 0) {
         /* Show save filename entry (entry 48) */
@@ -1357,7 +1576,9 @@ void SelectFilesOnReturn(void)
     for (;;) {
         entry->isInvisible = 1;
 
-        if (d6 >= _numberOfFiles)
+        /* Only the compacted, filtered entries are valid here. The source
+         * directory count also includes .r04 and .link sidecars. */
+        if (d6 >= _numMatchedFiles)
             goto nextEntry;
 
         /* Find the right column slot for this file */
@@ -1431,6 +1652,18 @@ void SelectFilesInit(void)
             SetCurrentEntry(50);
     }
 
+    SelectFilesSort();
+
+    /* Fall through to OnReturn */
+    SelectFilesOnReturn();
+}
+
+/* The list's order: by extension, then the game's own name order (its bubble sort, below) --
+ * then, with [general] file_sort = date (SWOS 2020's sortOption 0, sortFilenamesByDate), each
+ * extension's newest first. SDL: the Amiga's listing has no dates (files_by_date, above). */
+
+void SelectFilesSort(void)
+{
     /* Bubble sort files by extension then name */
     int16_t count = (int16_t)_numMatchedFiles - 2;
     if (count >= 0) {
@@ -1478,7 +1711,44 @@ void SelectFilesInit(void)
             }
         } while (swapped);
     }
+#ifdef SWOS_SDL_BUILD
+    if (files_by_date() && _numMatchedFiles > 1) {
+        enum { kMaxFiles = 64 };
+        int64_t when[kMaxFiles];
+        const int32_t n = _numMatchedFiles < kMaxFiles ? (int32_t)_numMatchedFiles : kMaxFiles;
+        for (int32_t i = 0; i < n; i++) {
+            char path[1024];
+            struct stat st;
+            snprintf(path, sizeof path, "%s/%s", swos_save_dir(), (const char *)_foundFilesPtrTable[i] + 2);
+            when[i] = stat(path, &st) == 0 ? (int64_t)st.st_mtime : 0;
+        }
+        for (int32_t i = 1; i < n; i++) {   /* (insertion: stable, the names' order kept on a tie) */
+            void *ptr = _foundFilesPtrTable[i];
+            const uint32_t ext = _extensionsBuffer[i];
+            const int64_t t = when[i];
+            int32_t j = i - 1;
+            while (j >= 0 && _extensionsBuffer[j] == ext && when[j] < t) {
+                _foundFilesPtrTable[j + 1] = _foundFilesPtrTable[j];
+                _extensionsBuffer[j + 1] = _extensionsBuffer[j];
+                when[j + 1] = when[j];
+                j--;
+            }
+            _foundFilesPtrTable[j + 1] = ptr;
+            _extensionsBuffer[j + 1] = ext;
+            when[j + 1] = t;
+        }
+    }
+#endif
+}
 
-    /* Fall through to OnReturn */
+/* SORTED BY NAME / DATE (SWOS 2020's sortOptionSelectFile): the other order, the list again */
+void SelectFilesSortOnSelect(void)
+{
+#ifdef SWOS_SDL_BUILD
+    if (g_arcadeOpts)
+        snprintf(g_arcadeOpts->file_sort, sizeof g_arcadeOpts->file_sort, "%s", files_by_date() ? "name" : "date");
+    SelectFilesSort();
     SelectFilesOnReturn();
+    DrawMenu();
+#endif
 }

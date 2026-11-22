@@ -5,6 +5,9 @@
  */
 #include "string_utils.h"
 #include "menu_system.h"   /* Int2Ascii */
+#ifdef SWOS_SDL_BUILD
+#include "modern_career_runtime.h"
+#endif
 
 /* Prevent GCC from converting byte loops to memcpy/memset (no libc) */
 #pragma GCC optimize("no-tree-loop-distribute-patterns")
@@ -203,6 +206,58 @@ static uint8_t *int2StrWithCommas(uint32_t val, uint8_t *dst)
     return dst;
 }
 
+unsigned CareerMoneyScale(void)
+{
+#ifdef SWOS_SDL_BUILD
+    extern uint16_t _gameType;
+    if (_gameType == 4 && ModernRuntime_Enabled())
+        return 7;
+#endif
+    return 1;
+}
+
+void FormatCompactMoney(uint32_t thousands, uint8_t *dst)
+{
+    if (thousands < 1000) {
+        Int2Ascii((uint16_t)thousands, dst);
+        dst += GetStringLength(dst);
+        *dst++ = 'K';
+    } else {
+        Int2Ascii((uint16_t)(thousands / 1000), dst);
+        dst += GetStringLength(dst);
+        unsigned remainder = thousands % 1000;
+        if (remainder) {
+            *dst++ = '.';
+            for (unsigned place = 100; place && remainder; place /= 10) {
+                *dst++ = '0' + remainder / place;
+                remainder %= place;
+            }
+        }
+        *dst++ = 'M';
+    }
+    *dst = 0;
+}
+
+/* Offers and ledgers use the original units. Convert at the money boundary
+ * so signed offer fields, accounting ratios and existing saves stay valid. */
+#ifdef SWOS_SDL_BUILD
+static uint8_t *writeModernMoney(uint32_t amount, unsigned scale, uint8_t *dst)
+{
+    uint64_t displayed = (uint64_t)amount * scale;
+    uint8_t digits[20];
+    unsigned count = 0;
+    do {
+        if (count && count % 4 == 3)
+            digits[count++] = ',';
+        digits[count++] = '0' + displayed % 10;
+        displayed /= 10;
+    } while (displayed);
+    while (count)
+        *dst++ = digits[--count];
+    return dst;
+}
+#endif
+
 /* ================================================================
  * Int2Pounds  (SWOS2.s line 29691)
  *
@@ -216,7 +271,13 @@ void Int2Pounds(uint32_t pounds, uint8_t *dst)
      * when currency=dollar (default stays the £, byte 0x9C). */
     dst = StringCopy(_aPound, dst);
     /* Format number with commas */
-    dst = int2StrWithCommas(pounds, dst);
+#ifdef SWOS_SDL_BUILD
+    unsigned scale = CareerMoneyScale();
+    if (scale != 1)
+        dst = writeModernMoney(pounds, scale, dst);
+    else
+#endif
+        dst = int2StrWithCommas(pounds, dst);
     /* Copy null string (null terminator) */
     StringCopy(_nullString_0, dst);
 }
@@ -232,7 +293,8 @@ void Int2PoundsSigned(int32_t pounds, uint8_t *dst)
     if (pounds < 0) {
         *dst++ = '-';
         *dst++ = ' ';
-        pounds = -pounds;
+        Int2Pounds(0u - (uint32_t)pounds, dst);
+        return;
     }
     Int2Pounds((uint32_t)pounds, dst);
 }
@@ -251,7 +313,8 @@ void WriteAccountBalance(int32_t delta, uint8_t *dst)
     } else if (delta < 0) {
         *dst++ = '-';
         *dst++ = ' ';
-        delta = -delta;
+        Int2Pounds(0u - (uint32_t)delta, dst);
+        return;
     }
     Int2Pounds((uint32_t)delta, dst);
 }

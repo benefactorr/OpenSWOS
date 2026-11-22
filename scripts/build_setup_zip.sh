@@ -10,6 +10,8 @@
 #
 #   OpenSWOS-Setup/
 #     ReadMe.txt              packaging/setup/ReadMe.txt
+#     mods/                   the game's own mods (bin/mods): listed by the setup's Mods screen,
+#                             and the Amiga's copied into a drawer or WHDLoad package
 #     setup/  data/           the setup's own files (bin/setup, credits_icons.bmp),
 #                             found ABOVE each program by both of them; setup/whdload
 #                             is the WHDLoad package's wrapper (SwosData_MakeWhdload)
@@ -74,9 +76,12 @@ cp "$SLINT_SO" "$STAGE/Linux/" &&
 readelf -d "$STAGE/Linux/openswos-setup" | grep -q 'path: \[\$ORIGIN\]' ||
     fail "the Linux openswos-setup does not look for its Slint beside itself (\$ORIGIN)"
 
-echo "== the setup's own files"
-# Tracked files only, keeping their folders (setup/whdload/...).
-scripts/stage_runtime.sh "$STAGE" setup >/dev/null || fail "copying bin/setup failed"
+echo "== the setup's own files, and the game's own mods"
+# Tracked files only, keeping their folders (setup/whdload/...). mods/ is the game's own mods
+# (practice, challenges, classics...): the setup lists them from the folder beside setup/
+# (CanonicalModsDir) and copies the Amiga's into a drawer and the WHDLoad package. Without it
+# the setup said "No mods installed yet" and an Amiga drawer went out with no mods at all.
+scripts/stage_runtime.sh "$STAGE" setup mods >/dev/null || fail "copying bin/setup and bin/mods failed"
 
 echo "== the Amiga program (dist/SWOS-Amiga.zip)"
 AMIGA_ZIP=dist/SWOS-Amiga.zip
@@ -85,6 +90,14 @@ grep -q "commit=$(git rev-parse --short=8 HEAD)" dist/.build-status 2>/dev/null 
     fail "$AMIGA_ZIP is not from this commit -- rerun scripts/build_dist.sh"
 mkdir -p "$STAGE/amiga" && python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
     "$AMIGA_ZIP" "$STAGE/amiga" || fail "unpacking $AMIGA_ZIP failed"
+# The PortMaster port, for the Handheld screen (found in the folder above the setup programs).
+if [ -f dist/portmaster/swos.zip ]; then
+    unzip -Z1 dist/portmaster/swos.zip | grep -xc "Sensible World of Soccer.sh" >/dev/null ||
+        fail "dist/portmaster/swos.zip is not the PortMaster port (no launcher)"
+    mkdir -p "$STAGE/portmaster" && cp dist/portmaster/swos.zip "$STAGE/portmaster/" || fail "copying dist/portmaster/swos.zip failed"
+else
+    echo "build_setup_zip: NOTE no dist/portmaster/swos.zip (scripts/build_portmaster.sh): the Handheld screen will ask for it" >&2
+fi
 cp bin/data/credits_icons.bmp "$STAGE/data/" &&
     cp packaging/setup/ReadMe.txt "$STAGE/ReadMe.txt" || fail "copying the ReadMe failed"
 

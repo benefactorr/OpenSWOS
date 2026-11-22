@@ -35,4 +35,25 @@ void     SetInGameTeamsFirstKits(TeamFile *team1File, TeamFile *team2File);   /*
 #endif
 uint16_t __attribute__((used, externally_visible)) ConvertPlayerDressColor(uint16_t color);
 
+/* Purple, the 11th kit colour (team_colors.c): the menu entry at start-up, the match's palette
+ * entry 12 before its sprites are coloured, a side's kit colours as last given (type, stripes,
+ * basic, shorts, socks; 0 for another TeamGame). */
+#define KIT_COLOURS 11
+void TeamColors_Init(void);
+void TeamColors_MatchPalette(TeamGame *team1);
+int32_t TeamColors_PurpleInMatch(void);   /* a side wears purple and neither maroon */
+#ifdef SWOS_SDL_BUILD
+/* After a match's sprites are coloured: while purple has entry 12, the match's own maroon art
+ * (banners, corner flags, the red card ...) drawn with entry 4 instead (report 0056). */
+void TeamColors_MatchArt(void);
+void TeamColors_MatchArtEnd(void);   /* at the match's end: the art put back */
+#endif
+const uint8_t *TeamColors_Worn(const TeamGame *team);
+
+/* ---- launcher options (agent B) ---- */
+/* Purple instead of brown ([video] purple_for_brown): every maroon kit drawn purple, in the menus
+ * and in a match (TeamColors_PurpleInMatch then: a side wears maroon or purple). Drawing only. */
+void    TeamColors_SetPurpleForMaroon(int32_t on);
+int32_t TeamColors_PurpleForMaroon(void);
+
 #endif

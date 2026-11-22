@@ -11,6 +11,7 @@
 #include "display.h"
 #include "asset_loader.h"
 #include "loader_bootstrap.h"
+#include "season_switch.h"
 #include "loader_intro.h"
 #include "audio.h"
 #include "menus.h"
@@ -232,7 +233,11 @@ void mainC(void)
     InitSkinAndDefaultPointers();
 
     /* ---- Phase 2: Build palettes ---- */
-    
+    {
+        extern void TeamColors_Init(void);
+        TeamColors_Init();          /* purple's menu palette entry (team_colors.c) */
+    }
+
 #ifdef AGA
     {
         extern uint16_t _menuPalette[];
@@ -284,6 +289,9 @@ void mainC(void)
     /* ---- Phase 5: Show title screens (skipped in arcade mode) ---- */
 #ifdef SWOS_SDL_BUILD
     { extern int _gArcadeMode; if (_gArcadeMode) goto skip_title_screens; }
+#ifdef CAREER_PLUS_SEASON_SWITCH
+    if (CareerPlus_BootAction != CAREER_PLUS_NONE) goto skip_title_screens;
+#endif
     /* No Amiga disk screens installed (main.c). */
     { extern int _gNoAmigaScreens; if (_gNoAmigaScreens) goto skip_title_screens; }
 #endif
@@ -353,6 +361,13 @@ skip_title_screens: ;
     _assetLoaderAltPathReady = 1;
     _hilNumGoals = 0;
 
+#ifndef SWOS_SDL_BUILD
+    /* The built-in mods that are on (data/MODS, read by resload at the first file read), set up:
+     * their entries and their menus' handlers (include/mod_api.h ModDef.init). The SDL build
+     * does this in main.c, after its mods list. */
+    { extern void ModHooks_Init(void); ModHooks_Init(); }
+#endif
+
     /* ---- Phase 9: Enter front-end loop (or arcade attract loop) ---- */
 #ifdef SWOS_SDL_BUILD
     {
@@ -371,8 +386,20 @@ skip_title_screens: ;
                 SrpResim_Run();       /* plays a recorded match again, then exits */
         }
         {
+            /* --convert-diy: the save writer wants the game's data as a match does. */
+            extern int32_t DiyConvert_Armed(void);
+            extern void    DiyConvert_Run(void);
+            if (DiyConvert_Armed())
+                DiyConvert_Run();     /* writes the JSON .DIY, then exits */
+        }
+        {
             extern int32_t ReplayV2_ViewTestArmed(void);
             extern void    ReplayV2_ViewTestRun(void);
+            extern int32_t LiveCast_Armed(void);
+            extern int32_t LiveCast_Run(char *viewPath, uint32_t cap);
+            static char livePath[64];
+            if (LiveCast_Armed() && LiveCast_Run(livePath, sizeof livePath) != 0)
+                exit(1);            /* (LIVE CAST: nothing to watch -- said why) */
             if (ReplayV2_ViewTestArmed())
                 ReplayV2_ViewTestRun();   /* plays a .SRP, then exits */
         }

@@ -28,12 +28,13 @@ uint16_t GetNumberOfSubstitutesInSelectionList(TeamFileEx *team, uint16_t extraC
 uint32_t GetNumberOfAvailablePlayers(TeamFileEx *team, int16_t excludeCardsFlag, uint16_t numPl);
 uint32_t GetNumberOfAvailableSubstitutes(TeamFileEx *team, int16_t flag);
 uint32_t GetNumberOfAvailableStartingPlayers(TeamFileEx *team, int16_t flag);
+uint16_t Career_PlayerUnavailable(const PlayerFile *player, int16_t excludeCardsFlag);
 int16_t GetAgeAdjustedPlayerFormFactor(uint8_t *playerBase);
 
 /* --- Financial management --- */
 void ClampNewBalanceAndUpdateClubStatus(void);
 void ClearOverdraftStateIfRecovered(void);
-void UpdateCareerFinancesAfterMatch(DIYCompetitionEx *comp, TeamFileEx *team);
+void UpdateCareerFinancesAfterMatch(DIYCompetitionEx *comp, TeamFileEx *team, TeamFileEx *opponent);
 void ApplyWeeklyFinancialDeductions(void);
 void InitializeCareerSeasonFinancials(void);
 

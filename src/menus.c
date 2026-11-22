@@ -1,24 +1,35 @@
-#include "swos_fixed_team_name.h"
-#include "career_params.h"
+#include "season_switch.h"
+#include <stdio.h>
+#ifdef SWOS_SDL_BUILD
+#include "modern_career_runtime.h"
+#include "career_autopilot.h"
+#include "modern_national.h"
+#include "transfer_market.h"
+#include <stdio.h>
+#endif
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
-#include "swos_age_identity_log.h"
-#ifdef SWOS_SDL_BUILD
-#include "swos_identity_runtime.h"
-#endif
-#include "menus.h"
-#include "career_plus_options.h"
+#include "swos_fixed_team_name.h"   /* SWOS_TeamNameCopy: a 17-byte name may have no NUL */
 #include "career_season.h"
-#include <stdio.h>
-#include <string.h>  /* managed retirement-news name snapshots */
+#include "career_params.h"   /* num_seasons: the career's last season */
+#include "file_io.h"
+#include "world_playoff.h"
+#include "player_face3.h"
+#include "menus.h"
+#ifdef SWOS_SDL_BUILD
+#include "menu_dialog.h"     /* OPTIONS' notes */
+#endif
+#include "mod_hooks.h"        /* playerRowDrawn (SDL) */
+#include "dos_mode.h"         /* GAMEPLAY_*, Gameplay_SetStyle: OPTIONS -> GAMEPLAY */
 #ifdef SWOS_SDL_BUILD
 /* PlatformInitOptions + Settings_Save, for the OPTIONS -> GAMEPLAY row. Guarded
  * because this header reaches platform_sdl.h and therefore SDL.h, which the
  * m68k build has no idea about — and there is no SWOS.ini on the Amiga. */
 #include "swos_settings.h"
+#include <string.h>
 #endif
 #include "translations.h"
 #include "comp_identity.h"
@@ -28,31 +39,30 @@
 #endif
 #include "game_utils.h"
 #include "game_types.h"
+#include "world.h"
+#ifdef SWOS_SDL_BUILD
+#include <SDL.h>              /* OPTIONS -> WORLD: its messages */
+#include "project_identity.h"
+#include "swos_io.h"            /* swos_data_path */
+#endif
 #include "frontend.h"
 #include "test_rules.h"
 #include "display.h"            /* AGA: which Amiga display this build is */
 #include "menu_system.h"
-#include "online_menus.h"   /* MULTIPLAYER opens SWOS 2020's online flow */
+#include "online_menus.h"
+#include "mods.h"          /* Mods_OnlineSignature: MULTIPLAYER logs the mods it plays with */   /* MULTIPLAYER opens SWOS 2020's online flow */
 #include "credits_menu.h"   /* CREDITS (SDL) */
 #include "deterministic.h"
 #include "string_utils.h"
 #include "text_render.h"
+#include "cal_label.h"   /* CareerGameListCommon: a long competition name fitted */
 #include "edit_tactics.h"
 #include "teams.h"
 #include "audio.h"
 #include "career_status.h"
 #include "chairman_memo.h"
 #include "play_match_menu.h"
-#ifdef SWOS_SDL_BUILD
-#include "swos_io.h"
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
-#endif
-
-/* These variables back the OPTIONS menu's string tables directly. */
-uint16_t _careerImprovedAiOption = 1;
-uint16_t _careerThreeButtonOption = 0;
+#include <string.h>   /* national retirement squad order */
 
 /* ---- Constants ---- */
 #define GAME_TYPE_NO_GAME 0
@@ -206,15 +216,57 @@ void ZeroOutStars(void)
  *
  * Initializes game options to default values.
  * ================================================================ */
+#ifdef SWOS_SDL_BUILD
+/* The OPTIONS screen between runs: SWOS.ini's [options] (include/platform_sdl.h), over the
+ * defaults below, and written back at every change on the screen. The original kept them in
+ * memory and in a career only, so they were the defaults again at every start. */
+static void options_apply_saved(void)
+{
+    extern PlatformInitOptions *g_arcadeOpts;
+    const PlatformInitOptions *o = g_arcadeOpts;
+    if (!o)
+        return;
+    if (o->opt_game_length != OPTION_UNSET)          _gameLength = (uint16_t)o->opt_game_length;
+    if (o->opt_pitch_type != OPTION_UNSET)           _pitchType = (uint16_t)(int16_t)o->opt_pitch_type;
+    if (o->opt_auto_replays != OPTION_UNSET)         _autoReplays = (uint16_t)o->opt_auto_replays;
+    if (o->opt_all_teams_equal != OPTION_UNSET)      _allPlayerTeamsEqual = (uint16_t)o->opt_all_teams_equal;
+    if (o->opt_auto_save_highlights != OPTION_UNSET) _autoSaveHighlights = (uint16_t)o->opt_auto_save_highlights;
+    if (o->opt_menu_music != OPTION_UNSET)           _menuMusic = (uint16_t)o->opt_menu_music;
+}
+
+static void options_keep(void)
+{
+    extern PlatformInitOptions *g_arcadeOpts;
+    extern const char *g_arcadeIniPath;
+    PlatformInitOptions *o = g_arcadeOpts;
+    if (!o)
+        return;
+    o->opt_game_length = _gameLength;
+    o->opt_pitch_type = (int16_t)_pitchType;
+    o->opt_auto_replays = _autoReplays;
+    o->opt_all_teams_equal = _allPlayerTeamsEqual;
+    o->opt_auto_save_highlights = _autoSaveHighlights;
+    o->opt_menu_music = _menuMusic;
+    if (g_arcadeIniPath)
+        Settings_Save(o, g_arcadeIniPath);
+}
+#define OPTIONS_KEEP() options_keep()
+#else
+#define OPTIONS_KEEP() ((void)0)
+#endif
+
 __attribute__((used, externally_visible))
 void SetDefaultOptions(void)
 {
     _gameLength = 0;
     _autoReplays = 1;
-    _menuMusic = 0;
+    _menuMusic = 1;
     _autoSaveHighlights = 1;
     _pitchType = SEASONAL;
     _allPlayerTeamsEqual = 0;
+#ifdef SWOS_SDL_BUILD
+    options_apply_saved();
+#endif
 }
 
 /* ================================================================
@@ -330,6 +382,11 @@ __attribute__((used, externally_visible, optimize("no-tree-loop-distribute-patte
 void InitUserTactics(void)
 {
     int16_t i;
+#ifdef SWOS_SDL_BUILD
+    /* (the game's own formations, under [gameplay] cpu_tactics = expert: src/tactics_expert.c) */
+    extern void TacticsExpert_Hold(void), TacticsExpert_Release(void);
+    TacticsExpert_Hold();
+#endif
 
     /* Copy positions[8..9] (70 bytes) from 532 formation to both 442 and Sweep.
      *
@@ -380,6 +437,9 @@ void InitUserTactics(void)
     StringCopy(_aUSER_F, (uint8_t *)_teamTacticsUSERF.name);
 
     InitializeTacticsPositions();
+#ifdef SWOS_SDL_BUILD
+    TacticsExpert_Release();
+#endif
 }
 
 /* ================================================================
@@ -399,9 +459,6 @@ void InitCareerVariables(uint16_t gameTypeParam)
     _newRandomSeedCopy = (uint8_t)(_currentTick & 0xFF);
 #endif
     _gameType = gameTypeParam;
-    /* A newly created career starts a fresh 35-season winners archive.
-     * Loading a career restores its own archive from the save file. */
-    if (gameTypeParam == 4) CareerWinners_Clear();
     _contestStarted = 0;
     _teamsLoaded = 0;
     _careerAutoAdvanceInProgress = 0;
@@ -724,9 +781,7 @@ void ShowStadiumInit(void)
     /* Entry 2: top team name + trailing space */
     {
         uint8_t *dst = (uint8_t *)_menuEntries[2].fg;
-        uint8_t safeName[18];
-        SWOS_CopyTeamName18(safeName, _topTeamInGame.teamName);
-        uint8_t *end = StringCopy(safeName, dst);
+        uint8_t *end = SWOS_TeamNameCopy((uint8_t *)_topTeamInGame.teamName, dst);
         *end++ = ' ';
         *end = 0;
     }
@@ -750,9 +805,7 @@ void ShowStadiumInit(void)
     {
         uint8_t *dst = (uint8_t *)_menuEntries[4].fg;
         *dst++ = ' ';
-        uint8_t safeName[18];
-        SWOS_CopyTeamName18(safeName, _bottomTeamInGame.teamName);
-        StringCopy(safeName, dst);
+        SWOS_TeamNameCopy((uint8_t *)_bottomTeamInGame.teamName, dst);
     }
 
     /* Color bottom team name if not in highlights mode */
@@ -930,8 +983,6 @@ void SquadOnSelect11(void)
 {
     _isSquadViewMode = 0;
     SquadUpdateMenuState();
-    /* Restore the attribute heading when leaving the GOALS view. */
-    _menuEntries[13].fg = (uintptr_t)(const uint8_t *)"H F S C T P V";
     SetCurrentEntry(8);
     DrawMenu();
 }
@@ -1084,6 +1135,8 @@ extern uint8_t  _currentMatchPlayers[];
 extern uint16_t _careerNumPlayers;
 extern void CallDrawMenuItem(MenuEntry *entry);
 extern void SetBenchPlayersNumbers(TeamFileEx *team);
+extern int32_t SquadNumbers_On(void);           /* (real squad numbers: teams.c) */
+extern void SquadNumbers_Free(uint16_t slot);
 extern uint8_t *GetPlayerAtIndex(uint16_t teamNumber, uint16_t ordinal);
 extern uint16_t _cGetPlayerAtIndexFileIdx;
 
@@ -1178,8 +1231,10 @@ static void squadSwapPlayersAtIndices(uint16_t prevFileIdx, uint16_t currFileIdx
         PlayerFile *prevPf = (PlayerFile *)(prevBlockPtr + 76);
         PlayerFile *currPf = (PlayerFile *)(currBlockPtr + 76);
         int8_t tmpShirt = currPf->shirtNumber;
-        currPf->shirtNumber = prevPf->shirtNumber;
-        prevPf->shirtNumber = tmpShirt;
+        if (!SquadNumbers_On()) {       /* (real squad numbers: not swapped, teams.c) */
+            currPf->shirtNumber = prevPf->shirtNumber;
+            prevPf->shirtNumber = tmpShirt;
+        }
     }
 
     /* Always swap player number array entries at break positions */
@@ -1266,12 +1321,14 @@ static void setBgColorIndex(MenuEntry *e, uint16_t colorIdx) {
     e->bgColor = (e->bgColor & 0xFFF0) | colorIdx;
 }
 
-/* Fixed-width SWOS club names may occupy all 17 bytes, without a NUL.
- * Keep menu text separate from adjacent live team fields (own-goal counter). */
-static char s_squadClubName[18];
-static char s_viewSquadClubName[18];
-/* Shared fixed-width name handling. */
-#define SWOS_MenuCopyClubName SWOS_CopyTeamName18
+static const char squadAttributeHeadings[] = "H F S C T P V";
+static uint16_t squadGoalsHeadingX, squadGoalsHeadingFlags;
+
+static int career_squad_attributes(void)
+{
+    return _gameType == 4 &&
+           (ModernRuntime_Enabled() || World_Current() == WORLD_9697);
+}
 
 /* SquadUpdateMenuState (SWOS2.s line 48491)
  * Updates squad menu entry visibility, colors, and strings based on
@@ -1307,10 +1364,9 @@ void SquadUpdateMenuState(void)
 
     /* Entries 15, 13 initially invisible */
     _menuEntries[15].isInvisible = 1;
-    _menuEntries[13].isInvisible = 0;
-    if (_isSquadViewMode != 0) {
-        _menuEntries[13].fg = (uintptr_t)(const uint8_t *)"NAT";
-        _menuEntries[13].x = 200;
+    _menuEntries[13].isInvisible = 1;
+    if (_isSquadViewMode == 0) {
+        _menuEntries[13].isInvisible = 0;
     }
 
     /* Entry 14 initially invisible */
@@ -1503,9 +1559,23 @@ afterEDE:
     _menuEntries[12].isInvisible = 1;
 
 afterBankBalance:
+    if (career_squad_attributes()) {
+        MenuEntry *heading = &_menuEntries[13];
+        heading->fg = (uintptr_t)_aGoals;
+        heading->x = squadGoalsHeadingX;
+        heading->stringFlags = squadGoalsHeadingFlags;
+        if (!_isSquadViewMode) {
+            heading->fg = (uintptr_t)squadAttributeHeadings;
+            heading->x = 196;
+            heading->stringFlags = (heading->stringFlags & ~0x4000u) | 0x8000u;
+            heading->isInvisible = 0;
+            _menuEntries[14].isInvisible = 1;
+            for (unsigned i = 17; i <= 22; ++i) _menuEntries[i].isInvisible = 1;
+        }
+    }
+
     /* Entry 2: fg = team name, Entry 5: fg = coach name */
-    SWOS_MenuCopyClubName(s_squadClubName, tf->teamName);
-    _menuEntries[2].fg = (uintptr_t)s_squadClubName;
+    _menuEntries[2].fg = (uintptr_t)tf->teamName;
     _menuEntries[5].fg = (uintptr_t)tf->coachName;
     return;
 
@@ -1561,261 +1631,56 @@ static void setColorPair46_48(uint16_t colorIdx) {
     setBgColorIndex(&_menuEntries[48], colorIdx);
 }
 
-/* Full seven-attribute display for the ordinary SQUAD tab.
- * Packed SWOS ratings have a 0..7 effective scale; the top nibble's
- * extra bit is not a separate skill level. Goalkeepers have no ratings. */
-/* Age display is intentionally a read-only first stage. Name lookup follows
- * transfers, but cannot distinguish two players with identical names. The
- * generated CSV excludes name collisions with different source ages. */
+static unsigned format_squad_attributes(char text[14], const PlayerFile *player)
+{
+    unsigned ratings[] = {
+        (uint8_t)player->velocityHeading & 7,
+        (uint8_t)player->speedFinishing & 7,
+        ((uint8_t)player->speedFinishing >> 4) & 7,
+        (uint8_t)player->tacklingControl & 7,
+        ((uint8_t)player->tacklingControl >> 4) & 7,
+        (uint8_t)player->passing & 7,
+        ((uint8_t)player->velocityHeading >> 4) & 7
+    };
+    int keeper = !(player->positionAndFace & PF_POSITION_MASK);
+    unsigned total = 0;
+    for (unsigned i = 0; i < 7; ++i) {
+        text[2 * i] = keeper ? '-' : (char)('0' + ratings[i]);
+        if (i < 6) text[2 * i + 1] = ' ';
+        total += ratings[i];
+    }
+    text[13] = 0;
+    return keeper ? 255 : total;
+}
+
 #ifdef SWOS_SDL_BUILD
-typedef struct { char name[48]; uint8_t age; } SquadAgeRecord;
-static SquadAgeRecord *s_squadAges;
-static size_t s_squadAgeCount;
-static int s_squadAgesLoaded;
-static int s_squadAgeBulkRestore;
-static int SquadAgeCompare(const void *a, const void *b)
+static const char *classic_squad_name(const PlayerFile *player, unsigned age,
+                                     const MenuEntry *name, const MenuEntry *position)
 {
-    return strcmp(((const SquadAgeRecord *)a)->name,
-                  ((const SquadAgeRecord *)b)->name);
-}
-static void SquadAgeLoad(void)
-{
-    char path[512], line[256];
-    FILE *f;
-    size_t capacity = 0;
-    if (s_squadAgesLoaded) return;
-    s_squadAgesLoaded = 1;
-    /* Team files are usually in DATA/.  swos_data_path() does not
-     * automatically prepend DATA, so try both layouts explicitly. */
-    {
-        static const char *const candidates[] = {
-            "DATA/player_ages_by_name.csv",
-            "data/player_ages_by_name.csv",
-            "player_ages_by_name.csv"
-        };
-        size_t i;
-        f = NULL;
-        for (i = 0; i < sizeof candidates / sizeof candidates[0]; ++i) {
-            const char *resolved = swos_data_path(candidates[i], path,
-                                                   (uint32_t)sizeof path);
-            f = fopen(resolved, "rb");
-            if (f) {
-                fprintf(stderr, "[squad-age] loading CSV: %s\n", resolved);
-                break;
-            }
-        }
+    extern uint8_t _smallCharsTable[];
+    static char label[sizeof player->playerName + 8];
+    size_t length = 0;
+    while (length < 21u && length < sizeof player->playerName &&
+           player->playerName[length] && (uint8_t)player->playerName[length] != 0xFF)
+        ++length;
+
+    char suffix[8] = "";
+    if (age)
+        snprintf(suffix, sizeof suffix, " (%u)", age);
+    /* Account for the inset on a coloured name cell and leave a gutter
+     * before the position. Keep the age when a wide name needs shortening. */
+    unsigned start = name->x + (name->background != NO_BACKGROUND ? 2u : 0u) + 2u;
+    unsigned room = position->x > start ? position->x - start : 0;
+    for (;;) {
+        while (length && player->playerName[length - 1] == ' ')
+            --length;
+        snprintf(label, sizeof label, "%.*s%s", (int)length, player->playerName, suffix);
+        if (!length || GetTextWidth((uint8_t *)label, _smallCharsTable) <= room)
+            return label;
+        --length;
     }
-    if (!f) {
-        swos_age_log("CSV_MISSING", "fallback=25");
-        fprintf(stderr, "[squad-age] CSV not found (tried DATA/player_ages_by_name.csv "
-                        "and player_ages_by_name.csv). All ages default to 25.\n");
-        return;
-    }
-    while (fgets(line, sizeof line, f)) {
-        char *comma = strrchr(line, ',');
-        char *start = line;
-        char *end;
-        long age;
-        size_t n;
-        if (!comma) continue;
-        *comma++ = 0;
-        age = strtol(comma, &end, 10);
-        if (end == comma || age < 15 || age > 60) continue;
-        n = strlen(start);
-        if (!n || n >= sizeof s_squadAges[0].name) continue;
-        if (s_squadAgeCount == capacity) {
-            size_t next = capacity ? capacity * 2 : 1024;
-            SquadAgeRecord *newData = (SquadAgeRecord *)realloc(
-                s_squadAges, next * sizeof *newData);
-            if (!newData) break;
-            s_squadAges = newData;
-            capacity = next;
-        }
-        memcpy(s_squadAges[s_squadAgeCount].name, start, n + 1);
-        s_squadAges[s_squadAgeCount].age = (uint8_t)age;
-        ++s_squadAgeCount;
-    }
-    fclose(f);
-    qsort(s_squadAges, s_squadAgeCount, sizeof *s_squadAges,
-          SquadAgeCompare);
-    fprintf(stderr, "[squad-age] loaded %zu player ages\n", s_squadAgeCount);
-    swos_age_log("CSV_LOADED", "entries=%zu", s_squadAgeCount);
-}
-/* Career age snapshot storage. Original SWOS player records have no identity/age
- * field. The current display keys ages by canonical name; save the snapshot
- * inside each JSON career so later changes to the external CSV cannot alter
- * the ages of an existing career. Duplicate names need a future identity pass. */
-void SWOS_AgesResetCareer(void)
-{
-    free(s_squadAges);
-    s_squadAges = NULL;
-    s_squadAgeCount = 0;
-    s_squadAgesLoaded = 0;
-    s_squadAgeBulkRestore = 0;
-    swos_age_log("AGE_RESET", "snapshot_cleared=1");
-}
-void SWOS_AgesBeginRestore(void)
-{
-    SWOS_AgesResetCareer();
-    s_squadAgesLoaded = 1;
-    s_squadAgeBulkRestore = 1;
-    swos_age_log("RESTORE_BEGIN", "name_indexed=1");
-}
-void SWOS_AgesEndRestore(void)
-{
-    s_squadAgeBulkRestore = 0;
-    qsort(s_squadAges, s_squadAgeCount, sizeof *s_squadAges, SquadAgeCompare);
-    swos_age_log("RESTORE_END", "entries=%zu", s_squadAgeCount);
-}
-size_t SWOS_AgesCount(void)
-{
-    SquadAgeLoad();
-    return s_squadAgeCount;
-}
-int SWOS_AgesGet(size_t i, const char **name, unsigned *age)
-{
-    SquadAgeLoad();
-    if (i >= s_squadAgeCount) return 0;
-    *name = s_squadAges[i].name;
-    *age = s_squadAges[i].age;
-    return 1;
-}
-/* Exact CSV lookup for the original-player identity registry. Keep the
- * canonical name lookup in one place so new careers use the same CSV as
- * the squad screen and market fallback. */
-int SWOS_AgesLookupExact(const char *rawName, unsigned *outAge)
-{
-    SquadAgeRecord key;
-    SquadAgeRecord *found;
-    size_t i = 0;
-    if (!rawName || !outAge) return 0;
-    memset(&key, 0, sizeof key);
-    while (i < sizeof key.name - 1u && i < 22u && rawName[i]) {
-        key.name[i] = (char)toupper((unsigned char)rawName[i]);
-        ++i;
-    }
-    while (i && key.name[i - 1] == ' ') key.name[--i] = 0;
-    if (!i) return 0;
-    SquadAgeLoad();
-    found = (SquadAgeRecord *)bsearch(&key, s_squadAges,
-                  s_squadAgeCount, sizeof *s_squadAges, SquadAgeCompare);
-    if (!found) return 0;
-    *outAge = found->age;
-    return 1;
-}
-/* Used by save loading and, later, by the seasonal-ageing mechanism.
- * Only explicit ages 15..60 are accepted. */
-int SWOS_AgesSet(const char *name, unsigned age)
-{
-    SquadAgeRecord key, *found, *p;
-    size_t i, n;
-    if (!name || age < 15 || age > 60) return 0;
-    n = strlen(name);
-    if (!n || n >= sizeof key.name) return 0;
-    SquadAgeLoad();
-    memset(&key, 0, sizeof key);
-    for (i = 0; i < n; ++i)
-        key.name[i] = (char)toupper((unsigned char)name[i]);
-    found = s_squadAgeBulkRestore ? NULL : (SquadAgeRecord *)bsearch(&key, s_squadAges,
-                s_squadAgeCount, sizeof *s_squadAges, SquadAgeCompare);
-    if (found) { found->age = (uint8_t)age; return 1; }
-    p = (SquadAgeRecord *)realloc(s_squadAges,
-                       (s_squadAgeCount + 1) * sizeof *s_squadAges);
-    if (!p) return 0;
-    s_squadAges = p;
-    s_squadAges[s_squadAgeCount] = key;
-    s_squadAges[s_squadAgeCount].age = (uint8_t)age;
-    s_squadAgeCount++;
-    if (!s_squadAgeBulkRestore)
-        qsort(s_squadAges, s_squadAgeCount, sizeof *s_squadAges, SquadAgeCompare);
-    return 1;
-}
-/* Advance the name-indexed career age snapshot exactly once when called
- * by ContinueCareerNextSeason. Do not call during new-career initialisation
- * or loading an existing save. The JSON save persists these updated ages.
- * Transitional support only: generated TRIAL/RES identities are NOT tracked. */
-void SWOS_AgesAdvanceOneSeason(void)
-{
-    size_t i;
-    SquadAgeLoad();
-    for (i = 0; i < s_squadAgeCount; ++i) {
-        if (s_squadAges[i].age < 60)
-            ++s_squadAges[i].age;
-    }
-    fprintf(stderr, "[squad-age] advanced %zu name-based ages by one year\n",
-            s_squadAgeCount);
-    swos_age_log("SEASON_AGE", "entries=%zu mechanism=name_based", s_squadAgeCount);
-}
-static uint8_t SquadAgeForPlayer(const PlayerFile *pf)
-{
-    /* Generated trialists and reserve players enter the career at age 17.
-     * Test before name lookup: generated players can reuse existing names. */
-    if ((uint8_t)pf->form == PLAYER_FORM_TRIALIST ||
-        (uint8_t)pf->form == PLAYER_FORM_RESERVE)
-        return 17;
-    char name[48];
-    SquadAgeRecord key;
-    SquadAgeRecord *found;
-    size_t n = 0;
-    SquadAgeLoad();
-    /* The player name is a fixed-width SWOS field, not always NUL ended. */
-    while (n < 22 && pf->playerName[n] && n < sizeof name - 1) {
-        unsigned char c = (unsigned char)pf->playerName[n];
-        name[n] = (char)toupper(c);
-        ++n;
-    }
-    while (n && name[n - 1] == ' ') --n;
-    name[n] = 0;
-    memset(&key, 0, sizeof key);
-    memcpy(key.name, name, n + 1);
-    found = (SquadAgeRecord *)bsearch(&key, s_squadAges,
-              s_squadAgeCount, sizeof *s_squadAges, SquadAgeCompare);
-    return found ? found->age : 25;
-}
-#else
-int SWOS_AgesLookupExact(const char *name, unsigned *age)
-{ (void)name; (void)age; return 0; }
-void SWOS_AgesAdvanceOneSeason(void) {}
-void SWOS_AgesResetCareer(void) {}
-void SWOS_AgesBeginRestore(void) {}
-void SWOS_AgesEndRestore(void) {}
-size_t SWOS_AgesCount(void) { return 0; }
-int SWOS_AgesGet(size_t i, const char **name, unsigned *age)
-{ (void)i; (void)name; (void)age; return 0; }
-int SWOS_AgesSet(const char *name, unsigned age)
-{ (void)name; (void)age; return 0; }
-static uint8_t SquadAgeForPlayer(const PlayerFile *pf)
-{
-    if ((uint8_t)pf->form == PLAYER_FORM_TRIALIST ||
-        (uint8_t)pf->form == PLAYER_FORM_RESERVE)
-        return 17;
-    return 25;
 }
 #endif
-static const uint8_t squadAttributeHeadings[] = "H F S C T P V";
-static uint8_t SquadFormatSevenAttributes(uint8_t *dst, const PlayerFile *pf)
-{
-    const uint8_t isGK = ((pf->positionAndFace & PF_POSITION_MASK) == 0);
-    const uint8_t ratings[7] = {
-        (uint8_t)pf->velocityHeading & 7,          /* H */
-        (uint8_t)pf->speedFinishing & 7,           /* F */
-        ((uint8_t)pf->speedFinishing >> 4) & 7,    /* S */
-        (uint8_t)pf->tacklingControl & 7,          /* C */
-        ((uint8_t)pf->tacklingControl >> 4) & 7,   /* T */
-        (uint8_t)pf->passing & 7,                  /* P */
-        ((uint8_t)pf->velocityHeading >> 4) & 7   /* V */
-    };
-    uint8_t total = 0;
-    for (unsigned i=0; i<7; ++i) {
-        *dst++ = isGK ? '-' : (uint8_t)('0' + ratings[i]);
-        if (!isGK) total = (uint8_t)(total + ratings[i]);
-        if (i != 6) *dst++ = ' ';
-    }
-    /* Keep the formatted line inside the menu entry text buffer: 13 chars.
-     * Draw the total separately in the old nationality cell instead. */
-    *dst = 0;
-    return isGK ? 0xFF : total;
-}
 
 /* SquadAfterDrawCommon (SWOS2.s line 48777)
  * AfterDraw callback for squad menu player rows. Sets row colors,
@@ -1911,148 +1776,42 @@ void SquadAfterDrawCommon(void *entryPtr)
 
     /* Entry 48: player name */
     e = &_menuEntries[48];
-    if (_isSquadViewMode == 0) {
-        /* Display age beside the name, never as a separate column.
-         * Each physical squad slot has its own stable text buffer. */
-        static char namesWithAge[32][32];
-        unsigned ix=(unsigned)d4_fileIdx & 31u;
-        unsigned age=SquadAgeForPlayer(pf);
-#ifdef SWOS_SDL_BUILD
-        int managedAgeResolved=0;
-        /* The managed club is special: its 16 original physical slots are
-         * held in _careerTeam and replaced in place after retirements. Read
-         * the persisted slot identity before any name-based fallback or
-         * national-squad/view-mode checks. In particular, a generated youth
-         * with normal form=0 must not be mistaken for an original age-25
-         * footballer simply because its name is absent from the CSV. */
-        if (_gameType == 4 &&
-            (_squadTeamFilePtr == (uintptr_t)&_careerTeam ||
-             PACK_BE_U16(tf->countryNumber,tf->teamOrdinal) == _selTeamNumber)) {
-            unsigned managedAge=0,managedId=0;
-            if(SWOS_IdentityAgeForClub((unsigned)_selTeamNumber,
-                                      (unsigned)d4_fileIdx,
-                                      &managedAge,&managedId) &&
-               managedId && managedAge>=15u && managedAge<=60u) {
-                age=managedAge;
-                managedAgeResolved=1;
-            }
-        }
-        /* National squads contain COPIES of club players. Looking up an age
-         * by national team ID (0x50xx) fails, after which the old renderer
-         * used the name-based CSV snapshot. That snapshot can refer to an
-         * obsolete player with the same name, e.g. a 47-year-old national
-         * copy while the current club player is 35. Use the saved source
-         * club and physical slot instead. Do not modify player data. */
-        if (_isNationalSquad != 0 && d4_fileIdx < 20u &&
-            _squadTeamFilePtr == (uintptr_t)&_careerTeam) {
-            extern uint16_t _careerUnavailablePlayerLookupTable[];
-            unsigned sourceClub=_careerUnavailablePlayerLookupTable[(unsigned)d4_fileIdx*2u];
-            unsigned sourceSlot=_careerUnavailablePlayerLookupTable[(unsigned)d4_fileIdx*2u+1u];
-            unsigned sourceAge=0,sourceId=0;
-            unsigned sourceFound=0;
-            if(sourceClub!=0xFFFFu && (sourceClub>>8)<80u && sourceSlot<16u) {
-                sourceFound=SWOS_IdentityAgeForClub(sourceClub,sourceSlot,&sourceAge,&sourceId);
-                if(sourceFound && sourceId && sourceAge>=15u && sourceAge<=60u) {
-                    age=sourceAge;
-                    managedAgeResolved=1;
-                }
-            }
-            if ((unsigned)d4_fileIdx==1u || (sourceFound && sourceAge>=40u))
-                swos_age_log("NATIONAL_SOURCE_AGE_RENDER",
-                    "national=%04X slot=%u source=%04X:%u got=%u id=%u identity_age=%u shown_age=%u name=%.22s",
-                    (unsigned)_selTeamNumber,(unsigned)d4_fileIdx,
-                    sourceClub,sourceSlot,sourceFound,sourceId,sourceAge,age,
-                    (const char *)pf->playerName);
-        }
-        if (!managedAgeResolved && _isNationalSquad == 0) {
-            unsigned club=PACK_BE_U16(tf->countryNumber,tf->teamOrdinal);
-            unsigned idAge=0,id=0,found=0;
-            if (_squadTeamFilePtr == (uintptr_t)&_careerTeam) {
-                unsigned generated[4];
-                for(unsigned gi=0;gi<SWOS_GeneratedIdentityCount();++gi) {
-                    if(SWOS_GeneratedIdentityGet(gi,generated) &&
-                       (generated[0]==(unsigned)_selTeamNumber || generated[0]==club) &&
-                       generated[1]==(unsigned)d4_fileIdx) {
-                        idAge=generated[3]; id=generated[2]; found=1; break;
-                    }
-                }
-            }
-            if (!found && SWOS_ManualIdentityIsTouched(club,(unsigned)d4_fileIdx))
-                found=SWOS_ManualIdentityAge(club,(unsigned)d4_fileIdx,&idAge,&id);
-            else if (!found && (unsigned)d4_fileIdx<16u &&
-                     (uint8_t)pf->form!=PLAYER_FORM_TRIALIST &&
-                     (uint8_t)pf->form!=PLAYER_FORM_RESERVE)
-                /* Canonical replacement identities cover the manager's
-                 * original squad slots too. The old != &_careerTeam test
-                 * excluded them and incorrectly displayed fallback age 25. */
-                found=SWOS_IdentityAgeForClub(
-                    _squadTeamFilePtr == (uintptr_t)&_careerTeam
-                        ? (unsigned)_selTeamNumber : club,
-                    (unsigned)d4_fileIdx,&idAge,&id);
-            if(found && id && idAge>=15u && idAge<=60u) age=idAge;
-        }
-#endif
-#ifdef SWOS_SDL_BUILD
-        /* Recheck the live human squad without relying on the menu's game
-         * type or national-squad flags. Neither is guaranteed to describe
-         * the manager's club while the career menus are changing screens.
-         * The source of truth remains the persisted identity registry. */
-        if (_squadTeamFilePtr == (uintptr_t)&_careerTeam && d4_fileIdx < 32u) {
-            unsigned liveClub = PACK_BE_U16(tf->countryNumber, tf->teamOrdinal);
-            unsigned storedAge = 0, storedId = 0;
-            unsigned foundLive = SWOS_IdentityAgeForClub(
-                liveClub, (unsigned)d4_fileIdx, &storedAge, &storedId);
-            if (foundLive && storedId && storedAge >= 15u && storedAge <= 60u)
-                age = storedAge;
-            /* Log once per physical slot, not on every frame. This provides
-             * observable proof of which IDs and ages the renderer receives. */
-            static uint32_t loggedHumanSlots;
-            uint32_t bit = UINT32_C(1) << d4_fileIdx;
-            if (!(loggedHumanSlots & bit)) {
-                loggedHumanSlots |= bit;
-                swos_age_log("HUMAN_SQUAD_AGE_RENDER",
-                    "club=%04X selected=%04X slot=%u got=%u id=%u "
-                    "stored_age=%u shown_age=%u game_type=%u form=%u",
-                    liveClub, (unsigned)_selTeamNumber,
-                    (unsigned)d4_fileIdx, foundLive, storedId,
-                    storedAge, age, (unsigned)_gameType,
-                    (unsigned)(uint8_t)pf->form);
-            }
-        }
-#endif
-        /* Instrument the real age display, including squad views that use a
-         * temporary TeamFileEx rather than the literal &_careerTeam buffer.
-         * Log the first 32 render events (and every slot-five event), so
-         * a missing managed-team pointer match cannot hide the evidence. */
-#ifdef SWOS_SDL_BUILD
-        {
-            static unsigned ageRenderSamples;
-            unsigned debugClub = PACK_BE_U16(tf->countryNumber, tf->teamOrdinal);
-            unsigned debugStoredAge = 0, debugId = 0;
-            unsigned debugGot = SWOS_IdentityAgeForClub(
-                debugClub, (unsigned)d4_fileIdx, &debugStoredAge, &debugId);
-            if (ageRenderSamples < 32u || (unsigned)d4_fileIdx == 5u) {
-                swos_age_log("SQUAD_AGE_TRACE_V2",
-                    "slot=%u club=%04X sel=%04X is_managed_ptr=%u "
-                    "squad_view=%u nationality=%u got=%u id=%u "
-                    "identity_age=%u displayed_age=%u form=%u name=%.22s",
-                    (unsigned)d4_fileIdx,debugClub,(unsigned)_selTeamNumber,
-                    (unsigned)(_squadTeamFilePtr == (uintptr_t)&_careerTeam),
-                    (unsigned)_isSquadViewMode,(unsigned)_isNationalSquad,
-                    debugGot,debugId,debugStoredAge,age,
-                    (unsigned)(uint8_t)pf->form,(const char *)pf->playerName);
-            }
-            if (ageRenderSamples < 32u) ++ageRenderSamples;
-        }
-#endif
-        /* Fit the existing compact name cell; no data is changed in pf. */
-        snprintf(namesWithAge[ix],sizeof namesWithAge[ix],"%.22s (%u)",
-                 (const char *)pf->playerName,age);
-        e->fg=(uintptr_t)namesWithAge[ix];
-    } else {
-        e->fg=(uintptr_t)(uint8_t *)pf->playerName;
-    }
+    e->fg = (uintptr_t)(uint8_t *)pf->playerName;
     e->y = yPos;
+
+#ifdef SWOS_SDL_BUILD
+    if (_gameType == 4) {
+        unsigned age = 0;
+        if (ModernRuntime_Enabled())
+            age = tf->countryNumber >= 80 && tf->countryNumber <= 85
+                ? ModernNational_PlayerAge(ModernWorld_Active(), teamBase, d4_fileIdx)
+                : ModernRuntime_PlayerAge(ModernWorld_Active(), teamBase, d4_fileIdx);
+        else {
+            extern unsigned SWOS_IdentityAgeForClub(unsigned, unsigned, unsigned *, unsigned *);
+            extern int SWOS_AgesLookupExact(const char *, unsigned *);
+            unsigned id = 0;
+            uint16_t club = PACK_BE_U16(teamBase->team.countryNumber, teamBase->team.teamOrdinal);
+            unsigned slot = d4_fileIdx;
+            if (_isNationalSquad && teamBase == &_careerTeam && slot < 20) {
+                extern uint16_t _careerUnavailablePlayerLookupTable[];
+                club = _careerUnavailablePlayerLookupTable[2 * slot];
+                slot = _careerUnavailablePlayerLookupTable[2 * slot + 1];
+            }
+            if ((club >> 8) >= 80 || slot >= 32 ||
+                !SWOS_IdentityAgeForClub(club, slot, &age, &id))
+                SWOS_AgesLookupExact((const char *)pf->playerName, &age);
+        }
+        if (World_Current() == WORLD_9697 && pf->playerName[0] &&
+            (uint8_t)pf->playerName[0] != 0xFF) {
+            e->fg = (uintptr_t)classic_squad_name(pf, age, e, &_menuEntries[49]);
+        } else if (age) {
+            static char name_with_age[24];
+            snprintf(name_with_age, sizeof name_with_age, "%.16s (%u)",
+                     (const char *)pf->playerName, age);
+            _menuEntries[48].fg = (uintptr_t)name_with_age;
+        }
+    }
+#endif
 
     /* Entry 49: position string */
     e = &_menuEntries[49];
@@ -2065,22 +1824,23 @@ void SquadAfterDrawCommon(void *entryPtr)
 
     /* Entry 50: top skills string */
     e = &_menuEntries[50];
-    if (_isSquadViewMode == 0) {
-        /* Entry 50 has writable menu text storage. Exactly 13 chars plus NUL. */
-        SquadFormatSevenAttributes((uint8_t *)e->fg, pf);
-        e->x = 200; /* attributes follow the name field */
-        e->stringFlags = (uint16_t)((e->stringFlags & ~0x4000u) | 0x8000u);
+    int showAttributes = career_squad_attributes();
+    unsigned total = 0;
+    if (showAttributes) {
+        static char skill_text[32][14];
+        char *text = skill_text[d4_fileIdx & 31u];
+        e->fg = (uintptr_t)text;
+        e->x = 196;
+        e->stringFlags = (e->stringFlags & ~0x4000u) | 0x8000u;
+        if (!_isSquadViewMode) {
+            total = format_squad_attributes(text, pf);
+        } else {
+            unsigned nat = (uint8_t)pf->nationality * 3u;
+            snprintf(text, 14, "(%c%c%c)", _shortCountryNames[nat],
+                     _shortCountryNames[nat + 1], _shortCountryNames[nat + 2]);
+        }
     } else {
-        /* GOALS view: display nationality instead of the old top-skill digits.
-         * Use per-player storage because menu rows are drawn independently. */
-        static char goalsNationality[32][8];
-        unsigned ix = (unsigned)d4_fileIdx & 31u;
-        unsigned natIdx = (unsigned)(uint8_t)pf->nationality * 3u;
-        snprintf(goalsNationality[ix], sizeof goalsNationality[ix], "(%c%c%c)",
-                 _shortCountryNames[natIdx], _shortCountryNames[natIdx + 1u],
-                 _shortCountryNames[natIdx + 2u]);
-        e->fg = (uintptr_t)goalsNationality[ix];
-        e->x = 200;
+        FormTopSkillsString((uint8_t *)e->fg, (PlayerFile *)player);
     }
     e->y = yPos;
 
@@ -2091,7 +1851,16 @@ void SquadAfterDrawCommon(void *entryPtr)
     _menuEntries[54].isInvisible = 1; _menuEntries[54].y = yPos;
 
     /* Entry 54: nationality — show if team NOT in [0x50..0x55] and not view mode */
-    {
+    if (showAttributes && !_isSquadViewMode) {
+        static char total_text[32][8];
+        char *text = total_text[d4_fileIdx & 31u];
+        if (total == 255) snprintf(text, 8, "(-)");
+        else snprintf(text, 8, "(%02u)", total);
+        _menuEntries[54].fg = (uintptr_t)text;
+        _menuEntries[54].content = ENTRY_STRING;
+        _menuEntries[54].x = 254;
+        _menuEntries[54].isInvisible = 0;
+    } else if (!showAttributes) {
         if (tf->countryNumber >= 0x50 && tf->countryNumber <= 0x55) {
             /* team in range — skip nationality */
         } else if (_isSquadViewMode == 0) {
@@ -2109,20 +1878,6 @@ void SquadAfterDrawCommon(void *entryPtr)
         }
     }
     _menuEntries[54].y = yPos;
-    if (_isSquadViewMode == 0) {
-        /* Reuse the genuine text entry for the seven-attribute total.
-         * Player age is displayed beside the name instead. */
-        static char totals[32][8];
-        unsigned ix=(unsigned)d4_fileIdx & 31u;
-        unsigned total=SquadFormatSevenAttributes((uint8_t[14]){0},pf);
-        if(total==0xFFu)
-            snprintf(totals[ix],sizeof totals[ix],"(-)");
-        else
-            snprintf(totals[ix],sizeof totals[ix],"(%02u)",total);
-        _menuEntries[54].fg=(uintptr_t)totals[ix];
-        _menuEntries[54].x=258; /* total immediately follows seven digits */
-        _menuEntries[54].isInvisible=0;
-    }
 
     /* Entry 55: goals/stats */
     e = &_menuEntries[55];
@@ -2130,7 +1885,7 @@ void SquadAfterDrawCommon(void *entryPtr)
     {
         int16_t skillDiff = (int16_t)_teamSkillDiffAfterChange;
         if (skillDiff < 0) {
-            if (_isNationalSquad == 0 && _isSquadViewMode == 0) {
+            if (!showAttributes && _isNationalSquad == 0 && _isSquadViewMode == 0) {
                 uint16_t sum = (uint16_t)pf->goalStats[0]
                              + (uint16_t)pf->goalStats[1]
                              + (uint16_t)pf->goalStats[2]
@@ -2145,9 +1900,8 @@ void SquadAfterDrawCommon(void *entryPtr)
         }
     }
     e->y = yPos;
-    if (_isSquadViewMode == 0) e->isInvisible = 1;
 
-    /* Entry 56 is not a writable text entry. Keep it hidden. */
+    /* Entry 56: invisible */
     _menuEntries[56].isInvisible = 1;
     _menuEntries[56].y = yPos;
 
@@ -2200,10 +1954,9 @@ void SquadAfterDrawCommon(void *entryPtr)
         _menuEntries[58].isInvisible = 0;
     }
 
-    /* Entries 59-63: show competition goals when exactly one of
-     * isNationalSquad/isSquadViewMode is set (XOR logic) */
-    if (_isSquadViewMode == 0 ||
-        ((_isNationalSquad != 0) == (_isSquadViewMode != 0))) {
+    /* In the attributes view the national-team goal columns share this space. */
+    if ((showAttributes && !_isSquadViewMode) ||
+        (_isNationalSquad != 0) == (_isSquadViewMode != 0)) {
         /* Both set or both clear: hide entries 59-63 */
         _menuEntries[59].isInvisible = 1; _menuEntries[59].y = yPos;
         _menuEntries[60].isInvisible = 1; _menuEntries[60].y = yPos;
@@ -2261,6 +2014,8 @@ void SquadAfterDrawCommon(void *entryPtr)
         e->y = yPos;
     }
 
+    ModHooks_PlayerRowDrawn(0 /* MODROWS_SQUAD */, PACK_BE_U16(tf->countryNumber, tf->teamOrdinal),
+                            (uint8_t)d4_fileIdx, (int16_t)d7, 46, 18, pf);
     /* Draw 18 entries starting from entry 46 */
     DrawMultipleItems(18, &_menuEntries[46]);
 }
@@ -2376,24 +2131,7 @@ void SquadFinish(void)
         }
     }
 
-    /* Replace GOALS column heading with attribute letters in the squad
-     * editing screen. The GOALS button still switches to the original
-     * detailed statistics view, with its original headers and numbers. */
-    if (_isSquadViewMode == 0) {
-        _menuEntries[13].fg = (uintptr_t)squadAttributeHeadings;
-        _menuEntries[13].x = 200;
-        _menuEntries[13].stringFlags = (uint16_t)((_menuEntries[13].stringFlags & ~0x4000u) | 0x8000u);
-        _menuEntries[13].isInvisible = 0;
-        _menuEntries[14].isInvisible = 1; /* no separate age column */
-    }
     SquadUpdateGoalsMenuText();
-    /* The national squad also has a bank of competition-goal headings.
-     * Keep them for the CLUBS/GOALS view, but do not draw them behind
-     * H F S C T P V in the ordinary attribute/squad view. */
-    if (_isSquadViewMode == 0) {
-        for (unsigned idx = 17; idx <= 22; ++idx)
-            _menuEntries[idx].isInvisible = 1;
-    }
     SquadCommitPositionsAndUpdateSkill();
     SquadMenuSavePlayerPositions();
 }
@@ -2482,6 +2220,8 @@ void SquadInit(void)
         _menuEntries[9].x -= 0x1F;
     }
 
+    squadGoalsHeadingX = _menuEntries[13].x;
+    squadGoalsHeadingFlags = _menuEntries[13].stringFlags;
     /* Fall through to SquadFinish */
     SquadFinish();
 }
@@ -2492,7 +2232,8 @@ void SquadInit(void)
 
 extern uint16_t _showPrereleaseCounter;
 
-/* OptionsMenuBeforeDraw: clears prerelease counter on menu entry */
+/* OptionsMenuBeforeDraw: clears prerelease counter on menu entry. Also the onReturn:
+ * coming back from CONTROLS unpacks the menu again, rows 17/18 visible. */
 __attribute__((used, externally_visible))
 void OptionsMenuBeforeDraw(void)
 {
@@ -2504,22 +2245,62 @@ void OptionsMenuBeforeDraw(void)
 #ifdef SWOS_SDL_BUILD
     _menuEntries[17].isInvisible = 1;
     _menuEntries[18].isInvisible = 1;
+    /* CONTROLS (15/16) opens the SDL settings menu. */
+    _menuEntries[15].fg = (uintptr_t)"SETTINGS";
+    _menuEntries[16].fg = (uintptr_t)"CONTROLS, VIDEO...";
+
+    /* Career+ chooses its database/world before entering the game. Neither the
+     * legacy WORLD switch nor the standalone MODS manager belongs in OPTIONS.
+     * Do this after menu unpacking: the SDL JSON loader may replace the compiled
+     * optionsMenu, so changing menu_data.c alone does not reliably hide rows. */
+    _menuEntries[21].isInvisible = 1;   /* WORLD caption */
+    _menuEntries[22].isInvisible = 1;   /* WORLD selector */
+    _menuEntries[23].isInvisible = 1;   /* MODS caption */
+    _menuEntries[24].isInvisible = 1;   /* MODS selector */
+
+    /* Skip hidden selectors in both directions. SETUP is optional; when absent
+     * SETTINGS goes straight to EXIT. Preserve language navigation at the top. */
+    {
+        extern int32_t AssetsCheck_FindSetup(char *out, uint32_t cap);
+        char setup[1024];
+        const int hasSetup = AssetsCheck_FindSetup(setup, (uint32_t)sizeof setup);
+        _menuEntries[16].downEntry = hasSetup ? 28 : 19;
+        _menuEntries[19].upEntry = hasSetup ? 28 : 16;
+        if (hasSetup) {
+            _menuEntries[28].upEntry = 16;
+            _menuEntries[28].downEntry = 19;
+            /* Close the gap left by the hidden WORLD and MODS rows. */
+            _menuEntries[27].y = 128;
+            _menuEntries[28].y = 128;
+        } else {
+            _menuEntries[27].isInvisible = 1;
+            _menuEntries[28].isInvisible = 1;
+        }
+    }
+
 #else
-    _menuEntries[19].isInvisible = 1;
-    _menuEntries[20].isInvisible = 1;
+    /* WORLD (21/22), MODS (23/24) and LANGUAGE (25/26) are SDL only: the Amiga's world and mods
+     * are its drawer's (OpenSWOS Setup writes data/WORLD and data/MODS), and it has no
+     * translations. */
     _menuEntries[21].isInvisible = 1;
     _menuEntries[22].isInvisible = 1;
+    _menuEntries[23].isInvisible = 1;
+    _menuEntries[24].isInvisible = 1;
+    _menuEntries[25].isInvisible = 1;        /* LANGUAGE (25/26): no translations on the Amiga */
+    _menuEntries[26].isInvisible = 1;
+    _menuEntries[27].isInvisible = 1;        /* SETUP (27/28): it runs on a PC or a Mac */
+    _menuEntries[28].isInvisible = 1;
+    _menuEntries[2].upEntry = -1;            /* (FRIENDLY/DIY GAME LENGTH is the top row there) */
     _menuEntries[15].isInvisible = 1;
     _menuEntries[16].isInvisible = 1;
 #ifdef AGA
     _menuEntries[14].downEntry = 18;
-    _menuEntries[18].downEntry = 23;
-    _menuEntries[23].upEntry = 18;
+    _menuEntries[19].upEntry = 18;
 #else
     _menuEntries[17].isInvisible = 1;
     _menuEntries[18].isInvisible = 1;
-    _menuEntries[14].downEntry = 23;
-    _menuEntries[23].upEntry = 14;
+    _menuEntries[14].downEntry = 19;
+    _menuEntries[19].upEntry = 14;
 #endif
 #endif
 }
@@ -2534,13 +2315,143 @@ void ChangePitchStyle(MenuEntry *entry)
     CallDrawMenuItem(entry);
 }
 
-/* OPTIONS -> CONTROLS: the player's own keys and the press latch (src/controls_menu.c). */
+/* OPTIONS -> WORLD: 96/97 / 2026-27 -- [general] world in SWOS.ini (include/world.h). A world
+ * goes over 96/97's tables when the menus start (World_InstallBaked), and nothing keeps 96/97's
+ * to go back to, so the choice is played from the NEXT start: the row shows it, SWOS.ini keeps it,
+ * and a message says so. 2026-27 only once its data is installed (OpenSWOS Setup: its package,
+ * data_json/worlds/2627/WORLD.ini) -- else the row stays and the message says where to get it. */
+__attribute__((used, externally_visible))
+void ChangeWorld(MenuEntry *entry)
+{
+#if defined(SWOS_SDL_BUILD) && SWOS_WORLDS
+    extern uint16_t _worldOption;
+    extern PlatformInitOptions *g_arcadeOpts;
+    extern const char *g_arcadeIniPath;
+    const int want = !_worldOption;                 /* 1: 2026-27 */
+    if (want) {
+        char path[1024];
+        FILE *f = fopen(swos_data_path("data_json/worlds/2627/WORLD.ini", path, (uint32_t)sizeof path), "rb");
+        if (!f) {
+            extern int32_t AssetsCheck_FindSetup(char *out, uint32_t cap);
+            extern int32_t AssetsCheck_LaunchSetup(void);
+            char setup[1024];
+            const char *buttons[2];
+            int32_t n = 0, iSetup = -1;
+            if (AssetsCheck_FindSetup(setup, (uint32_t)sizeof setup)) { iSetup = n; buttons[n++] = "LAUNCH SETUP"; }
+            buttons[n++] = "OK";
+            if (MenuDialog_Show("World 2026-27",
+                    "World 2026-27 is not installed.|Open " PROJECT_SETUP_NAME ": its row World 2026-27 "
+                    "has the link to download it, then click Install. On a phone: do that on your "
+                    "computer, then copy the assets folder over again.", buttons, n, 0) == iSetup &&
+                iSetup >= 0)
+                AssetsCheck_LaunchSetup();
+            return;
+        }
+        fclose(f);
+    }
+    _worldOption = (uint16_t)want;
+    if (g_arcadeOpts) {
+        snprintf(g_arcadeOpts->world, sizeof g_arcadeOpts->world, "%s", want ? "2627" : "9697");
+        if (g_arcadeIniPath)
+            Settings_Save(g_arcadeOpts, g_arcadeIniPath);
+    }
+    CallDrawMenuItem(entry);
+    if ((int)World_Current() != (want ? (int)WORLD_2627 : (int)WORLD_9697))
+    {
+        static const char *const ok[] = { "OK" };
+        MenuDialog_Show("World",
+            want ? "World 2026-27 is played from the next time " PROJECT_NAME " starts.|"
+                   "Close it and start it again. Saves stay in the world they were made in."
+                 : "96-97 is played from the next time " PROJECT_NAME " starts.|"
+                   "Close it and start it again. Saves stay in the world they were made in.", ok, 1, 0);
+    }
+#else
+    (void)entry;
+#endif
+}
+
+/* OPTIONS -> LANGUAGE: the menus' language -- [general] language in SWOS.ini
+ * (data_json/translations/<code>.json). The menus take their text when they are installed at
+ * start-up (menu_load_json.c), so the choice is played from the NEXT start, as WORLD's is: the
+ * row shows it, SWOS.ini keeps it, and the first change in a session says so. */
+#ifdef SWOS_SDL_BUILD
+static const char *const kLanguageCodes[] = { "en", "de", "fr", "es", "it", "nl" };
+
+int32_t Language_OptionFor(const char *code)
+{
+    for (int32_t i = 0; i < (int32_t)(sizeof kLanguageCodes / sizeof kLanguageCodes[0]); i++)
+        if (code && strcmp(code, kLanguageCodes[i]) == 0)
+            return i;
+    return 0;
+}
+#endif
+
+__attribute__((used, externally_visible))
+void ChangeLanguage(MenuEntry *entry)
+{
+#ifdef SWOS_SDL_BUILD
+    extern uint16_t _languageOption;
+    extern PlatformInitOptions *g_arcadeOpts;
+    extern const char *g_arcadeIniPath;
+    static int told;
+    const int32_t n = (int32_t)(sizeof kLanguageCodes / sizeof kLanguageCodes[0]);
+    _languageOption = (uint16_t)((_languageOption + 1) % n);
+    if (g_arcadeOpts) {
+        snprintf(g_arcadeOpts->language, sizeof g_arcadeOpts->language, "%s", kLanguageCodes[_languageOption]);
+        if (g_arcadeIniPath)
+            Settings_Save(g_arcadeOpts, g_arcadeIniPath);
+    }
+    CallDrawMenuItem(entry);
+    if (!told) {
+        told = 1;
+        static const char *const ok[] = { "OK" };
+        MenuDialog_Show("Language", "The new language is used from the next time " PROJECT_NAME
+                        " starts.|Close it and start it again.", ok, 1, 0);
+    }
+#else
+    (void)entry;
+#endif
+}
+
+/* OPTIONS -> SETUP -> LAUNCH: OpenSWOS Setup (the game's data from the player's copy, World
+ * 2026-27's package, an update when the game asks for one), and the game closes so the setup
+ * can change its data. The row is shown only when the setup is beside the game
+ * (OptionsMenuBeforeDraw; src/assets_check.c AssetsCheck_FindSetup). SDL only. */
+__attribute__((used, externally_visible))
+void LaunchSetupSelected(void)
+{
+#ifdef SWOS_SDL_BUILD
+    extern int32_t AssetsCheck_LaunchSetup(void);
+    extern void Platform_RequestQuit(void);
+    static const char *const buttons[] = { "LAUNCH SETUP", "CANCEL" };
+    if (MenuDialog_Show("Setup",
+            PROJECT_SETUP_NAME " makes the game data from your copy of Sensible World of Soccer, "
+            "updates it when the game asks, and installs World 2026-27.|"
+            "The game closes so the setup can change its data.", buttons, 2, 0) == 0 &&
+        AssetsCheck_LaunchSetup())
+        Platform_RequestQuit();
+#endif
+}
+
+/* OPTIONS -> MODS: the mods on disk, each turned on or off from the next start (src/mods_menu.c). */
+__attribute__((used, externally_visible))
+void ShowModsMenu(void)
+{
+#ifdef SWOS_SDL_BUILD
+    extern void ModsMenu_Show(void);
+    ModsMenu_Show();
+#endif
+}
+
+/* OPTIONS -> SETTINGS (the CONTROLS row on SDL): SWOS 2020's OPTIONS screens -- CONTROLS
+ * (whose KEYBOARD KEYS is the keys screen this row used to open), VIDEO, AUDIO, GAMEPLAY
+ * (src/settings_menus.c). */
 __attribute__((used, externally_visible))
 void ShowControlsMenu(void)
 {
 #ifdef SWOS_SDL_BUILD
-    extern void ControlsMenu_Show(void);
-    ControlsMenu_Show();
+    extern void SettingsMenus_Show(void);
+    SettingsMenus_Show();
 #endif
 }
 
@@ -2552,6 +2463,7 @@ void ChangePitchType(MenuEntry *entry)
     if (_pitchType == 7)
         _pitchType = 0xFFFE; /* RANDOM */
     CallDrawMenuItem(entry);
+    OPTIONS_KEEP();
 }
 
 /* ChangeGameLength: cycle gameLength 0→1→2→3→0→... */
@@ -2562,6 +2474,7 @@ void ChangeGameLength(MenuEntry *entry)
     if (_gameLength == 4)
         _gameLength = 0;
     CallDrawMenuItem(entry);
+    OPTIONS_KEEP();
 }
 
 /* ChangeAutoReplays: toggle autoReplays */
@@ -2570,6 +2483,7 @@ void ChangeAutoReplays(MenuEntry *entry)
 {
     _autoReplays ^= 1;
     CallDrawMenuItem(entry);
+    OPTIONS_KEEP();
 }
 
 /* ChangeAllPlTeamsEqual: toggle allPlayerTeamsEqual */
@@ -2578,6 +2492,7 @@ void ChangeAllPlTeamsEqual(MenuEntry *entry)
 {
     _allPlayerTeamsEqual ^= 1;
     CallDrawMenuItem(entry);
+    OPTIONS_KEEP();
 }
 
 /* ChangeAutoSaveHighlights: toggle autoSaveHighlights */
@@ -2586,37 +2501,7 @@ void ChangeAutoSaveHighlights(MenuEntry *entry)
 {
     _autoSaveHighlights ^= 1;
     CallDrawMenuItem(entry);
-}
-
-/* Both switches are saved to SWOS.ini and apply to the next match input tick. */
-#ifdef SWOS_SDL_BUILD
-static void CareerPlus_SaveOptions(void)
-{
-    extern PlatformInitOptions *g_arcadeOpts;
-    extern const char *g_arcadeIniPath;
-    if (g_arcadeOpts) {
-        g_arcadeOpts->improved_ai = (_careerImprovedAiOption != 0);
-        g_arcadeOpts->three_button = (_careerThreeButtonOption != 0);
-        if (g_arcadeIniPath)
-            Settings_Save(g_arcadeOpts, g_arcadeIniPath);
-    }
-}
-#endif
-void ChangeCareerImprovedAI(MenuEntry *entry)
-{
-#ifdef SWOS_SDL_BUILD
-    _careerImprovedAiOption ^= 1;
-    CareerPlus_SaveOptions();
-#endif
-    CallDrawMenuItem(entry);
-}
-void ChangeCareerThreeButton(MenuEntry *entry)
-{
-#ifdef SWOS_SDL_BUILD
-    _careerThreeButtonOption ^= 1;
-    CareerPlus_SaveOptions();
-#endif
-    CallDrawMenuItem(entry);
+    OPTIONS_KEEP();
 }
 
 /* ChangeMenuMusic: toggle menuMusic, restart music, redraw */
@@ -2624,16 +2509,25 @@ __attribute__((used, externally_visible))
 void ChangeMenuMusic(MenuEntry *entry)
 {
     _menuMusic ^= 1;
+#ifdef SWOS_SDL_BUILD
+    if (_menuMusic == 0) {
+        extern void StopMusicInBackground(void);
+        StopMusicInBackground();    /* fades while the menu goes on */
+    } else
+#endif
     TryRestartingMusic();
     CallDrawMenuItem(entry);
+    OPTIONS_KEEP();
 }
 
 /* ================================================================
  * ChangeGameplayStyle — the OPTIONS menu's "GAMEPLAY" row
  *
- * Toggles AMIGA <-> DOS, which is the same switch as `--dos-gameplay` and
- * [dos] gameplay in SWOS.ini: the DOS release's 70fps physics, its timer
- * reloads and its formation set, against the Amiga's.
+ * Steps AMIGA -> DOS -> XBOX -> AMIGA 60 -> MOON (SDL; the Amiga build, AMIGA -> DOS
+ * -> MOON), the same
+ * switch as `--gameplay` and [gameplay] style in SWOS.ini: the DOS release's
+ * 70fps physics, its timer reloads and its formation set, or SWOS 2020's XBOX
+ * (60fps, the Amiga's ball, the DOS keepers), against the Amiga's.
  *
  * Three things have to happen together, and the order matters:
  *
@@ -2652,17 +2546,15 @@ void ChangeMenuMusic(MenuEntry *entry)
 #ifdef SWOS_SDL_BUILD
 /* The switch itself, for this menu row and for the online lobby (GameplayStyle_Borrow).
  * `persist` writes it to SWOS.ini, as the OPTIONS row does; a borrowed style does not. */
-void GameplayStyle_Set(int dos, int persist)
+void GameplayStyle_Set(int style, int persist)
 {
     extern int _gDosGameplay;
-    extern uint16_t _gameplayStyleOption;
     extern void ApplyGameStyle(void);
     extern int _gDosView;
     extern PlatformInitOptions *g_arcadeOpts;
     extern const char *g_arcadeIniPath;
 
-    _gameplayStyleOption = (uint16_t)(dos ? 1 : 0);
-    _gDosGameplay = dos ? 1 : 0;
+    Gameplay_SetStyle(style);   /* the style, its flags, the row's mirror (dos_gameplay.c) */
 
     ApplyGameStyle();
 
@@ -2690,7 +2582,7 @@ void GameplayStyle_Set(int dos, int persist)
         _gDosView = (g_arcadeOpts->view_style == VIEW_STYLE_DOS) ||
                     (g_arcadeOpts->view_style == VIEW_STYLE_AUTO && _gDosGameplay);
         if (persist) {
-            g_arcadeOpts->dos_gameplay = _gDosGameplay;
+            g_arcadeOpts->dos_gameplay = _gGameplayStyle;
             if (g_arcadeIniPath)
                 Settings_Save(g_arcadeOpts, g_arcadeIniPath);
         }
@@ -2703,12 +2595,11 @@ void GameplayStyle_Set(int dos, int persist)
  * OPTIONS. Borrowing twice keeps the first style to give back. */
 static int s_ownStyle = -1;
 
-void GameplayStyle_Borrow(int dos)
+void GameplayStyle_Borrow(int style)
 {
-    extern int _gDosGameplay;
     if (s_ownStyle < 0)
-        s_ownStyle = _gDosGameplay;
-    GameplayStyle_Set(dos, 0);
+        s_ownStyle = _gGameplayStyle;
+    GameplayStyle_Set(style, 0);
 }
 
 void GameplayStyle_GiveBack(void)
@@ -2716,7 +2607,7 @@ void GameplayStyle_GiveBack(void)
     if (s_ownStyle < 0)
         return;
     GameplayStyle_Set(s_ownStyle, 0);
-    fprintf(stderr, "[p2p] back to this player's own style (%s)\n", s_ownStyle ? "DOS" : "AMIGA");
+    fprintf(stderr, "[p2p] back to this player's own style (%s)\n", Gameplay_StyleName(s_ownStyle));
     s_ownStyle = -1;
 }
 #endif
@@ -2725,16 +2616,13 @@ void ChangeGameplayStyle(MenuEntry *entry)
 {
 #ifdef SWOS_SDL_BUILD
     /* The switch, the view and SWOS.ini: GameplayStyle_Set. */
-    extern int _gDosGameplay;
-    GameplayStyle_Set(!_gDosGameplay, 1);
+    GameplayStyle_Set((_gGameplayStyle + 1) % GAMEPLAY_STYLES, 1);
 #else
-    extern int _gDosGameplay;
-    extern uint16_t _gameplayStyleOption;
     extern void ApplyGameStyle(void);
 
-    _gameplayStyleOption ^= 1;
-    _gDosGameplay = (int)_gameplayStyleOption;
-
+    /* No XBOX or AMIGA 60 on the Amiga: no 60 Hz tick. */
+    Gameplay_SetStyle(_gGameplayStyle == GAMEPLAY_AMIGA ? GAMEPLAY_DOS
+                      : _gGameplayStyle == GAMEPLAY_DOS ? GAMEPLAY_MOON : GAMEPLAY_AMIGA);
     ApplyGameStyle();
 #endif
 
@@ -2786,10 +2674,115 @@ void ViewSquad21AfterDraw(void)
     DrawMenuItem(&_menuEntries[20]);
 }
 
+/* Career+ classic national retirement call-ups: the national squad stores
+ * physical PlayerFile slots separately from the 20-entry tactical order.
+ * Replacing a retired player updates a physical slot, but it does not restore
+ * its 4-4-2 tactical row. Reorder the tactical permutation, never player
+ * records or the national source lookup table (both are keyed by file slot).
+ * Only armed for the immediate post-retirement selection, not manual edits. */
+static int s_classicNationalRetirementReorder;
+
+void Career_ArmNationalRetirementSquadReorder(void)
+{
+    s_classicNationalRetirementReorder = 1;
+}
+
+static void careerReorderClassicNationalAfterRetirement(void)
+{
+    static const uint8_t roles[11] = { 0, 1, 3, 3, 2, 4, 6, 6, 5, 7, 7 };
+    extern void *_teamTacticsTable[];
+    extern void *_positionsTable[];
+    extern uint8_t _currentMatchPlayers[];
+    extern uint16_t _careerNumPlayers;
+    extern TeamFileEx _careerTeam;
+    extern uint16_t _isNationalSelector;
+    uint8_t original[20], reordered[20], used[20] = {0}, tacticalSlot[11];
+    uint8_t seenSlot[11] = {0};
+    if (!_isNationalSelector || _careerNumPlayers == 0 || _careerNumPlayers > 20) return;
+#ifdef SWOS_SDL_BUILD
+    if (ModernRuntime_Enabled()) return;
+#endif
+    /* The selected tactics and its position table are the same mapping used
+     * by GetPlayerInfoBreakPosition when rendering the first eleven. */
+    int tact = (int8_t)_careerTeam.team.tactics;
+    if (tact < 0 || tact >= 19 || !_teamTacticsTable[tact]) return;
+    TeamTactics *t = (TeamTactics *)_teamTacticsTable[tact];
+    int form = (int8_t)t->ballOutOfPlayTactics;
+    if (form < 0 || form >= 18 || !_positionsTable[form]) return;
+    const uint8_t *positions = (const uint8_t *)_positionsTable[form];
+    for (int i = 0; i < 11; ++i) {
+        int slot = (int)positions[i] - 1;
+        if (slot < 0 || slot >= 11 || seenSlot[slot]) return;
+        seenSlot[slot] = 1;
+        tacticalSlot[i] = (uint8_t)slot;
+    }
+    /* Reject damaged permutations instead of mixing up player identities. */
+    uint32_t seenPlayer = 0;
+    for (int i = 0; i < 20; ++i) {
+        unsigned idx = _currentMatchPlayers[i];
+        if (idx >= 20 || (seenPlayer & (1u << idx))) return;
+        seenPlayer |= 1u << idx;
+        original[i] = (uint8_t)idx;
+        reordered[i] = 0xFF;
+    }
+    /* Prefer players already in the XI, then eligible reserves. Exact
+     * position beats compatible groups, and a goalkeeper is never assigned
+     * an outfield slot. Empty retired slots are always selected last. */
+    for (int row = 0; row < 11; ++row) {
+        int best = -1, bestScore = -10000;
+        for (int i = 0; i < 20; ++i) {
+            unsigned idx = original[i];
+            if (used[idx]) continue;
+            const PlayerFile *pf = &_careerTeam.players[idx];
+            if ((uint8_t)pf->playerName[0] == 0xFF || !pf->playerName[0]) continue;
+            int pos = (pf->positionAndFace & PF_POSITION_MASK) >> PF_POSITION_SHIFT;
+            int wanted = roles[row];
+            if ((wanted == 0) != (pos == 0)) continue;
+            int match = pos == wanted ? 4 :
+                (pos >= 1 && pos <= 3 && wanted >= 1 && wanted <= 3) ? 3 :
+                (pos >= 4 && pos <= 6 && wanted >= 4 && wanted <= 6) ? 3 : 1;
+            /* Preserve previously selected starters whenever suitability ties. */
+            int currentStarter = 0;
+            for (int j = 0; j < 11; ++j)
+                if (original[tacticalSlot[j]] == idx) { currentStarter = 1; break; }
+            int score = 100 * match + 10 * currentStarter - i;
+            if (score > bestScore) { bestScore = score; best = (int)idx; }
+        }
+        if (best >= 0) {
+            reordered[tacticalSlot[row]] = (uint8_t)best;
+            used[best] = 1;
+        }
+    }
+    /* Fill all unused tactical and bench positions with remaining occupied
+     * players, then empty file slots. Do not alter player files or lookup IDs. */
+    for (int pass = 0; pass < 2; ++pass)
+        for (int i = 0; i < 20; ++i) {
+            unsigned idx = original[i];
+            if (used[idx]) continue;
+            const PlayerFile *pf = &_careerTeam.players[idx];
+            int vacant = (uint8_t)pf->playerName[0] == 0xFF || !pf->playerName[0];
+            if (vacant != pass) continue;
+            for (int j = 0; j < 20; ++j) {
+                if (reordered[j] != 0xFF) continue;
+                reordered[j] = (uint8_t)idx;
+                used[idx] = 1;
+                break;
+            }
+        }
+    for (int i = 0; i < 20; ++i)
+        if (reordered[i] == 0xFF) return;
+    memcpy(_currentMatchPlayers, reordered, 20);
+    _careerTeam.team.playerValuesDirty = TEAM_VALUES_DIRTY;
+}
+
 /* SelectNationalTeamExit (line 78585): set no-selection, exit */
 __attribute__((used, externally_visible))
 void SelectNationalTeamExit(void)
 {
+    if (s_classicNationalRetirementReorder) {
+        s_classicNationalRetirementReorder = 0;
+        careerReorderClassicNationalAfterRetirement();
+    }
     _selectNationalTeamMenuResult = 0xFFFF;
     SetExitMenuFlag();
 }
@@ -2880,8 +2873,21 @@ extern uint8_t _viewCompetitionsMenu[];
 
 /* SWOSMainMenuInit — calls CommonMenuExit on main menu init (SWOS2.s line 68835) */
 __attribute__((used, externally_visible))
+/* ModesMenuSelected -- OpenSWOS's MODES button (main menu entry 16): the mods' entries, the
+ * MODES screen (src/mod_entries.c). */
+__attribute__((used, externally_visible))
+void ModesMenuSelected(void)
+{
+    extern void ModEntries_Show(int32_t point);
+    ModEntries_Show(0 /* MODPOINT_MODES */);
+    CommonMenuExit();
+}
+
 void SWOSMainMenuInit(void)
 {
+#ifdef SWOS_SDL_BUILD
+    { extern void ModMatch_SelfTest(void); ModMatch_SelfTest(); }   /* (SWOS_MOD_MATCH_TEST) */
+#endif
     CommonMenuExit();
 }
 
@@ -2897,6 +2903,27 @@ __attribute__((used, externally_visible))
 void MultiplayerMenuSelected(void)
 {
 #ifdef SWOS_NETPLAY
+    {   /* Mods that change the game play online against a player with the same ones: the
+         * handshake compares their signature (Mods_OnlineSignature, src/p2p_link.c). */
+        char mods[160];
+        if (Mods_OnlineSignature(mods, sizeof mods))
+            fprintf(stderr, "[mods] online with %s: only against the same mods\n", mods);
+    }
+#ifdef SWOS_SDL_BUILD
+    {   /* Mods that say "online": false (an offline-only team database): said here, before the
+         * log-in, not by a refused match later (docs/MODS.md §10). */
+        char mods[200], text[400];
+        if (Mods_OfflineOnly(mods, sizeof mods)) {
+            static const char *const ok[] = { "OK" };
+            snprintf(text, sizeof text, "THESE MODS ARE NOT FOR ONLINE PLAY: %s.|TURN THEM OFF IN OPTIONS - MODS, "
+                     "THEN RESTART, TO PLAY ONLINE.", mods);
+            fprintf(stderr, "[mods] MULTIPLAYER: offline-only mods on (%s): not started\n", mods);
+            MenuDialog_Show("PLAY ONLINE", text, ok, 1, 0);
+            CommonMenuExit();
+            return;
+        }
+    }
+#endif
     OnlineMenus_Init();
     OnlineMenus_Show("swos2020/logInMenu");
     /* Coming back re-unpacks the main menu from its packed bytes, where the CONTINUE and
@@ -2936,7 +2963,7 @@ enum {
 
 /* In the order make_credits_aga.py set the photos into the backdrop (its PHOTOS). */
 static const char *const k_creditsAgaNames[CREDITS_AGA_PHOTOS] = {
-    "BENBAKER76", "ZKZ", "PLAYAVELI", "THD79",
+    "BENBAKER76", "ZKZ", "PLAYAVELI", "STARWINDZ", "THD79", "REDHAIR",
 };
 
 /* onInit: the screen's own backdrop, as the stadium screen loads its own. */
@@ -3015,6 +3042,7 @@ void ManagementRecordMenu(void)
 {
     if (_youreSacked == 0) {
         Career_FillCurrentSeasonInfo();
+        WorldPlayoff_RecordLines();     /* (a world's titles: their lines again, world_playoff.c) */
     }
     ShowMenu(_managementRecordMenu);
 }
@@ -3047,6 +3075,37 @@ extern void PrintFormatted(const uint8_t *fmt, uint8_t *out,
                      uint16_t n4, uint16_t n5, uint16_t n6,
                      const uint8_t *strA, const uint8_t *strB, const uint8_t *strC);
 
+/* MODES and CREDITS (15, 16) sit at the bottom right. On a 320-wide screen (the Amiga, a 4:3
+ * PC) they can cover the right end of the wide buttons above them (a tester saw LOAD OLD
+ * COMPETITION under MODES on the Amiga, 2026-11-06). When one of the shown wide buttons --
+ * CONTINUE, SAVE, LOAD OLD COMPETITION, MULTIPLAYER (11-14), one column -- overlaps one, the
+ * column ends short of them, every button alike. Where none overlaps nothing changes. Run last,
+ * once the buttons are where they will be drawn. */
+static void main_menu_fit_lower_right(void)
+{
+    int32_t left = 0x7FFF, overlap = 0;
+    for (int32_t s = 15; s <= 16; s++) {
+        const MenuEntry *small = &_menuEntries[s];
+        if (small->isInvisible)
+            continue;
+        if (small->x < left)
+            left = small->x;
+        for (int32_t e = 11; e <= 14; e++) {
+            const MenuEntry *m = &_menuEntries[e];
+            if (!m->isInvisible && m->x < small->x + small->dwWidth && small->x < m->x + m->dwWidth &&
+                m->y < small->y + small->dwHeight && small->y < m->y + m->dwHeight)
+                overlap = 1;
+        }
+    }
+    if (!overlap)
+        return;
+    for (int32_t e = 11; e <= 14; e++) {
+        MenuEntry *m = &_menuEntries[e];
+        if (m->x < left && m->x + m->dwWidth > left - 4)
+            m->dwWidth = (uint16_t)(left - 4 - m->x);
+    }
+}
+
 /* CommonMenuExit — set CONTINUE/REPLAY/SAVE entries on main menu return (SWOS2.s line 68793) */
 __attribute__((used, externally_visible))
 void CommonMenuExit(void)
@@ -3065,13 +3124,17 @@ void CommonMenuExit(void)
      * The OCS Amiga has neither. */
     _menuEntries[15].isInvisible = 1;
 #endif
+    /* Career+ Unified does not expose the optional OpenSWOS MODES menu.
+     * Retain mod implementations and registration for compatibility. */
+    _menuEntries[16].isInvisible = 1;
+    _menuEntries[15].upEntry = 13;
+    _menuEntries[13].downEntry = 15;
 #ifndef SWOS_NETPLAY
     /* OpenSWOS's MULTIPLAYER button (entry 14) plays over the network, so it is only
      * in a build that has the netplay library (make NETPLAY=1, docs/NETPLAY.md): never
      * on the Amiga, and never on the web, where a browser has no UDP to play over. */
     _menuEntries[14].isInvisible = 1;
 #endif
-
     if (_gameType == GAME_TYPE_DIY_COMPETITION) {
         nameStr = (uint8_t *)_primaryCompetitionBuf.tourn.header.competitionName;
         if (_primaryCompetitionBuf.tourn.header.competitionOver == 1)
@@ -3097,6 +3160,7 @@ void CommonMenuExit(void)
         _menuEntries[11].isInvisible = 1;
         _menuEntries[12].isInvisible = 1;
         _menuEntries[13].y = _menuEntries[11].y;
+        main_menu_fit_lower_right();
         return;
     }
 
@@ -3110,6 +3174,7 @@ void CommonMenuExit(void)
     /* Show both entries */
     _menuEntries[12].isInvisible = 0;
     _menuEntries[11].isInvisible = 0;
+    main_menu_fit_lower_right();
 }
 
 /* ================================================================
@@ -3304,9 +3369,6 @@ void ContestMenuScrollDown(void)
 #define COLOR_PINK_TO_BROWN_9      9
 #define COLOR_BLUE_TO_PURPLE_11   11
 
-/* Chairman message IDs */
-#define NO_MORE_TIME_TO_NEGOTIATE  3
-
 /* ---- External globals (contest/career state) ---- */
 extern uint16_t _teamSelectionKeyCache_ListIndex;
 extern uint16_t _currentGame;
@@ -3320,14 +3382,13 @@ extern uintptr_t _savedContestEntryPtr;
 extern uintptr_t _savedContestRoundPtr;
 extern uint16_t _gameListY;
 extern uint16_t _contestEntryHeight;
-extern void *_gameListArray[];          /* 14 pairs of 2 pointers (28 entries) */
+extern void *_gameListArray[28];          /* 14 pairs of 2 pointers (28 entries) */
 extern uint16_t _columnMarker;
 extern uint16_t _cglmVar3;
 extern uint16_t _seasonFinished;
 extern uint16_t _careerFinished;
 extern uint16_t _retired;
 extern uint16_t _clubBusinessActive;
-extern uint16_t _timeToNegotiate;
 extern uint16_t _teamNoOfferAccepted;
 extern uint16_t _jobOffersFromRetired;
 extern uint16_t _seasonNumberOfSquads;
@@ -3338,7 +3399,7 @@ extern uint8_t  _managerNameBuffer[];
 extern uint8_t  _managerSurnameBuffer[];
 extern uint8_t  _seasonPlaying;
 extern uint16_t _selTeamNumber;
-extern uint8_t  _teamSelectionKeyCache[];
+extern uint8_t  _teamSelectionKeyCache[KEYCACHE_CAPACITY];
 extern uint16_t _numOffers;
 extern volatile uint16_t _currentMessage;
 extern uint16_t _seasonSquadTeamNumbers[];
@@ -3602,14 +3663,10 @@ void CheckTransfers(void)
         MenuEntry *entry = &_menuEntries[4];
         entry->bgColor = (entry->bgColor & 0xFFF0) | COLOR_BLUE_TO_BLACK_8;
         entry->isDisabled = 0;
-        if (_timeToNegotiate != 0) {
-            if (CheckForTransferOffers() == 0) {
-                /* Has pending offers — set blinking */
-                uint16_t flags = entry->stringFlags;
-                flags |= (1 << 13);
-                entry->stringFlags = flags;
-            }
-        }
+        if (CheckForTransferOffers() == 0)
+            entry->stringFlags |= (1 << 13);
+        else
+            entry->stringFlags &= ~(1 << 13);
     }
     /* Done — RETURN here. The Amiga (SWOS2.s:87142 locret_13C1C8 rts)
      * falls out of the function after enabling/setting blink. A pre-fix
@@ -3637,80 +3694,39 @@ disableEntry:
 __attribute__((used, externally_visible))
 void BuildGameListArrayFromTeamSelectionKeyCache(void)
 {
-    uint8_t *elemPtr;
-    /* Get list element pointer: a0=list entry, a1=element within it */
-    /* The asm calls TeamSelectionKeyCache_GetListElementPtr which returns a0 (list) via a0, a1 via a1.
-       In C, the function returns a1 but we also need a0. Use the list ptr function. */
-    uint16_t listIdx = _teamSelectionKeyCache_ListIndex;
-    uint16_t gameIdx = _currentGame;
-    uint8_t *listEntry = TeamSelectionKeyCache_GetListPtr(listIdx);
-    uint8_t *gameEntry = listEntry + gameIdx * 12;
+    const unsigned start = _teamSelectionKeyCache_ListIndex;
+    const unsigned count = _teamSelectionKeyCache_ListCount;
+    unsigned used = 0;
+    size_t offset = 0;
+    const unsigned rows = sizeof _gameListArray / (2 * sizeof _gameListArray[0]);
 
-    void **out = _gameListArray;
-    uint16_t remaining = 14; /* 0xD + 1 = 14 entries (dbf counts from 13) */
+    for (unsigned index = 0; index < count && used < rows; ++index) {
+        size_t remaining = sizeof _teamSelectionKeyCache - offset;
+        if (remaining < sizeof(TeamSelectionKeyCacheEntry))
+            break;
+        TeamSelectionKeyCacheEntry *entry =
+            (TeamSelectionKeyCacheEntry *)(void *)(_teamSelectionKeyCache + offset);
+        if (!KeyCacheEntryFits(entry, remaining))
+            break;
+        offset += entry->entryStride;
+        if (index < start)
+            continue;
 
-    for (;;) {
-        if (listIdx == _teamSelectionKeyCache_ListCount) {
-            /* Fill remaining slots with NULL */
-            while (remaining > 0) {
-                *out++ = 0;
-                *out++ = 0;
-                remaining--;
-            }
-            return;
+        unsigned first = index == start && _currentGame < entry->totalElements ? _currentGame : 0;
+        unsigned end = entry->totalElements ? entry->totalElements : 1;
+        for (unsigned game = first; game < end && used < rows; ++game) {
+            _gameListArray[used * 2] = entry;
+            /* The renderer adds the header size before accessing a match. */
+            _gameListArray[used * 2 + 1] =
+                (uint8_t *)entry + game * sizeof(TeamSelectionKeyCacheMatchSlot);
+            ++used;
         }
-        for (;;) {
-            *out++ = listEntry;
-            *out++ = gameEntry;
-            uint8_t numGames = *(uint8_t *)(listEntry + 5);
-            if (numGames == 0)
-                break;
-            gameIdx++;
-            if ((uint8_t)gameIdx == numGames)
-                break;
-            gameEntry += 12;
-            remaining--;
-            if (remaining == 0)
-                return;
-        }
-        /* Move to next list entry.
-         *
-         * The asm reads the slot's stride at +2..+3 and advances by it. On
-         * SDL this can be corrupted: the in-match league-fixture writer
-         * (DIY_RecordLeagueFixtureResultAndAdvanceProgress) writes multiple
-         * 12-byte fixtures into a single 22-byte career-mode slot, and
-         * fixture 2's team-ID bytes land on slot[N+1]'s stride field at
-         * +2..+3. On Amiga the corrupted stride happens to jump to a zeroed
-         * area of the overlaid careerForeignMarketPlayers region; on SDL
-         * the same jump lands on populated foreign-player records, the
-         * walker reads them as fake cache entries, and the reader panics
-         * loading "team 0x0200" (= the first 2 bytes of a real
-         * foreign-player record interpreted as a team id).
-         *
-         * Clamp the stride to a sane range. Slots are 22 bytes (career) up
-         * to 118 bytes (DIY 18-team) — anything outside [10, 256] is the
-         * sign of a stomped stride field. Treat it as the end of the cache
-         * so the walker behaves the same as Amiga's "fell off into zeros"
-         * accidental-safety-net behaviour. */
-        uint16_t stride = ((TeamSelectionKeyCacheEntry *)listEntry)->entryStride;
-        if (stride < 10 || stride > 256) {
-            while (remaining > 0) {
-                *out++ = 0;
-                *out++ = 0;
-                remaining--;
-            }
-            return;
-        }
-        listIdx++;
-        gameIdx = 0;
-        listEntry += stride;
-        gameEntry = listEntry;
-        remaining--;
-        if (remaining == 0)
-            return;
+    }
+    for (; used < rows; ++used) {
+        _gameListArray[used * 2] = NULL;
+        _gameListArray[used * 2 + 1] = NULL;
     }
 }
-
 
 /* PrintNameAndSeason — show manager name, team, and season year (SWOS2.s line 60445) */
 __attribute__((used, externally_visible))
@@ -3751,30 +3767,29 @@ void PrintNameAndSeason(void)
 
     /* Set team name in entry 1 */
     TeamFileEx *teamData = VerifyTeamLoaded(_selTeamNumber);
+    uint8_t *teamName = (uint8_t *)teamData->team.teamName;
     uint8_t *entry1Str = (uint8_t *)_menuEntries[1].fg;
-    /* TeamFile.teamName is a 17-byte fixed-width field, not necessarily
-     * NUL-terminated. The next byte is the own-goals counter, which becomes
-     * visible as a stray character after a match if StringCopy reads through. */
-    char displayName[18];
-    SWOS_CopyTeamName18(displayName, teamData->team.teamName);
-    StringCopy((const uint8_t *)displayName, entry1Str);
+    SWOS_TeamNameCopy(teamName, entry1Str);
 
     /* Set season year in entry 2 */
     uint8_t *entry2Str = (uint8_t *)_menuEntries[2].fg;
-    uint16_t year = (uint16_t)(_seasonPlaying & 0xFF);
-    uint16_t d1 = year;
-    year += 1900;
-    if (year < 1996)
-        year += 100;
-    d1 += 1;
-    if (d1 >= 100)
-        d1 -= 100;
+    uint16_t year = World_SeasonYear(_seasonPlaying);     /* (the world's years: world.h) */
+    uint16_t d1 = (uint16_t)((year + 1) % 100);
     uint8_t *fmt;
     if (d1 >= 10)
         fmt = _a01Season;    /* "%0/%1 SEASON" */
     else
         fmt = _a001Season;   /* "%0/0%1 SEASON" */
     PrintFormatted(fmt, entry2Str, year, d1, 0, 0, 0, 0, 0, 0, 0, 0);
+}
+
+static unsigned nationalSquadMinimum(void)
+{
+#ifdef SWOS_SDL_BUILD
+    if (ModernRuntime_Enabled())
+        return MODERN_MATCH_PLAYERS;
+#endif
+    return 20;
 }
 
 /* SetNationalSelectorButtons — configure national team selector buttons (SWOS2.s line 60517) */
@@ -3792,7 +3807,7 @@ void SetNationalSelectorButtons(void)
 
     if (IsTournamentAllowingSquadChangesIfNotCareer() == 0) {
         transfersEntry->fg = (uintptr_t)_aChangeSquad;
-        if (_careerNumPlayers != 20)
+        if (_careerNumPlayers < nationalSquadMinimum())
             transfersEntry->fg = (uintptr_t)_aSelectSquad;
     }
 
@@ -3809,7 +3824,7 @@ void SetNationalSelectorButtons(void)
     /* Hide entry 6 (CLUB BUSINESS) for national selector */
     _menuEntries[6].isInvisible = 1;
 
-    if (_careerNumPlayers == 20)
+    if (_careerNumPlayers >= nationalSquadMinimum())
         return;
 
     /* Not enough players — disable most entries */
@@ -3918,7 +3933,7 @@ void ContestMenuInit(void)
         return;
     if (_isNationalSelector == 0)
         return;
-    if (_careerNumPlayers == 0x14)
+    if (_careerNumPlayers >= nationalSquadMinimum())
         return;
     SetCurrentEntry(4);
 }
@@ -4002,6 +4017,9 @@ void SeasonFinished(void);
 __attribute__((used, externally_visible))
 void PlayMatchMenu(MenuEntry *callerEntry)
 {
+#ifdef SWOS_SDL_BUILD
+    CareerAutosave_SeasonEnd(0);
+#endif
     if (_seasonFinished != 0) {
         SeasonFinished();
         return;
@@ -4051,6 +4069,9 @@ void PlayMatchMenu(MenuEntry *callerEntry)
 __attribute__((used, externally_visible))
 void NextMatch(MenuEntry *callerEntry)
 {
+#ifdef SWOS_SDL_BUILD
+    CareerAutosave_SeasonEnd(0);
+#endif
     Career_NextMatch();
 
     if (_gameType != GAME_TYPE_SEASON) {
@@ -4128,7 +4149,9 @@ void SeasonFinished(void)
         return;
     }
 
-    /* Career mode */
+#ifdef SWOS_SDL_BUILD
+    CareerAutosave_SeasonEnd(1);
+#endif
     if (_isNationalSelector != 0) {
         SeasonFinished_ComputeSeasonReview();
         MaybeSackManagerAfterSeasonReview();
@@ -4140,6 +4163,7 @@ void SeasonFinished(void)
     }
 
     /* loc_13BD4C */
+    WorldPlayoff_RecordLines();         /* (a world's titles into the season record: world_playoff.c) */
     Career_HandleRetirement();
     ActivateMenu(_contestMenu);
 }
@@ -4153,173 +4177,27 @@ void TransfersMenu(void)
         return;
     }
 
-    if (_timeToNegotiate == 0) {
-        _currentMessage = NO_MORE_TIME_TO_NEGOTIATE;
-        ShowChairmanMessage();
-        return;
-    }
-
     ShowMenu(_transferMarketMenu);
 }
 
-/* Managed-club retirement news. Names are captured before the retired player
- * is overwritten by the generated replacement in career_init.c. This is a
- * transition-only notification, not a persistent retirement-history format. */
-#define SWOS_RETIREMENT_NEWS_MAX 32u
-#define SWOS_RETIREMENT_NEWS_PAGE 10u
-static struct {
-    char name[24];
-    uint8_t age;
-    uint8_t position;
-} s_retirementNews[SWOS_RETIREMENT_NEWS_MAX];
-static unsigned s_retirementNewsCount;
-static unsigned s_retirementNewsSeason;
-static unsigned s_retirementNewsPage;
-static uint8_t s_retirementNewsIsNational;
-/* A missing club source is not necessarily a confirmed retirement. */
-static uint8_t s_retirementNewsUnavailable[SWOS_RETIREMENT_NEWS_MAX];
-static uint8_t s_retirementNewsHasUnavailable;
-char _retirementNewsHeading[64] = "PLAYER RETIREMENTS";
-char _retirementNewsRows[10][64];
-char _retirementNewsAction[16] = "CONTINUE";
-extern uint8_t _retirementNewsMenu[];
-extern void DrawMenu(void);
-
-void SWOS_RetirementNewsClear(unsigned season)
-{
-    s_retirementNewsCount = 0;
-    s_retirementNewsPage = 0;
-    s_retirementNewsSeason = season;
-    s_retirementNewsIsNational = 0;
-    s_retirementNewsHasUnavailable = 0;
-    memset(s_retirementNewsUnavailable, 0, sizeof s_retirementNewsUnavailable);
-}
-
-void SWOS_RetirementNewsRecord(const PlayerFile *player, unsigned age)
-{
-    if (!player || s_retirementNewsCount >= SWOS_RETIREMENT_NEWS_MAX)
-        return;
-    unsigned i = s_retirementNewsCount++;
-    s_retirementNewsUnavailable[i] = 0;
-    /* PlayerFile.playerName has 23 bytes, including its usual NUL. Never
-     * trust the runtime byte for menu string termination. */
-    memcpy(s_retirementNews[i].name, player->playerName, sizeof(player->playerName));
-    s_retirementNews[i].name[sizeof(player->playerName)] = 0;
-    s_retirementNews[i].age = age > 255u ? 255u : (uint8_t)age;
-    s_retirementNews[i].position = (player->positionAndFace >> 5) & 7u;
-}
-
-/* Called after the season's retirements are known and before the normal
- * acknowledgement screen. The original player snapshot comes from the
- * national team's pre-transition roster; no generated replacements are shown. */
-void SWOS_NationalRetirementNewsRecord(const PlayerFile *player, unsigned age)
-{
-    if (!player) return;
-    s_retirementNewsIsNational = 1;
-    SWOS_RetirementNewsRecord(player, age);
-}
-
-/* Called from the post-season national squad source reconciliation. Do not
- * label these removals as confirmed retirements when no retired identity was
- * established. Retain the existing acknowledged end-of-season screen. */
-void SWOS_NationalSquadUnavailableNewsRecord(const PlayerFile *player)
-{
-    if (!player || s_retirementNewsCount >= SWOS_RETIREMENT_NEWS_MAX)
-        return;
-    s_retirementNewsIsNational = 1;
-    s_retirementNewsHasUnavailable = 1;
-    SWOS_RetirementNewsRecord(player, 0);
-    s_retirementNewsUnavailable[s_retirementNewsCount - 1u] = 1;
-}
-
-static void SWOS_RetirementNewsPopulate(void)
-{
-    static const char *positions[8] = {"GK", "RB", "LB", "D", "RW", "LW", "M", "A"};
-    unsigned start = s_retirementNewsPage * SWOS_RETIREMENT_NEWS_PAGE;
-    snprintf(_retirementNewsHeading, sizeof(_retirementNewsHeading),
-             s_retirementNewsIsNational ?
-                 (s_retirementNewsHasUnavailable ?
-                     "NATIONAL TEAM SQUAD CHANGES - %u" :
-                     "NATIONAL TEAM RETIREMENTS - %u") :
-                 "PLAYER RETIREMENTS - SEASON %u", s_retirementNewsSeason);
-    for (unsigned i = 0; i < SWOS_RETIREMENT_NEWS_PAGE; ++i) {
-        _retirementNewsRows[i][0] = 0;
-        if (start + i < s_retirementNewsCount) {
-            unsigned idx = start + i;
-            if (s_retirementNewsIsNational)
-                snprintf(_retirementNewsRows[i], sizeof(_retirementNewsRows[i]),
-                         "%-23.23s  %s - %s",
-                         s_retirementNews[idx].name,
-                         positions[s_retirementNews[idx].position],
-                         s_retirementNewsUnavailable[idx] ? "UNAVAILABLE" :
-                             (s_retirementNewsHasUnavailable ? "RETIRED" : "REPLACE"));
-            else
-                snprintf(_retirementNewsRows[i], sizeof(_retirementNewsRows[i]),
-                         "%-23.23s  AGE %2u  %s",
-                         s_retirementNews[idx].name,
-                         (unsigned)s_retirementNews[idx].age,
-                         positions[s_retirementNews[idx].position]);
-        }
-    }
-    snprintf(_retirementNewsAction, sizeof(_retirementNewsAction), "%s",
-             start + SWOS_RETIREMENT_NEWS_PAGE < s_retirementNewsCount ? "NEXT" : "CONTINUE");
-}
-
-void SWOS_RetirementNewsInit(void) { SWOS_RetirementNewsPopulate(); }
-
-void SWOS_RetirementNewsNext(void)
-{
-    if ((s_retirementNewsPage + 1u) * SWOS_RETIREMENT_NEWS_PAGE < s_retirementNewsCount) {
-        ++s_retirementNewsPage;
-        SWOS_RetirementNewsPopulate();
-        DrawMenu();
-    } else {
-        /* End the dedicated retirement-news menu. ContinueCareer resumes
-         * and opens the next-season career screen after ShowMenu returns. */
-        s_retirementNewsCount = 0;
-        s_retirementNewsPage = 0;
-        SetExitMenuFlag();
-    }
-}
-
-int SWOS_RetirementNewsShow(void)
-{
-    /* One record per season transition, including the case where no notice
-     * was collected. This distinguishes an empty notification from a menu
-     * display problem without changing career or save data. */
-    {
-        FILE *f = fopen("swos_national_retirement_screen.log", "a");
-        if (f) {
-            fprintf(f, "RETIREMENT_SCREEN season=%u count=%u national=%u unavailable=%u action=%s\n",
-                    s_retirementNewsSeason, s_retirementNewsCount,
-                    (unsigned)s_retirementNewsIsNational,
-                    (unsigned)s_retirementNewsHasUnavailable,
-                    s_retirementNewsCount ? "show" : "skip_empty");
-            fclose(f);
-        }
-    }
-    if (!s_retirementNewsCount)
-        return 0;
-    s_retirementNewsPage = 0;
-    /* Season-end results can leave a menu-exit request pending. ActivateMenu
-     * intentionally skips drawing if it sees that flag; clear it because the
-     * retirement notice is the next screen, not an exit from career mode. */
-    _exitMenu = 0;
-    ShowMenu(_retirementNewsMenu);
-    return 1;
-}
-
 extern uint8_t _pastWinnersMenu[];
-extern TeamFileEx *GetTeamPointer(uint16_t teamId);
 extern void DrawMenu(void);
 
-/* Capture the exact View World selection before the competition is opened;
- * its currently active competition is not necessarily the manager's country. */
+static void career_competition_team_name(uint16_t teamId, char name[18])
+{
+#ifdef SWOS_SDL_BUILD
+    extern int Career_CopyTeamName(uint16_t teamId, char name[18]);
+    if (Career_CopyTeamName(teamId, name)) return;
+#endif
+    SWOS_CopyTeamName18(name, "UNKNOWN");
+}
+
+/* The history follows the competition being viewed, which can be in
+ * another country or region from the manager's current team. */
 static uint8_t s_worldHistoryCompId = 0xFF;
 static uint8_t s_worldHistoryKind = 0;
 static uint8_t s_worldHistoryDivision = 0;
 static uint16_t s_winnersPage = 0;
-char _pastWinnersLabel[] = "PAST WINNERS";
 char _pastWinnerHeading[64] = "PAST WINNERS";
 char _pastWinnerRows[10][64];
 char _pastWinnerPrevLabel[] = "PREVIOUS";
@@ -4347,10 +4225,8 @@ static void PastWinnersPopulate(void)
             if (found >= 10) return;
             /* Team identifiers are persisted rather than display names. Resolving
              * through the current database avoids duplicating the whole name. */
-            TeamFileEx *team = GetTeamPointer(r->teamId);
             char safeName[18];
-            if (team) SWOS_CopyTeamName18(safeName, team->team.teamName);
-            else SWOS_CopyTeamName18(safeName, "UNKNOWN");
+            career_competition_team_name(r->teamId, safeName);
             snprintf(_pastWinnerRows[found], sizeof(_pastWinnerRows[found]),
                      "SEASON %02u   %s", (unsigned)season + 1u, safeName);
             ++found;
@@ -4364,7 +4240,7 @@ static void PastWinnersPopulate(void)
 void PastWinnersInit(void) { PastWinnersPopulate(); }
 void PastWinnersOpen(void)
 {
-    if (_gameType != GAME_TYPE_CAREER) {
+    if (!CareerHistory_Active()) {
         ShowErrorMenu((uint8_t *)"AVAILABLE IN CAREER MODE ONLY");
         return;
     }
@@ -4397,7 +4273,7 @@ void PastWinnersNext(void)
     DrawMenu();
 }
 
-/* V3 Phase 2C3: common read-only national-tournament draw viewer.
+/* Read-only national-tournament draw viewer.
  * All entrants are read from saved competition copies, never from templates.
  * Opening the viewer has no match-simulation side effects. */
 extern CompetitionTournament _worldCup2Copy;
@@ -4407,52 +4283,48 @@ extern CompetitionTournament _africanNationsCupCopy;
 extern CompetitionTournament _northAmericanCupCopy;
 extern CompetitionTournament _asianCupCopy;
 extern CompetitionCup _oceaniaCupCopy;
-extern uint8_t _v3InternationalDrawMenu[];
-extern void *_careerTeamFlagsByRegionTable[];
-extern uint8_t _someTeamFlags;
+extern uint8_t _classicInternationalDrawMenu[];
 static unsigned s_intPage, s_intCount;
 static uint16_t s_intTeams[32];
 static const char *s_intName;
 static int s_intWinnersRequested;
-char _v3IntHeading[64] = "INTERNATIONAL CUP TEAMS";
-char _v3IntRows[10][64];
-char _v3IntPrev[] = "PREV", _v3IntNext[] = "NEXT";
-char _v3IntWinners[] = "WINNERS", _v3IntExit[] = "EXIT";
-void V3IntDrawPopulate(void);
-void V3IntDrawPrev(void);
-void V3IntDrawNext(void);
-void V3IntDrawWinners(void);
-void V3IntDrawPopulate(void)
+char _classicIntHeading[64] = "INTERNATIONAL CUP TEAMS";
+char _classicIntRows[10][64];
+char _classicIntPrev[] = "PREV", _classicIntNext[] = "NEXT";
+char _classicIntWinners[] = "WINNERS", _classicIntExit[] = "EXIT";
+void ClassicIntDrawPopulate(void);
+void ClassicIntDrawPrev(void);
+void ClassicIntDrawNext(void);
+void ClassicIntDrawWinners(void);
+void ClassicIntDrawPopulate(void)
 {
     unsigned start = s_intPage * 10u;
-    snprintf(_v3IntHeading, sizeof(_v3IntHeading), "%s %u/%u",
+    snprintf(_classicIntHeading, sizeof(_classicIntHeading), "%s %u/%u",
              s_intName ? s_intName : "INTERNATIONAL TEAMS",
              s_intPage + 1u, (s_intCount + 9u) / 10u);
     for (unsigned i = 0; i < 10; ++i) {
-        _v3IntRows[i][0] = 0;
+        _classicIntRows[i][0] = 0;
         if (start + i >= s_intCount) continue;
         uint16_t id = s_intTeams[start + i];
-        TeamFileEx *team = GetTeamPointer(id);
         char safeName[18];
-        if (team) SWOS_CopyTeamName18(safeName, team->team.teamName);
-        else SWOS_CopyTeamName18(safeName, "UNKNOWN");
-        snprintf(_v3IntRows[i], sizeof(_v3IntRows[i]), "%02u  %s",
+        career_competition_team_name(id, safeName);
+        snprintf(_classicIntRows[i], sizeof(_classicIntRows[i]), "%02u  %s",
                  start + i + 1u, safeName);
     }
 }
-void V3IntDrawPrev(void)
+void ClassicIntDrawPrev(void)
 {
     if (s_intPage) --s_intPage;
-    V3IntDrawPopulate();
+    ClassicIntDrawPopulate();
     DrawMenu();
 }
-void V3IntDrawNext(void)
+void ClassicIntDrawNext(void)
 {
     if ((s_intPage + 1u) * 10u < s_intCount) ++s_intPage;
-    V3IntDrawPopulate();
+    ClassicIntDrawPopulate();
     DrawMenu();
 }
-void V3IntDrawWinners(void)
+void ClassicIntDrawWinners(void)
 {
     s_intWinnersRequested = 1;
     SetExitMenuFlag();
@@ -4486,7 +4358,7 @@ static Competition *V3IntSavedCompetition(uint8_t id, unsigned *maxTeams,
     default: return NULL;
     }
 }
-static int V3IntDrawOpen(uint8_t id)
+static int ClassicIntDrawOpen(uint8_t id)
 {
     unsigned maxTeams = 0;
     const char *name = NULL;
@@ -4506,74 +4378,62 @@ static int V3IntDrawOpen(uint8_t id)
         s_intTeams[count++] = team;
     }
     /* No incomplete World Cup draw or one-team / garbage continental list. */
-    if (count < 2u || (id == COMPID_worldCup2 && count != 32u)) return 0;
+    if (count != maxTeams) return 0;
     s_intCount = count;
     s_intPage = 0;
     s_intName = name;
     s_intWinnersRequested = 0;
-    ShowMenu(_v3InternationalDrawMenu);
+    ShowMenu(_classicInternationalDrawMenu);
     if (s_intWinnersRequested) PastWinnersOpen();
     return 1;
 }
-static int WCIsFinalsSeason(void)
+void Career_OpenPastWinners(uint8_t id, uint8_t kind, uint8_t division)
 {
-    const uint8_t *flags = (const uint8_t *)_careerTeamFlagsByRegionTable[0];
-    return flags && (flags[_currentSeasonShowing % 20u] & 0x80u) != 0;
+    s_worldHistoryCompId = id;
+    s_worldHistoryKind = kind;
+    s_worldHistoryDivision = division;
+    PastWinnersOpen();
 }
 
-/* This scope flag lets View World show the World Cup at the top of the
- * root competition chooser in every career season. Other selectors retain
- * SWOS's original career-availability filtering. */
-uint16_t _swosViewWorldChooserActive = 0;
+/* Scoped to the classic career View World chooser. */
+uint16_t CareerViewWorld_Active;
 
 /* ViewWorldMenu — view world competitions (SWOS2.s line 59996) */
 __attribute__((used, externally_visible))
 void ViewWorldMenu(void)
 {
-    _swosViewWorldChooserActive = 1;
+    CareerViewWorld_Active = CareerHistory_Active();
     ChooseCompetitionMenu();
-    _swosViewWorldChooserActive = 0;
+    CareerViewWorld_Active = 0;
     if (_chooseTeamsResult == 0)
         return;
 
-    s_worldHistoryCompId = comp_id((uint8_t *)_selectedContest);
-    s_worldHistoryDivision = (uint8_t)_contestLeagueNumber;
-    /* The chooser may return the original WC template (4), while the
-     * actual finals copy and Past Winners records use ID 3. Keep history
-     * keyed to the played competition, not to its selection template. */
-    if (s_worldHistoryCompId == COMPID_worldCup)
-        s_worldHistoryCompId = COMPID_worldCup2;
-    if (s_worldHistoryCompId == COMPID_europeanChampionships)
-        s_worldHistoryCompId = COMPID_europeanChampionships2;
-    /* League winners are stored as kind 0; all cup winners as kind 1. */
-    s_worldHistoryKind = ((Competition *)_selectedContest)->type == 0 ? 0 : 1;
-    /* National tournaments are browseable in every career season. The
-     * original slot viewer is used only when the manager is actively playing
-     * that tournament; every other path uses saved lists or Past Winners. */
-    if (_gameType == GAME_TYPE_CAREER &&
-        (s_worldHistoryCompId == COMPID_worldCup2 ||
-         s_worldHistoryCompId == COMPID_europeanChampionships2 ||
-         (s_worldHistoryCompId >= COMPID_copaAmerica &&
-          s_worldHistoryCompId <= COMPID_oceaniaCup))) {
-        s_worldHistoryKind = 1;
-        s_worldHistoryDivision = 0;
-        if (_isNationalSelector && _currentCompetitionPtr &&
-            comp_id(_currentCompetitionPtr) == s_worldHistoryCompId &&
-            (s_worldHistoryCompId != COMPID_worldCup2 || (_someTeamFlags & 0x80u))) {
-            Career_ViewOrEditCompetitionSlot((uint8_t *)_selectedContest,
-                                             _contestLeagueNumber);
-            ContestMenuOnReturn();
+    uint8_t *selected = (uint8_t *)_selectedContest;
+    if (CareerHistory_Active()) {
+        uint8_t id = comp_id(selected);
+        if (id == COMPID_worldCup) id = COMPID_worldCup2;
+        if (id == COMPID_europeanChampionships) id = COMPID_europeanChampionships2;
+        if (id == COMPID_worldCup2 || id == COMPID_europeanChampionships2 ||
+            (id >= COMPID_copaAmerica && id <= COMPID_oceaniaCup)) {
+            if (_isNationalSelector &&
+                ((_currentCompetitionPtr && comp_id(_currentCompetitionPtr) == id) ||
+                 (_secondaryCompetitionPtr && comp_id(_secondaryCompetitionPtr) == id) ||
+                 (_tertiaryCompetitionPtr && comp_id(_tertiaryCompetitionPtr) == id))) {
+                Career_ViewOrEditCompetitionSlot(selected, 0);
+                ContestMenuOnReturn();
+                return;
+            }
+            s_worldHistoryCompId = id;
+            s_worldHistoryKind = 1;
+            s_worldHistoryDivision = 0;
+            /* ClassicIntDrawOpen validates the saved draw. A separate
+             * background-cup flag no longer exists in Unified and should
+             * not decide whether a real saved draw can be viewed. */
+            if (!ClassicIntDrawOpen(id)) PastWinnersOpen();
             return;
         }
-        /* The WC draw is retained outside finals years, but should not
-         * masquerade as the current finals in another season. */
-        if (s_worldHistoryCompId != COMPID_worldCup2 || WCIsFinalsSeason()) {
-            if (V3IntDrawOpen(s_worldHistoryCompId)) return;
-        }
-        PastWinnersOpen();
-        return;
     }
-    Career_ViewOrEditCompetitionSlot((uint8_t *)_selectedContest, _contestLeagueNumber);
+    Career_ViewOrEditCompetitionSlot(selected, _contestLeagueNumber);
     ContestMenuOnReturn();
 }
 
@@ -4699,6 +4559,16 @@ void PresetCompetitionMenu(void)
     }
 
     SelectTeamsForPresetCompetition();
+    /* A mod's competition, loaded from the row above WORLD CUP (src/mod_comps.c): started as
+     * a loaded one is (LoadOldCompetitionMenu). */
+    {
+        extern int32_t ModComps_TakeReady(void);
+        if (ModComps_TakeReady()) {
+            CommonMenuExit();
+            StartContest();
+            return;
+        }
+    }
     if (_chooseTeamsResult == 0) {
         CommonMenuExit();
         return;
@@ -4790,6 +4660,14 @@ void CareerMenu(void)
         return;
     }
 
+#ifdef CAREER_PLUS_SEASON_SWITCH
+    if (CareerPlus_BootAction != CAREER_PLUS_SETUP &&
+        !CareerAutopilot_Active() && !CareerPlus_ChooseSeason(CAREER_PLUS_SETUP)) {
+        CommonMenuExit();
+        return;
+    }
+    CareerPlus_BootAction = CAREER_PLUS_NONE;
+#endif
     ShowMenu(_careerMenu);
     CommonMenuExit();
     if (_gameType != GAME_TYPE_NO_GAME) {
@@ -4973,12 +4851,32 @@ final_check: /* loc_141210 */
     }
 }
 
-/* SaveContest — save competition to disk (SWOS2.s line 68443) */
+/* SaveContest — save competition to disk (SWOS2.s line 68443). The save itself is
+ * save_contest_file(), which F6 calls from any menu too (QuickSave_FromMenu, SWOS 2020's quick
+ * save): CommonMenuExit, which ends this, sets up the MAIN menu's entries. */
+static void save_contest_file(void);
+
 __attribute__((used, externally_visible))
 void SaveContest(void)
 {
+    save_contest_file();
+    CommonMenuExit();
+}
+
+#ifdef SWOS_SDL_BUILD
+/* F6 in a menu (SWOS 2020's ctl:2202, callSelectSaveContest): the game in progress saved from
+ * where the player is, by the same steps as the main menu's SAVE (src/settings_menus.c decides
+ * when it may). */
+void QuickSave_FromMenu(void)
+{
+    save_contest_file();
+}
+#endif
+
+static void save_contest_file(void)
+{
     if (Asset_PromptInsertSaveDiskDf0(_saveFileTitle) != 0)
-        goto cleanup;
+        return;
 
     {
         uint16_t gt = _gameType;
@@ -5046,8 +4944,6 @@ void SaveContest(void)
 
 done:
     ShowInsertDisk2Dialog(_saveFileTitle);
-cleanup:
-    CommonMenuExit();
 }
 
 /* LoadOldCompetitionMenu — load competition from disk (SWOS2.s line 68524) */
@@ -5058,6 +4954,14 @@ void LoadOldCompetitionMenu(void)
         CommonMenuExit();
         return;
     }
+
+#ifdef CAREER_PLUS_SEASON_SWITCH
+    if (CareerPlus_BootAction != CAREER_PLUS_LOAD && !CareerPlus_ChooseSeason(CAREER_PLUS_LOAD)) {
+        CommonMenuExit();
+        return;
+    }
+    CareerPlus_BootAction = CAREER_PLUS_NONE;
+#endif
 
     if (Asset_PromptInsertSaveDiskDf0(_aLoadOldCompeti) != 0) {
         CommonMenuExit();
@@ -5213,6 +5117,38 @@ void GoGetTeamsForPlay(uint8_t *gameTypeStrParam, uint8_t *playWhatStrParam,
     ShowInsertDisk2Dialog((uint8_t *)0);
 }
 
+#ifdef SWOS_SDL_BUILD
+/* GoGetTeamsForPlay straight into a team pack's teams (include/team_packs.h, ModApi_ChooseFromPack):
+ * no CHOOSE TEAMS screen, the pack's list as TEAM PACKS would show it. */
+void GoGetTeamsFromPack(uint8_t *gameTypeStrParam, uint8_t *playWhatStrParam, uint16_t numTeams, int32_t pack)
+{
+    extern void TeamPacks_SetChosen(int32_t number);
+    _showClubTeams = 0;
+    _showNationalTeams = 0;
+    _showOrigCustomTeams = 0;
+    _gameTypeStr = (uintptr_t)gameTypeStrParam;
+    _playWhatStr = (uintptr_t)playWhatStrParam;
+    _chooseTeamsHeader1stPart = 0;
+    _numSelectedTeams = 0;
+    _numNeededTeams = numTeams;
+    _chooseTeamsFunc = 0;
+    _careerSquadScreenDidSelectPlayerFlag = 0;
+    _selectTeamsNoLimit = 0;
+    TeamPacks_SetChosen(pack);
+    _teamsType = 4;                         /* TEAM_PACK_TEAMS (teams.c) */
+    _chooseTeamsResult = 0;
+    _viewSelectedTeams = 0;
+    _changeTeams = 0;
+    _abortSelectTeams = 0;
+    _exitSelectTeams = 0;
+    _showCupsAndOther = 0;
+    _loadTeam = 1;
+    _playSeason = 0;
+    _chooseCompetitionOnly = 0;
+    SelectTeamsFinalMenu(255);
+}
+#endif
+
 
 /* ================================================================
  * Chunk 135 — Career Over callbacks, Stats dispatchers,
@@ -5358,21 +5294,17 @@ void CareerOverFinish(void)
     {
         uint16_t teamNum = _selTeamNumber;
         TeamFileEx *teamPtr = VerifyTeamLoaded(teamNum);
+        uint8_t *teamName = (uint8_t *)teamPtr->team.teamName;
         MenuEntry *e1 = &_menuEntries[1];
         dest = (uint8_t *)e1->fg;
-        char displayName[18];
-        SWOS_CopyTeamName18(displayName, teamPtr->team.teamName);
-        StringCopy((const uint8_t *)displayName, dest);
+        SWOS_TeamNameCopy(teamName, dest);
     }
 
     /* Set season year in entry 2 (offset $70/56 = 2) */
     {
         MenuEntry *e2 = &_menuEntries[2];
         dest = (uint8_t *)e2->fg;
-        uint16_t year = (uint16_t)_seasonPlaying + 1900;
-        if (year < 1996)
-            year += 100;
-        year += 1;
+        uint16_t year = (uint16_t)(World_SeasonYear(_seasonPlaying) + 1);   /* (the world's years) */
         src = _a0EndSeason;
         PrintFormatted(src, dest, year, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
@@ -5677,6 +5609,55 @@ extern CompetitionSlotBuffer _euroCupsCompetitionContextBuf;   /* slot-3 untangl
 extern uint8_t  _plNationality;
 extern uint8_t  _nationalityOrdinal;
 extern uint8_t  _nationalityOrdinalsArray[];
+#include "national_teams.h"     /* NATIONALITIES_MAX, NATIONAL_TEAM_NO_FILE */
+
+/* Build the career manager's nationality choices from the base list.
+ * The classic career includes the national teams installed by Career+.
+ * The modern picker retains its existing historical nationality choices. */
+static const uint8_t *career_nationalities(int32_t *count)
+{
+    static uint8_t world[256];
+    int32_t n = 0;
+    while (n < (int32_t)NATIONALITIES_MAX - 1 && _nationalityOrdinalsArray[n] != 0xFF)
+        n++;                                    /* (the nationalities before OTHER: 63 the original's) */
+    if (World_Current() == WORLD_9697) {
+        extern uint8_t _nationalTeams[];
+        extern uint16_t _numNationalTeams;
+        const NationalTeamRecord *teams = (const NationalTeamRecord *)_nationalTeams;
+        uint8_t seen[256] = {0};
+        for (int32_t i = 0; i < n; ++i) {
+            world[i] = _nationalityOrdinalsArray[i];
+            seen[world[i]] = 1;
+        }
+        seen[0xFF] = 1;
+        for (unsigned i = 0; i < _numNationalTeams; ++i) {
+            unsigned nationality = teams[i].nationalityCode;
+            if (teams[i].countryNumber < CN_EUROPE ||
+                teams[i].countryNumber > CN_OCEANIA || nationality >= 214 ||
+                seen[nationality])
+                continue;
+            world[n++] = (uint8_t)nationality;
+            seen[nationality] = 1;
+        }
+        world[n++] = 0xFF;
+        *count = n;
+        return world;
+    }
+    static const uint8_t modNats[4] = { 153, 154, 155, 37 };
+    int32_t w = 0;
+    for (int32_t i = 0; i < n; i++)
+        world[w++] = _nationalityOrdinalsArray[i];
+    for (int32_t k = 0; k < 4; k++) {
+        int32_t dup = 0;
+        for (int32_t i = 0; i < n; i++)
+            dup |= _nationalityOrdinalsArray[i] == modNats[k];
+        if (!dup)
+            world[w++] = modNats[k];
+    }
+    world[w++] = 0xFF;
+    *count = w;
+    return world;
+}
 extern uint8_t  _shortCountryNames[];
 extern uint8_t  _aOther[];               /* "OTHER" */
 extern uint16_t _controlMask;
@@ -5832,17 +5813,17 @@ void CareerMenuFinish(void)
     CheckSex();
     SetPlayerCoachFieldColor();
 
-    /* Find nationalityOrdinal for the current plNationality */
+    /* Find nationalityOrdinal for the current plNationality (one the world's list has not:
+     * OTHER, the last) */
+    int32_t count;
     nat = _plNationality;
-    table = _nationalityOrdinalsArray;
+    table = (uint8_t *)career_nationalities(&count);
     idx = 0;
-    while (idx < 66 && *table != nat)
+    while (idx < count - 1 && *table != nat)
     {
         table++;
         idx++;
     }
-    if (idx == 66)
-        idx = 65;  /* OTHER for an unknown or unsupported nationality */
     _nationalityOrdinal = idx;
 
     SetNationalityField();
@@ -5873,23 +5854,25 @@ __attribute__((used, externally_visible))
 void ChangeNationality(MenuEntry *entry)
 {
     uint16_t ctrl = _controlMask;
-    int8_t ord;
+    int32_t ord;
+    int32_t count;
+    const uint8_t *table = career_nationalities(&count);
 
     /* Right or Down → increment */
     if (ctrl == 0x81 || ctrl == 0x101)
     {
-        ord = (int8_t)_nationalityOrdinal;
+        ord = _nationalityOrdinal;
         ord++;
-        if (ord == 66)
+        if (ord >= count)
             ord = 0;
     }
     /* Left or Up → decrement */
     else if (ctrl == 0x41 || ctrl == 0x201)
     {
-        ord = (int8_t)_nationalityOrdinal;
+        ord = _nationalityOrdinal;
         ord--;
         if (ord < 0)
-            ord = 65;
+            ord = count - 1;
     }
     else
     {
@@ -5897,10 +5880,7 @@ void ChangeNationality(MenuEntry *entry)
     }
 
     _nationalityOrdinal = (uint8_t)ord;
-    {
-        int16_t idx = (int16_t)(int8_t)ord;  /* ext.w d0 */
-        _plNationality = _nationalityOrdinalsArray[idx];
-    }
+    _plNationality = table[ord];
     SetNationalityField();
     CallDrawMenuItem(entry);
 }
@@ -6107,6 +6087,33 @@ void EditedCustomTeams(void)
 
 
 /* ================================================================
+ * TeamPacksTeams -- OpenSWOS: CHOOSE TEAMS' TEAM PACKS row (entry 5, shown while a mod that
+ * is on has a team pack: include/team_packs.h). One pack: its teams; more: the list of them
+ * first (openswos/teamPacksMenu, src/team_packs_menu.c). Its teams then list as the custom
+ * teams do (teams.c TEAM_PACK_TEAMS).
+ * ================================================================ */
+__attribute__((used, externally_visible))
+void TeamPacksTeams(void)
+{
+#ifdef SWOS_SDL_BUILD
+    extern int32_t TeamPacksMenu_Choose(void);
+    extern void TeamPacks_SetChosen(int32_t number);
+    const int32_t pack = TeamPacksMenu_Choose();
+    if (pack <= 0)
+        return;                             /* (back on CHOOSE TEAMS) */
+    TeamPacks_SetChosen(pack);
+    _teamsType = 4;                         /* TEAM_PACK_TEAMS (teams.c) */
+    _chooseTeamsResult = 0;
+    _viewSelectedTeams = 0;
+    _changeTeams = 0;
+    _abortSelectTeams = 0;
+    _exitSelectTeams = 0;
+    SetExitMenuFlag();
+#endif
+}
+
+
+/* ================================================================
  * ExitChooseTeams  (SWOS2.s line 63040)
  * ================================================================ */
 __attribute__((used, externally_visible))
@@ -6252,8 +6259,7 @@ void SetMenuEntryPlayerFace(MenuEntry *entry, PlayerFile *playerFile) {
     uint16_t d0 = playerFile[2].positionAndFace;
     d0 &= 0x18;
     d0 >>= 3;
-    d0 += SPR_PL_FACE_WHITE_GUY;
-    entry->fgWord = d0;
+    entry->fgWord = (uint16_t)Face_MenuIcon(d0);     /* (face 3: player_face3.c) */
 }
 
 /* ---- Chunk 142: SaveCareer ---- */
@@ -6321,7 +6327,7 @@ void SetSquadMenuEntryStatusSprite(MenuEntry *entry, PlayerFile *playerFile, uin
 
         if (d2 == 0) {
             if (d3 == 0) {
-                entry->fgWord = d1 + 0xBA;
+                entry->fgWord = (uint16_t)Face_MenuIcon(d1);   /* (0xBA + face; 3: player_face3.c) */
                 return;
             }
             if (d3 == 0x20) {
@@ -6366,7 +6372,7 @@ void SetSquadMenuEntryStatusSprite(MenuEntry *entry, PlayerFile *playerFile, uin
 
     if (d2 == 0) {
         if (d3 == 0) {
-            entry->fgWord = d1 + 0xBA;
+            entry->fgWord = (uint16_t)Face_MenuIcon(d1);   /* (0xBA + face; 3: player_face3.c) */
             return;
         }
         if (d3 == 0x20) {
@@ -6430,7 +6436,7 @@ void SetSquadMenuEntryStatusSprite_AfterSim(MenuEntry *entry, PlayerFile *player
     uint16_t d3 = playerFile->cardsInjuries & 0xE0;
 
     if (d3 == 0) {
-        entry->fgWord = d1 + 0xBA;
+        entry->fgWord = (uint16_t)Face_MenuIcon(d1);   /* (0xBA + face; 3: player_face3.c) */
         return;
     }
     if (d3 == 0x20) {
@@ -6703,8 +6709,7 @@ void ViewSquadInit(void)
 skipEntryShow:
 
     _menuEntries[0].fg = _viewSquadTitle;
-    SWOS_MenuCopyClubName(s_viewSquadClubName, _squadTeamPtr->teamName);
-    _menuEntries[1].fg = (uintptr_t)s_viewSquadClubName;
+    _menuEntries[1].fg = (uintptr_t)_squadTeamPtr->teamName;
 
     if (_viewSquadArg2) {
         _menuEntries[2].isInvisible = 1;  /* 0x70/56 = 2 */
@@ -6788,6 +6793,11 @@ void ViewSquadAfterDrawCommon(void *entryPtr)
     }
 
     uint16_t yCoord = a5->y;
+    {   /* (whose player: the mods' playerRowDrawn) */
+        extern void TransferRow_Identity(uint16_t team, uint16_t slot, int16_t row);
+        const TeamFileEx *sq = (const TeamFileEx *)_squadTeamPtr;
+        TransferRow_Identity(PACK_BE_U16(sq->team.countryNumber, sq->team.teamOrdinal), outPlayerIndex, (int16_t)d1);
+    }
     BuildTransferPlayerMenuEntry(&_menuEntries[23], player, yCoord,
                                    (int16_t)d6, style, 0);
     DrawMultipleItems(12, &_menuEntries[23]);
@@ -6970,17 +6980,19 @@ void ChooseTeamsDialogWithNationality(uint16_t nationality, uint16_t showClub,
 
 extern uint8_t _aSelectTeamToMa[];
 
-/* SelectTeamToManage — V3 career start selector: clubs AND national sides.
- * A selected national side is checked by ChooseTeamAndStartCareer before
- * entering InitCareer; invalid and undersized teams cannot start careers.
- * Results available in globals: selectedTeamCountryNumber, selectedTeamPtr. */
+/* SelectTeamToManage — show the career's club and national team picker. */
 __attribute__((used, externally_visible))
 void SelectTeamToManage(void)
 {
-    extern uint16_t SWOS_CareerStartFilterNationalTeams;
-    SWOS_CareerStartFilterNationalTeams = 1;
-    ChooseTeamsDialog(1, 1, 0, _aSelectTeamToMa, (void *)0);
-    SWOS_CareerStartFilterNationalTeams = 0;
+    int showNational = 0;
+#ifdef SWOS_SDL_BUILD
+    showNational = 1;
+    ModernNational_StartPicker = showNational;
+#endif
+    ChooseTeamsDialog(1, (uint16_t)showNational, 0, _aSelectTeamToMa, (void *)0);
+#ifdef SWOS_SDL_BUILD
+    ModernNational_StartPicker = 0;
+#endif
 }
 
 
@@ -7013,6 +7025,10 @@ extern int16_t  ShowSquad(TeamFile *teamPtr, uint8_t *title, uint32_t maskLo,
 extern void Career_CopyUnavailablePlayerToCareerTeamSlot(uint8_t *srcPlayer,
     uint8_t *dstTeam, uint8_t *srcName, uint16_t srcTeamNumber,
     uint16_t srcPlayerIndex, uint16_t dstSlotIndex);
+void Career_AddInternationalPlayerPicked(uint16_t team, uint16_t slot);
+#ifdef SWOS_SDL_BUILD
+enum { ADD_INTERNATIONAL_FROM_SEARCH = 3 };
+#endif
 
 /* Career_ShowAddInternationalPlayerDialog — show dialog to add international player.
  * If homeOrAbroadFlag==0: use nationality filter (home), else show all (abroad).
@@ -7022,6 +7038,24 @@ __attribute__((used, externally_visible))
 void Career_ShowAddInternationalPlayerDialog(uint16_t homeOrAbroadFlag)
 {
     _careerAddIntlPlayerResult = 0xFFFF;
+#ifdef SWOS_SDL_BUILD
+    if (homeOrAbroadFlag == ADD_INTERNATIONAL_FROM_SEARCH) {
+        if (ModernRuntime_Enabled())
+            ModernSearch_National();
+        else {
+            extern void NationalPlayerSearch(void);
+            NationalPlayerSearch();
+        }
+        return;
+    }
+#endif
+    if (homeOrAbroadFlag == 2) {    /* (a mod's pick, ModApi_CallUpPlayer: no dialog) */
+        extern int32_t ModCareer_TakeCallUp(uint16_t *team, uint16_t *slot);
+        uint16_t team, slot;
+        if (ModCareer_TakeCallUp(&team, &slot))
+            Career_AddInternationalPlayerPicked(team, slot);
+        return;
+    }
     if (homeOrAbroadFlag == 0) {
         /* Home: filter by nationality */
         ChooseTeamsDialogWithNationality((uint16_t)_nationalTeamFileId, 1, 0, 0,
@@ -7043,9 +7077,7 @@ void Career_ShowAddInternationalPlayerDialog(uint16_t homeOrAbroadFlag)
  * user pick a player, then copies that player into the career team.
  * ========================================================================== */
 
-/* Set only during a national player search result. Otherwise ShowSquad is used. */
-extern int16_t _nationalSearchTargetPlayerIndex;
-extern void NationalPlayerSearch(void);
+static void addInternationalPlayerChosen(TeamFileEx *teamEx, uint16_t selected, uint16_t sourceSlot);
 
 /* Career_AddInternationalPlayerCommon
  * selectedTeam: pointer to team selection data (first word = team number)
@@ -7057,17 +7089,9 @@ void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title)
     _careerAddIntlPlayerSelectedTeamNumber = teamNumber;
 
     TeamFileEx *teamEx = GetTeamPointer(teamNumber);
-    /* Always evaluate Yugoslavia's player eligibility with the actual
-     * player-nationality code, even when a caller bypasses Add Player. */
-    if (_selTeamNumber == 0x5030u)
-        _nationalTeamNationality = 0x25u;
     uint8_t nat = _nationalTeamNationality;
     uint16_t teamNum = teamEx->team.globalTeamNumber;
 
-    /* A search result must not be selected twice, even across separate
-     * invocations of the worldwide search or through the HOME/ABROAD picker.
-     * The existing lookup holds the original club ID and physical player
-     * slot for each selected international footballer. */
     /* Loop 1: Mark unavailable players with injury flag in cardsInjuries.
      * For each player matching the national team nationality, check if
      * they appear in careerUnavailablePlayerList (4 entries). If found,
@@ -7104,58 +7128,68 @@ void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title)
     for (int16_t i = 19; i >= 0; i--) {
         if (lookup[0] == _careerAddIntlPlayerSelectedTeamNumber) {
             uint16_t pidx = lookup[1];
-            natMask |= (1UL << pidx);
-            unavailMask |= (1UL << pidx);
+#ifdef SWOS_SDL_BUILD
+            if (ModernRuntime_Enabled()) {
+                /* The live roster index and this legacy view's slot can differ. */
+                const PlayerFile *called = (const PlayerFile *)((const uint8_t *)&_careerTeam +
+                    sizeof(TeamFile) + (19 - i) * sizeof(PlayerFile));
+                for (pidx = 0; pidx < 16; ++pidx)
+                    if (strncmp((const char *)called->playerName,
+                                (const char *)teamEx->players[pidx].playerName,
+                                sizeof called->playerName) == 0)
+                        break;
+            }
+#endif
+            if (pidx < 16) {
+                natMask |= (1UL << pidx);
+                unavailMask |= (1UL << pidx);
+            }
         }
         lookup += 2;  /* next 4-byte entry */
     }
+
+#ifdef SWOS_SDL_BUILD
+    extern int16_t _nationalSearchTargetPlayerIndex;
+    int16_t searchSlot = _nationalSearchTargetPlayerIndex;
+    if (!ModernRuntime_Enabled() && searchSlot >= 0) {
+        _careerAddIntlPlayerResult = 0xFFFF;
+        _careerSquadScreenDidSelectPlayerFlag = 0;
+        if (searchSlot >= 16)
+            return;
+        const uint32_t bit = 1u << searchSlot;
+        if (unavailMask & bit) {
+            _careerAddIntlPlayerResult = 2;
+            return;
+        }
+        if ((natMask & bit) || (uint8_t)teamEx->players[searchSlot].playerName[0] == 0xFF ||
+            !teamEx->players[searchSlot].playerName[0])
+            return;
+        uint16_t keepOpen = chooseTeamsKeepListOpen;
+        addInternationalPlayerChosen(teamEx, (uint16_t)searchSlot, (uint16_t)searchSlot);
+        chooseTeamsKeepListOpen = keepOpen;
+        return;
+    }
+#endif
 
     /* Show squad selection screen */
     _careerAddIntlPlayerResult = 0xFFFF;
     _careerSquadScreenDidSelectPlayerFlag = 0;
     _viewSquadFlags = unavailMask;
-    int16_t selected;
-    if (_nationalSearchTargetPlayerIndex >= 0) {
-        selected = _nationalSearchTargetPlayerIndex;
-        _nationalSearchTargetPlayerIndex = -1;
-        if (selected >= 16 || (natMask & (1UL << selected)))
-            return; /* existing eligibility masks apply to search results too */
-    } else {
-        selected = ShowSquad((TeamFile *)teamEx, title, natMask, 0, 0, 0xFFFF);
-    }
+    int16_t selected = ShowSquad((TeamFile *)teamEx, title, natMask, 0, 0, 0xFFFF);
 
     if (selected < 0)
         return;
 
-    /* Guard every entry route, not just the worldwide search. Also reject
-     * equal visible names from distinct stale source mappings: the manager
-     * should never end up with identical entries on the national team sheet.
-     * An invalid/empty lookup row cannot block a candidate. */
-    for (unsigned existing = 0; existing < 20; ++existing) {
-        uint16_t fromClub = _careerUnavailablePlayerLookupTable[existing * 2u];
-        uint16_t fromSlot = _careerUnavailablePlayerLookupTable[existing * 2u + 1u];
-        if (fromClub == 0xFFFFu || fromSlot >= 16u)
-            continue;
-        if (fromClub == teamNumber && fromSlot == (uint16_t)selected) {
-            _careerAddIntlPlayerResult = 2; /* already in the squad */
-            return;
-        }
-        const PlayerFile *onTeam = (const PlayerFile *)
-            ((const uint8_t *)&_careerTeam + sizeof(TeamFile) +
-             existing * sizeof(PlayerFile));
-        const PlayerFile *candidate = &teamEx->players[selected];
-        if ((uint8_t)onTeam->playerName[0] != 0xFFu &&
-            (uint8_t)onTeam->playerName[0] != 0 &&
-            !strncmp((const char *)onTeam->playerName,
-                     (const char *)candidate->playerName,
-                     sizeof(candidate->playerName))) {
-            _careerAddIntlPlayerResult = 2;
-            return;
-        }
-    }
+    addInternationalPlayerChosen(teamEx, (uint16_t)selected, (uint16_t)selected);
+}
 
+/* The squad pick made (the screen above, or a mod's: Career_AddInternationalPlayerPicked): the
+ * player goes into a free, position-compatible slot of the national squad, or -- none --
+ * _careerAddIntlPlayerResult 1, for NationalTeamAddPlayer to keep him pending. */
+static void addInternationalPlayerChosen(TeamFileEx *teamEx, uint16_t selected, uint16_t sourceSlot)
+{
     _careerSquadScreenDidSelectPlayerFlag = 1;
-    _careerAddIntlPlayerSelectedPlayerOrdinal = (uint16_t)selected;
+    _careerAddIntlPlayerSelectedPlayerOrdinal = sourceSlot;
 
     /* Calculate source player pointers using block pointer convention:
      * block_ptr = teamBase + ordinal * sizeof(PlayerFile)
@@ -7175,6 +7209,10 @@ void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title)
 
     /* Search for an empty, position-compatible slot in the career team */
     uint16_t dstSlot, dstFileIdx;
+    /* First use a vacant slot of the player's own position. Only if no
+     * such vacancy exists may we use the original goalkeeper/outfield
+     * fallback. The empty slot keeps the retired player's position code. */
+    for (unsigned exactPass = 0; exactPass < 2; ++exactPass) {
     for (int16_t d7 = 0; d7 < 20; d7++) {
         uint8_t *careerPlayer = GetPlayerInfoBreakPosition(
             &_careerTeam, (uint16_t)d7, &dstSlot, &dstFileIdx);
@@ -7188,6 +7226,8 @@ void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title)
          * goalkeeper (0) → only goalkeeper slots
          * outfield (>0) → only outfield slots */
         uint16_t dstPos = (pf->positionAndFace & PF_POSITION_MASK) >> 5;
+        if (exactPass == 0 && srcPos != dstPos)
+            continue;
         if (srcPos == 0) {
             if (dstPos != 0)
                 continue;
@@ -7196,24 +7236,10 @@ void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title)
                 continue;
         }
 
-        /* Found a compatible slot. If it is out in the overflow region, rotate
-         * the new player DOWN into the squad list so he is actually visible.
-         *
-         * The asm rotates to a hardcoded slot 16 (`move.b d2,$10(a1)`,
-         * SWOS2.s:105383), which is right only when slots 0..15 are full — the
-         * case it was written for, a full squad. Remove a few players and it is
-         * wrong: the reserved second-keeper FILE (index 11) gets rotated out to
-         * the overflow region by the remove path, so adding a keeper lands him
-         * at slot 16 — the unnumbered 17th row — while slots 11..15 sit empty.
-         * The tester's words: "now the 2nd GK spot is not on No. 12".
-         *
-         * Rotate to the LOWEST FREE display slot instead. The rotate permutes
-         * currentMatchPlayers, so each file's position type travels with it: the
-         * keeper file lands on slot 11 and row 12 becomes the keeper spot again,
-         * exactly where the original puts it on a freshly built squad. Folds to
-         * the asm whenever 0..15 are occupied, because then the lowest free slot
-         * IS 16. Use volatile to prevent GCC turning this into a memmove (no
-         * libc). */
+        /* The overflow slot may need bringing into the visible section.
+         * Only swap two VACANT file indices in currentMatchPlayers. Shifting
+         * the entire range moved occupied players to different tactical
+         * positions whenever a national player retired and was replaced. */
         if (dstSlot >= 16) {
             volatile uint8_t *cmp = _currentMatchPlayers;
             uint16_t home = dstSlot;
@@ -7224,11 +7250,7 @@ void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title)
             }
             if (home < dstSlot) {
                 uint8_t saved = cmp[dstSlot];
-                uint16_t idx = dstSlot;
-                while (idx != home) {
-                    cmp[idx] = cmp[idx - 1];
-                    idx--;
-                }
+                cmp[dstSlot] = cmp[home];
                 cmp[home] = saved;
             }
         }
@@ -7251,10 +7273,43 @@ void Career_AddInternationalPlayerCommon(uint8_t *selectedTeam, uint8_t *title)
         chooseTeamsKeepListOpen = 1;
         return;
     }
+    } /* exactPass */
 
     /* No compatible empty slot found */
     _careerAddIntlPlayerResult = 1;
 }
+
+/* A mod's pick (ModApi_CallUpPlayer, then its ADD PLAYER row): team `team`'s player `slot`,
+ * checked there, added as the squad screen's pick is. */
+void Career_AddInternationalPlayerPicked(uint16_t team, uint16_t slot)
+{
+    _careerAddIntlPlayerSelectedTeamNumber = team;
+    _careerAddIntlPlayerResult = 0xFFFF;
+    addInternationalPlayerChosen(GetTeamPointer(team), slot, slot);
+}
+
+#ifdef SWOS_SDL_BUILD
+/* Keep the selected player alive until the native squad menu has copied
+ * the pending replacement. Search results may refer to any roster slot. */
+uint16_t ModernNational_CallUp(uint16_t club, uint16_t slot, const PlayerFile *player,
+                               const char *clubName)
+{
+    static TeamFileEx source;
+    _careerAddIntlPlayerSelectedTeamNumber = club;
+    snprintf((char *)source.team.teamName, sizeof source.team.teamName, "%.16s", clubName);
+    source.players[0] = *player;
+    source.players[0].positionAndFace &= (PF_POSITION_MASK | PF_FACE_MASK);
+    source.players[0].cardsInjuries = 0;
+    source.players[0].cachedMatchValue = 0;
+    source.players[0].form = 0;
+    uint16_t keepOpen = chooseTeamsKeepListOpen;
+    addInternationalPlayerChosen(&source, 0, slot);
+    chooseTeamsKeepListOpen = keepOpen;
+    if (_careerAddIntlPlayerResult == 0)
+        _careerTeam.team.playerValuesDirty = TEAM_VALUES_DIRTY;
+    return _careerAddIntlPlayerResult;
+}
+#endif
 
 /* AddInternationalPlayerHome — callback for home nationality team selection.
  * selectedTeam passed in a0 from menu callback (chooseTeamsFunc). */
@@ -7321,7 +7376,7 @@ void SelectNationalTeamInit(void)
 {
     _careerIntlPlayersRemoveMask = 0;
     _careerNationalTeamHasPendingAddPlayer = 0;
-    if (_careerNumPlayers != 20) {
+    if (_careerNumPlayers < nationalSquadMinimum()) {
         SetCurrentEntry(3);
     }
     SelectNationalTeamFinish();
@@ -7395,38 +7450,104 @@ void Career_RebuildInternationalPlayerSelectionMasks(void)
     _careerIntlPlayersWrongTypeMask = wrongMask;
 }
 
+/* ---- the career screens' rows for the mods (include/menus.h, docs/MODS.md §28) ---- */
+#include "mod_api.h"
+extern const char *ModEntries_RowLabel(ModPoint point);     /* (src/mod_entries.c) */
+extern void ModEntries_RowChosen(ModPoint point);
+static const ModPoint k_modRowPoint[4] = {
+    MODPOINT_BUY_PLAYER, MODPOINT_TRANSFER_MARKET, MODPOINT_NATIONAL_ADD_PLAYER, MODPOINT_COMPETITION_STATS,
+};
+
+int32_t ModRow_Show(uint16_t entry, int32_t row)
+{
+    const char *label = ModEntries_RowLabel(k_modRowPoint[row]);
+    if (label) {
+        _menuEntries[entry].fg = (uintptr_t)label;
+        _menuEntries[entry].isInvisible = 0;
+        return 1;
+    }
+    _menuEntries[entry].isInvisible = 1;
+    return 0;
+}
+
+static void modRowChosen(int32_t row)
+{
+    ModEntries_RowChosen(k_modRowPoint[row]);
+}
+
+/* After a mod's entry: a transfer it completed (ModApi_OfferForPlayer) closes BUY PLAYER and
+ * TRANSFER MARKET as the game's own buys do; a player it picked (ModApi_CallUpPlayer) closes ADD
+ * PLAYER, which adds him (NationalTeamAddPlayer, add type 2). */
+__attribute__((used, externally_visible)) void BuyPlayerModRow(void)
+{
+    extern uint16_t _transferCompleted;
+    extern void BuyPlayerExit(void);
+    _transferCompleted = 0;
+    modRowChosen(MODROW_BUY_PLAYER);
+    if (_transferCompleted == 1)
+        BuyPlayerExit();
+}
+__attribute__((used, externally_visible)) void TransferMarketModRow(void)
+{
+    extern uint16_t _transferCompleted;
+    _transferCompleted = 0;
+    modRowChosen(MODROW_TRANSFER_MARKET);
+    if (_transferCompleted == 1)
+        SetExitMenuFlag();
+}
+__attribute__((used, externally_visible)) void NationalTeamAddPlayerModRow(void)
+{
+    extern uint16_t _careerNationalTeamAddPlayerType;
+#ifdef SWOS_SDL_BUILD
+    _careerNationalTeamAddPlayerType = ADD_INTERNATIONAL_FROM_SEARCH;
+    SetExitMenuFlag();
+#else
+    modRowChosen(MODROW_NATIONAL_ADD_PLAYER);
+    extern int32_t ModCareer_CallUpPending(void);
+    if (ModCareer_CallUpPending()) {
+        _careerNationalTeamAddPlayerType = 2;
+        SetExitMenuFlag();
+    }
+#endif
+}
+__attribute__((used, externally_visible)) void CompetitionStatsModRow(void) { modRowChosen(MODROW_COMPETITION_STATS); }
+
 /* NationalTeamAddPlayer — shows the home/abroad sub-menu, then lets user
  * select a player. If player selected but no room in career team (result==1),
  * copies player data for pending addition. */
 __attribute__((used, externally_visible))
+/* A nation without a club league has no HOME list. The SDL career adds
+ * PLAYER SEARCH below ABROAD in both eras. */
+__attribute__((used, externally_visible))
+void NationalTeamAddPlayerInit(void)
+{
+    extern uint8_t _nationalTeamFileId;
+#ifdef SWOS_SDL_BUILD
+    _menuEntries[4].fg = (uintptr_t)"PLAYER SEARCH";
+    _menuEntries[4].isInvisible = 0;
+    const int hasSearch = 1;
+#else
+    const int hasSearch = ModRow_Show(4, MODROW_NATIONAL_ADD_PLAYER);
+#endif
+    if (hasSearch) {
+        _menuEntries[2].downEntry = 4;      /* ABROAD -> the row -> EXIT */
+        _menuEntries[3].upEntry = 4;
+    }
+    if (_nationalTeamFileId != NATIONAL_TEAM_NO_FILE)
+        return;
+    _menuEntries[1].isInvisible = 1;
+    _menuEntries[2].upEntry = -1;
+    SetCurrentEntry(2);
+}
+
 void NationalTeamAddPlayer(void)
 {
-    /* Yugoslavia (50:30) was absent from the original selectable national
-     * job-offer records. Its nationality 0x25 is distinct from its TEAM
-     * file ordinal 0x30 and region identifier 0x29. Do not rely on the
-     * legacy record search here: older installs may still have a 63-entry
-     * national record limit, returning a null or wrong nationality. */
-    if (_selTeamNumber == 0x5030u) {
-        _nationalTeamNationality = 0x25u;
-        _nationalTeamFileId = 0x29u;
-    } else {
-        extern uint8_t *GetNationalityRecordPtr(uint16_t teamId);
-        const NationalTeamRecord *record =
-            (const NationalTeamRecord *)GetNationalityRecordPtr(_selTeamNumber);
-        if (record) {
-            _nationalTeamNationality = record->nationalityCode;
-            _nationalTeamFileId = record->teamFileId;
-        }
-    }
     _careerIntlPlayersRemoveMask = 0;
     ShowMenu(_nationalTeamAddPlayerMenu);
     int16_t addType = (int16_t)_careerNationalTeamAddPlayerType;
 
     if (addType >= 0) {
-        if (addType == 2)
-            NationalPlayerSearch();
-        else
-            Career_ShowAddInternationalPlayerDialog((uint16_t)addType);
+        Career_ShowAddInternationalPlayerDialog((uint16_t)addType);
 
         if (_careerAddIntlPlayerResult == 1) {
             /* No room right now — store as pending add */
@@ -7462,7 +7583,7 @@ void NationalTeamRemovePlayers(void)
     Career_RebuildInternationalPlayerSelectionMasks();
     Career_UpdateRemovePlayersMenuEntry();
     SetCurrentEntry(4);
-    if (_careerNumPlayers != 20) {
+    if (_careerNumPlayers < nationalSquadMinimum()) {
         SetCurrentEntry(3);
     }
     DrawMenu();
@@ -7509,6 +7630,10 @@ void SelectNationalTeamCommon(void *entryPtr)
             _careerAddIntlPlayerSelectedPlayerOrdinal,
             fileIdx);
 
+#ifdef SWOS_SDL_BUILD
+        if (ModernRuntime_Enabled())
+            _careerTeam.team.playerValuesDirty = TEAM_VALUES_DIRTY;
+#endif
         _careerNationalTeamHasPendingAddPlayer = 0;
         SetCurrentEntry(3);
         Career_UpdateNationalTeamMenuEntries();
@@ -7587,6 +7712,11 @@ void SelectNationalTeamAfterDrawCommon(void *entryPtr)
         uint16_t slot, fileIdx;
         uint8_t *careerPlayer = GetPlayerInfoBreakPosition(
             &_careerTeam, d1, &slot, &fileIdx);
+        {   /* (whose player: the national squad's, the mods' playerRowDrawn) */
+            extern void TransferRow_Identity(uint16_t team, uint16_t slot, int16_t row);
+            extern uint16_t _selTeamNumber;
+            TransferRow_Identity(_selTeamNumber, fileIdx, (int16_t)relIdx);
+        }
         a6_player = careerPlayer;
 
         /* Default color based on position type */
@@ -7680,19 +7810,23 @@ extern DIYCompetitionEx _diyCompetitionStart;
  * Common helper: sets up squad menu state and shows it.
  * teamPtr = pointer to team file, rowMode = squad display mode.
  * ================================================================ */
-/* Keep the career squad viewer aligned with the transfer-market roster.
- * AI transfers and retirements are stored as foreign-market overrides. The
- * squad viewer may receive a cached team via ChooseTeamForEditTactics or
- * VerifyTeamLoaded, neither of which necessarily reapplies these overrides.
- * Patch that actual team record before drawing. This is idempotent and must
- * never be used for the human-managed career team. */
-extern void Career_PatchTeamWithForeignMarketPlayers(TeamFileEx *teamPtr);
 static void ShowSquadMenuForTeam(uint8_t *teamPtr, uint16_t rowMode)
 {
-    if (_gameType == 4 /* GAME_TYPE_CAREER */ && teamPtr &&
-        (TeamFileEx *)teamPtr != &_careerTeam) {
-        Career_PatchTeamWithForeignMarketPlayers((TeamFileEx *)teamPtr);
+#ifdef SWOS_SDL_BUILD
+    /* R7b: use the ORIGINAL SWOS squad menu and its existing extra-player
+     * continuation arrow. The 32-record career buffer already supports it. */
+    int modernExpanded = 0;
+    if (_gameType == 4 && ModernRuntime_Enabled() && !_isNationalSelector && teamPtr &&
+        PACK_BE_U16(teamPtr[0], teamPtr[1]) == _selTeamNumber) {
+        modernExpanded = ModernRuntime_ExpandCareerSquad(
+            ModernWorld_Active(), &_careerTeam);
+        if (modernExpanded) {
+            ModernCareer_ReleaseUnneededLoans();
+            teamPtr = (uint8_t *)&_careerTeam;
+        }
     }
+#endif
+
     _squadTeamFilePtr = (uintptr_t)teamPtr;
     _squadRowMode = rowMode;
     _inEditTactics = rowMode;
@@ -7713,6 +7847,10 @@ static void ShowSquadMenuForTeam(uint8_t *teamPtr, uint16_t rowMode)
     }
 
     ShowMenu(_squadMenu);
+#ifdef SWOS_SDL_BUILD
+    if (modernExpanded)
+        ModernRuntime_CommitCareerSquad(ModernWorld_Active(), &_careerTeam);
+#endif
 }
 
 /* ================================================================
@@ -7853,9 +7991,9 @@ extern uint8_t *BuildMatchResultString(uint16_t control, uint16_t leg2, uint16_t
 extern char *_careerGameTopTeamName;
 extern char *_careerGameBottomTeamName;
 extern uint16_t _careerGameListTeamControl;
-extern const char *_divStringTable[];
-extern const char *_roundStringTable[];
-extern const char *_rndStringTable[];
+extern const char *_divStringTable[4];
+extern const char *_roundStringTable[23];
+extern const char *_rndStringTable[15];
 extern uint16_t _currentDivisionIndex;
 extern uint8_t  _aError[];       /* "ERROR" */
 extern uint8_t  _aMinus[];       /* "-" */
@@ -7870,339 +8008,166 @@ extern uint8_t  _aCup_1[];       /* "CUP" */
 extern uint8_t  _aCup_2[];       /* "CUP" */
 extern uint8_t *_careerCompetitionSlotPtrTable[];
 
-/* Fixture names in TeamFile are fixed-width (17 bytes). The career game
- * list passes names to C-string renderers, which must never read past that
- * field when a team fills all 17 bytes. Keep owned, NUL-terminated copies
- * for the duration of the draw rather than mutating saved team records. */
-static char careerFixtureTopName[18];
-static char careerFixtureBottomName[18];
+/* The preview uses the exact fixture arrays consumed by
+ * getCurrentFixtureTeamPtrs(), avoiding a second, independently maintained
+ * set of group match pairings. */
+extern const uint8_t *_fixtureSchedulePtrTable[];
+extern int8_t _euroChampFixtureData[28];
 
-
-/* Align the career EURO fixture preview with the actual tournament draw.
- * The draw is represented by DIYTournamentState.teamIndexOrder and groupMap,
- * not by the *unshuffled* teamIds sequence. The source game originally
- * constructs the career cache before the final tournament draw. */
-static void Career_SynchroniseEuroGroupFixturePreviews(void)
+/* Reconcile the three group games with the active draw. The stable records
+ * give EURO's fixture order; the World Cup uses the league shuffle grid. */
+static void Career_SynchroniseGroupFixturePreviews(void)
 {
-    extern uint8_t _teamSelectionKeyCache[];
-    extern uint16_t _teamSelectionKeyCacheCount;
-    extern DIYCompetitionEx _diyCompetitionStart;
-    const DIYTournamentState *t = &_primaryCompetitionBuf.tourn;
-    const DIYTournamentSlot *slot = &t->slots[0];
+    if (_gameType != 4 || !_isNationalSelector)
+        return;
+    const DIYTournamentState *tournament = &_primaryCompetitionBuf.tourn;
+    const DIYTournamentSlot *slot = &tournament->slots[0];
+    unsigned id = tournament->header.field_2E;
+    unsigned worldCup = id == COMPID_worldCup2;
+    if (!worldCup && id != COMPID_europeanChampionships &&
+        id != COMPID_europeanChampionships2)
+        return;
+    unsigned count = worldCup ? 32 : 16;
+    if (tournament->header.competitionType != 2 ||
+        tournament->header.currentRoundIndex != 0 ||
+        slot->numTeams != count || slot->groups != count / 4 || slot->teamsPerGroup != 4)
+        return;
+
     const DIYCompetitionEx *stage = &_diyCompetitionStart;
-    const DIYCompetitionEx *saved =
-        (const DIYCompetitionEx *)(const void *)_primaryCompetitionBuf.stageSnapshot;
-    const char *source = "live";
-    FILE *log = NULL;
-    static unsigned traceCount = 0;
-    if (++traceCount <= 12) log = fopen("swos_euro_fixture_sync.log", "a");
-#define EURO_SKIP(reason) do { if (log) fprintf(log, "EURO_PREVIEW_SKIP reason=%s\n", reason); goto done; } while (0)
-    if (!_isNationalSelector || _gameType != 4) EURO_SKIP("not_national_career");
-    if ((t->header.field_2E != COMPID_europeanChampionships2 &&
-         t->header.field_2E != COMPID_europeanChampionships) ||
-        t->header.competitionType != 2) EURO_SKIP("not_euro");
-    if (t->header.currentRoundIndex != 0 ||
-        slot->numTeams != 16 || slot->groups != 4 || slot->teamsPerGroup != 4)
-        EURO_SKIP("not_16_team_group_stage");
-    if (stage->base.competitionType != 0 ||
-        stage->base.field_2E != t->header.field_2E) {
-        stage = saved;
-        source = "saved";
-    }
-    if (stage->base.competitionType != 0 ||
-        stage->base.field_2E != t->header.field_2E ||
-        stage->base.numTeams != 16) EURO_SKIP("no_group_stage_snapshot");
+    if (stage->base.competitionType != 0 || stage->base.field_2E != id ||
+        stage->base.numTeams != count)
+        stage = (const DIYCompetitionEx *)(const void *)_primaryCompetitionBuf.stageSnapshot;
+    if (stage->base.competitionType != 0 || stage->base.field_2E != id ||
+        stage->base.numTeams != count)
+        return;
 
-    /* The active EURO league stage owns the genuine group membership.
-     * Stable leagueStandings records [group*4..group*4+3] identify teams
-     * via teamSelOffset; teamEntryOffsets simply SORTS those records for
-     * display. The stage leagueTeamIds array may contain a different, stale
-     * draw (as observed in actual career saves). Never infer group membership
-     * from leagueTeamIds or shuffleAndPad. */
-    static const uint8_t pairings[3][4] = {
-        {1, 0, 3, 2}, {2, 1, 0, 3}, {1, 3, 0, 2}
-    };
-    uint16_t members[4][4];
-    uint16_t opponent[3];
-    uint8_t humanFirst[3];
-    unsigned myGroup = 4, myPosition = 4;
-    for (unsigned g = 0; g < 4; ++g) {
-        for (unsigned pos = 0; pos < 4; ++pos) {
-            const DIYTeamStats *row = &stage->leagueStandings[g*4 + pos];
-            int identity = row->teamSelOffset;
-            if (identity < -1 || identity >= 100)
-                EURO_SKIP("bad_group_row_team_identity");
-            const TeamFileEx *team = identity == -1
-                ? &_careerTeam : &_selectedTeams[identity];
-            uint16_t id = ((uint16_t)team->team.countryNumber << 8)
-                          | (uint16_t)team->team.teamOrdinal;
-            if (!id || id == 0xFFFF) EURO_SKIP("bad_group_team_id");
-            for (unsigned gg = 0; gg <= g; ++gg)
-                for (unsigned pp = 0; pp < (gg == g ? pos : 4); ++pp)
-                    if (members[gg][pp] == id)
-                        EURO_SKIP("duplicate_group_team_id");
-            members[g][pos] = id;
-            if (id == _selTeamNumber) {
-                if (myGroup != 4) EURO_SKIP("duplicate_human_team");
-                myGroup = g;
-                myPosition = pos;
-            }
-        }
-    }
-    if (myGroup >= 4) EURO_SKIP("human_missing_from_standings");
-
-    /* Compare each sorted group as drawn on screen to the original
-     * standings-record quartet. This catches accidental identity damage
-     * without conflating sorted table positions and fixture positions. */
-    for (unsigned g = 0; g < 4; ++g) {
-        for (unsigned i = 0; i < 4; ++i) {
-            unsigned off = stage->matchData.league.teamEntryOffsets[g*4+i];
-            if ((off % sizeof(DIYTeamStats)) ||
-                (off / sizeof(DIYTeamStats)) >= 16)
-                EURO_SKIP("bad_standings_offset");
-            const DIYTeamStats *row = &stage->leagueStandings[off / sizeof(DIYTeamStats)];
-            int identity = row->teamSelOffset;
-            if (identity < -1 || identity >= 100)
-                EURO_SKIP("bad_standings_team_identity");
-            const TeamFileEx *team = identity == -1
-                ? &_careerTeam : &_selectedTeams[identity];
-            uint16_t id = ((uint16_t)team->team.countryNumber << 8)
-                          | (uint16_t)team->team.teamOrdinal;
-            unsigned hits = 0;
-            for (unsigned j = 0; j < 4; ++j)
-                if (members[g][j] == id) hits++;
-            if (hits != 1) EURO_SKIP("stage_group_vs_standings_mismatch");
-        }
-    }
-    for (unsigned r = 0; r < 3; ++r) {
-        unsigned hits = 0;
-        for (unsigned m = 0; m < 2; ++m) {
-            unsigned first = pairings[r][2*m], second = pairings[r][2*m+1];
-            if (myPosition != first && myPosition != second) continue;
-            opponent[r] = members[myGroup][myPosition == first ? second : first];
-            humanFirst[r] = (myPosition == first);
-            hits++;
-        }
-        if (hits != 1) EURO_SKIP("pairing_invalid");
-    }
-    if (log) fprintf(log,
-        "EURO_STAGE_SOURCE method=standings_identities source=%s group=%u position=%u "
-        "members=%04X,%04X,%04X,%04X "
-        "opponents=%04X,%04X,%04X\n",
-        source, myGroup+1, myPosition,
-        members[myGroup][0],members[myGroup][1],
-        members[myGroup][2],members[myGroup][3],
-        opponent[0],opponent[1],opponent[2]);
-
-    /* Career fixture cache has a separate 22-byte entry for each EURO
-     * group match. Round index is 0, cupRoundStringIdx is 0, and the
-     * group-stage entries are consecutive. Preserve already played games. */
-    TeamSelectionKeyCacheEntry *entries[3] = {0};
-    unsigned n = 0, off = 0;
-    unsigned count = _teamSelectionKeyCacheCount;
-    if (count > 128) EURO_SKIP("cache_count_bad");
-    for (unsigned i = 0; i < count; ++i) {
-        if (off + sizeof(TeamSelectionKeyCacheEntry) > 8192u)
-            EURO_SKIP("cache_bounds");
-        TeamSelectionKeyCacheEntry *e =
-            (TeamSelectionKeyCacheEntry *)(void *)(_teamSelectionKeyCache + off);
-        unsigned stride = e->entryStride;
-        if (stride < sizeof(*e) || stride > 256 || off + stride > 8192u)
-            EURO_SKIP("cache_stride_bad");
-        if (e->compSlot == 0 && e->roundIdx == 0 &&
-            e->cupRoundStringIdx == 0 && e->totalElements == 1 &&
-            stride >= sizeof(*e) + sizeof(TeamSelectionKeyCacheMatchSlot)) {
-            if (n >= 3) EURO_SKIP("too_many_group_rows");
-            entries[n++] = e;
-        }
-        off += stride;
-    }
-    if (n != 3) EURO_SKIP("missing_group_rows");
-    for (unsigned r = 0; r < 3; ++r) {
-        TeamSelectionKeyCacheMatchSlot *m =
-            (TeamSelectionKeyCacheMatchSlot *)(void *)(entries[r] + 1);
-        if (m->matchFlags) continue;
-        uint8_t *ids = (uint8_t *)(void *)m;
-        uint16_t old1 = BE_READ_U16(ids + 2);
-        uint16_t old2 = BE_READ_U16(ids + 4);
-        uint16_t new1 = humanFirst[r] ? _selTeamNumber : opponent[r];
-        uint16_t new2 = humanFirst[r] ? opponent[r] : _selTeamNumber;
-        if (log) fprintf(log, "EURO_PREVIEW_ROW source=%s group=%u round=%u old=%04X,%04X expected=%04X,%04X\n",
-                         source, myGroup+1, r+1, old1, old2, new1, new2);
-        if (old1 == new1 && old2 == new2) continue;
-        BE_WRITE_U16(ids+2, new1);
-        BE_WRITE_U16(ids+4, new2);
-        if (log) fprintf(log, "EURO_PREVIEW_SYNC group=%u round=%u old=%04X,%04X new=%04X,%04X\n",
-                         myGroup+1,r+1,old1,old2,new1,new2);
-    }
-    if (log) fprintf(log, "EURO_PREVIEW_SUCCESS source=%s group=%u human_pos=%u\n", source,myGroup+1,myPosition);
-done:
-    if (log) fclose(log);
-#undef EURO_SKIP
-}
-
-
-/* 32-team World Cup group preview.  Unlike the stale tournament teamIds[]
- * order, the live league standings keep stable selected-team identities in
- * their records.  The league shuffle grid and the standard four-team
- * fixture schedule determine which of those players actually meets whom.
- * Reconcile only unplayed career cache rows.  Never rewrite the tournament. */
-static void Career_SynchroniseWorldCupGroupFixturePreviews(void)
-{
-    extern uint8_t _teamSelectionKeyCache[];
-    extern uint16_t _teamSelectionKeyCacheCount;
-    extern DIYCompetitionEx _diyCompetitionStart;
-    const DIYTournamentState *t = &_primaryCompetitionBuf.tourn;
-    const DIYTournamentSlot *slot = &t->slots[0];
-    const DIYCompetitionEx *stage = &_diyCompetitionStart;
-    const DIYCompetitionEx *saved =
-        (const DIYCompetitionEx *)(const void *)_primaryCompetitionBuf.stageSnapshot;
-    const char *source = "live";
-    FILE *log = NULL;
-    static unsigned traceCount = 0;
-    if (++traceCount <= 24) log = fopen("swos_worldcup_fixture_sync.log", "a");
-#define WC_PREVIEW_SKIP(reason) do { if (log) fprintf(log, "WC_PREVIEW_SKIP reason=%s\n", reason); goto done; } while (0)
-    if (!_isNationalSelector || _gameType != 4) WC_PREVIEW_SKIP("not_national_career");
-    if (t->header.field_2E != COMPID_worldCup2 ||
-        t->header.competitionType != 2) WC_PREVIEW_SKIP("not_32_world_cup");
-    if (t->header.currentRoundIndex != 0 ||
-        slot->numTeams != 32 || slot->groups != 8 || slot->teamsPerGroup != 4)
-        WC_PREVIEW_SKIP("not_group_stage");
-    if (stage->base.competitionType != 0 ||
-        stage->base.field_2E != t->header.field_2E) {
-        stage = saved;
-        source = "saved";
-    }
-    if (stage->base.competitionType != 0 ||
-        stage->base.field_2E != t->header.field_2E ||
-        stage->base.numTeams != 32) WC_PREVIEW_SKIP("no_active_group_stage");
-
-    /* Use the actual standard SWOS four-team league schedule.  Each pair
-     * of games constitutes one World Cup group match day. */
-    static const uint8_t roundPairs[3][4] = {
-        {0, 1, 2, 3}, {0, 2, 1, 3}, {3, 0, 1, 2}
-    };
-    uint16_t ids[32];
-    uint8_t grid[32];
-    uint16_t opponents[3];
-    uint8_t humanFirst[3];
-    unsigned humanGroup = 8, humanPos = 4;
+    /* All Career+ runtimes must use one canonical group mapping. Both the
+     * original and modern finals schedule their matches from shuffleAndPad.
+     * In particular, EURO standings records are not necessarily sequential
+     * following the draw, so never assume record == display position. */
+    uint8_t records[32];
+    uint16_t teams[32];
     uint32_t seen = 0;
-    for (unsigned i = 0; i < 32; ++i) {
-        unsigned idx = stage->matchData.league.shuffleAndPad[i];
-        if (idx >= 32 || (seen & (UINT32_C(1) << idx)))
-            WC_PREVIEW_SKIP("bad_or_duplicate_fixture_grid");
-        seen |= UINT32_C(1) << idx;
-        grid[i] = (uint8_t)idx;
-        const DIYTeamStats *row = &stage->leagueStandings[idx];
-        int32_t identity = row->teamSelOffset;
-        if (identity < -1 || (identity >= 0 && (unsigned)identity >= _numSelectedTeams))
-            WC_PREVIEW_SKIP("bad_team_identity");
-        const TeamFileEx *team = identity == -1
-            ? &_careerTeam : &_selectedTeams[identity];
-        ids[idx] = ((uint16_t)team->team.countryNumber << 8) |
-            (uint16_t)team->team.teamOrdinal;
-        if (!ids[idx] || ids[idx] == 0xffffu)
-            WC_PREVIEW_SKIP("bad_team_id");
-        if (ids[idx] == _selTeamNumber) {
-            if (humanGroup != 8) WC_PREVIEW_SKIP("duplicate_managed_team");
-            humanGroup = i / 4;
-            humanPos = i % 4;
-        }
-    }
-    if (seen != UINT32_MAX) WC_PREVIEW_SKIP("incomplete_fixture_grid");
-    if (humanGroup >= 8) WC_PREVIEW_SKIP("managed_team_not_in_grid");
-
-    /* Cross-check the eight sorted standings groups against fixture group
-     * membership.  Sorting changes order but not the set of four records.
-     * Do not write cache entries if the draw itself is inconsistent. */
-    const size_t offsetsStart = offsetof(DIYCompetitionEx_LeagueView, teamEntryOffsets);
-    if (offsetsStart + 32u * sizeof(uint16_t) > sizeof(stage->matchData.raw))
-        WC_PREVIEW_SKIP("standings_storage_bounds");
-    for (unsigned g = 0; g < 8; ++g) {
-        uint8_t checked = 0;
-        for (unsigned i = 0; i < 4; ++i) {
-            uint16_t offset;
-            memcpy(&offset, stage->matchData.raw + offsetsStart + (g*4+i)*2, sizeof(offset));
-            if (offset % sizeof(DIYTeamStats) || offset / sizeof(DIYTeamStats) >= 32)
-                WC_PREVIEW_SKIP("bad_standings_offset");
-            unsigned rec = offset / sizeof(DIYTeamStats);
-            unsigned found = 0;
-            for (unsigned j = 0; j < 4; ++j) {
-                if (grid[g*4+j] == rec) {
-                    if (checked & (1u << j)) WC_PREVIEW_SKIP("duplicate_group_record");
-                    checked |= (uint8_t)(1u << j);
-                    ++found;
-                }
-            }
-            if (found != 1) WC_PREVIEW_SKIP("standings_group_mismatch");
-        }
-        if (checked != 15) WC_PREVIEW_SKIP("incomplete_group");
-    }
-    for (unsigned round = 0; round < 3; ++round) {
-        unsigned hits = 0;
-        for (unsigned match = 0; match < 2; ++match) {
-            unsigned a = roundPairs[round][match*2];
-            unsigned b = roundPairs[round][match*2+1];
-            if (humanPos != a && humanPos != b) continue;
-            unsigned opponentPos = humanPos == a ? b : a;
-            opponents[round] = ids[grid[humanGroup*4+opponentPos]];
-            humanFirst[round] = (uint8_t)(humanPos == a);
-            ++hits;
-        }
-        if (hits != 1 || opponents[round] == _selTeamNumber)
-            WC_PREVIEW_SKIP("bad_world_cup_pairing");
-    }
-    if (log) fprintf(log, "WC_PREVIEW_SOURCE source=%s group=%u position=%u "
-                         "opponents=%04X,%04X,%04X\n",
-                     source, humanGroup+1, humanPos,
-                     opponents[0], opponents[1], opponents[2]);
-
-    /* Exactly three league cache entries, one match per group round, are
-     * created for the managed side.  Touch only entries without results. */
-    TeamSelectionKeyCacheEntry *entries[3] = {0};
-    unsigned count = _teamSelectionKeyCacheCount;
-    unsigned n = 0, off = 0;
-    if (count > 128) WC_PREVIEW_SKIP("cache_count_invalid");
+    unsigned managed = count;
     for (unsigned i = 0; i < count; ++i) {
-        if (off + sizeof(TeamSelectionKeyCacheEntry) > 8192u)
-            WC_PREVIEW_SKIP("cache_bounds");
-        TeamSelectionKeyCacheEntry *e =
-            (TeamSelectionKeyCacheEntry *)(void *)(_teamSelectionKeyCache + off);
-        unsigned stride = e->entryStride;
-        if (stride < sizeof(*e) || stride > 256 || off + stride > 8192u)
-            WC_PREVIEW_SKIP("cache_stride_invalid");
-        if (e->compSlot == 0 && e->roundIdx == 0 &&
-            e->cupRoundStringIdx == 0 && e->totalElements == 1 &&
-            stride >= sizeof(*e) + sizeof(TeamSelectionKeyCacheMatchSlot)) {
-            if (n >= 3) WC_PREVIEW_SKIP("too_many_group_cache_entries");
-            entries[n++] = e;
+        /* The master tournament order is authoritative throughout the group
+         * stage. The live match engine reconciles its stage shuffle to this
+         * same order before resolving any pair, including game three. */
+        unsigned record = tournament->teamIndexOrder[i];
+        if (record >= count || (seen & (UINT32_C(1) << record)))
+            return;
+        seen |= UINT32_C(1) << record;
+        records[i] = (uint8_t)record;
+        /* National identity belongs to the tournament's stable record,
+         * not the standings row's mutable selected-team pointer. In V4 the
+         * latter could make a calendar fixture appear to leave its group. */
+        teams[i] = BE_READ_U16(&tournament->teamIds[record]);
+        if ((teams[i] >> 8) < 80 || (teams[i] >> 8) > 85)
+            return;
+        for (unsigned j = 0; j < i; ++j)
+            if (teams[j] == teams[i])
+                return;
+        if (teams[i] == _selTeamNumber)
+            managed = i;
+    }
+    if (managed == count)
+        return;
+
+    /* Previews are based on the immutable fixture draw, not mutable
+     * standings. Do not suppress them when a loaded career has stale or
+     * crossed table offsets: the standings aligner handles those separately. */
+
+    TeamSelectionKeyCacheMatchSlot *matches[3];
+    unsigned n = 0, offset = 0;
+    for (unsigned i = 0; i < _teamSelectionKeyCacheCount; ++i) {
+        if (offset + sizeof(TeamSelectionKeyCacheEntry) > sizeof(_teamSelectionKeyCache))
+            return;
+        TeamSelectionKeyCacheEntry *entry =
+            (TeamSelectionKeyCacheEntry *)(void *)(_teamSelectionKeyCache + offset);
+        unsigned stride = entry->entryStride;
+        if (stride < sizeof(*entry) || stride > KEYCACHE_STRIDE_MAX ||
+            offset + stride > sizeof(_teamSelectionKeyCache))
+            return;
+        if (entry->compSlot == 0 && entry->roundIdx == 0 &&
+            entry->cupRoundStringIdx == 0 && entry->totalElements == 1 &&
+            stride >= sizeof(*entry) + sizeof(*matches[0])) {
+            if (n == 3)
+                return;
+            matches[n++] = (TeamSelectionKeyCacheMatchSlot *)(void *)(entry + 1);
         }
-        off += stride;
+        offset += stride;
     }
-    if (n != 3) WC_PREVIEW_SKIP("missing_group_cache_entries");
-    for (unsigned r = 0; r < 3; ++r) {
-        TeamSelectionKeyCacheMatchSlot *m =
-            (TeamSelectionKeyCacheMatchSlot *)(void *)(entries[r] + 1);
-        if (m->matchFlags) continue;
-        uint8_t *raw = (uint8_t *)(void *)m;
-        uint16_t oldA = BE_READ_U16(raw+2), oldB = BE_READ_U16(raw+4);
-        uint16_t newA = humanFirst[r] ? _selTeamNumber : opponents[r];
-        uint16_t newB = humanFirst[r] ? opponents[r] : _selTeamNumber;
-        if (log) fprintf(log, "WC_PREVIEW_ROW round=%u old=%04X,%04X expected=%04X,%04X\n",
-                         r+1, oldA, oldB, newA, newB);
-        if (oldA == newA && oldB == newB) continue;
-        BE_WRITE_U16(raw+2, newA);
-        BE_WRITE_U16(raw+4, newB);
-        if (log) fprintf(log, "WC_PREVIEW_SYNC round=%u old=%04X,%04X new=%04X,%04X\n",
-                         r+1, oldA, oldB, newA, newB);
+    if (n != 3)
+        return;
+
+    /* A completed group fixture must remain attached to the same group.
+     * Never silently rewrite its sides or result. Report discrepancies
+     * before repairing future previews so a malformed historical save is
+     * distinguishable from a wrong future calendar entry. */
+    for (unsigned round = 0; round < 3; ++round) {
+        if (!matches[round]->matchFlags)
+            continue;
+        const uint8_t *bytes = (const uint8_t *)(const void *)matches[round];
+        uint16_t home = BE_READ_U16(bytes + offsetof(TeamSelectionKeyCacheMatchSlot, teamId1));
+        uint16_t away = BE_READ_U16(bytes + offsetof(TeamSelectionKeyCacheMatchSlot, teamId2));
+        unsigned present = 0;
+        for (unsigned j = 0; j < 4; ++j) {
+            present += teams[(managed & ~3u) + j] == home;
+            present += teams[(managed & ~3u) + j] == away;
+        }
+        if (present != 2) {
+            FILE *f = fopen("swos_national_draw_repair.log", "a");
+            if (f) {
+                fprintf(f, "PLAYED_MATCH_OUTSIDE_GROUP id=%u round=%u home=%04X away=%04X managed=%04X\n",
+                        id, round, home, away, (unsigned)_selTeamNumber);
+                fclose(f);
+            }
+            /* A stale past result must not prevent correction of the
+             * upcoming third fixture. Preserve history, repair only
+             * matchFlags==0 fixtures below. */
+        }
     }
-    if (log) fprintf(log, "WC_PREVIEW_SUCCESS group=%u position=%u\n", humanGroup+1, humanPos);
-done:
-    if (log) fclose(log);
-#undef WC_PREVIEW_SKIP
+
+    const uint8_t *schedule = worldCup ? _fixtureSchedulePtrTable[2] :
+        (const uint8_t *)(const void *)_euroChampFixtureData;
+    if (!schedule)
+        return;
+    const uint16_t *group = &teams[managed & ~3u];
+    for (unsigned round = 0; round < 3; ++round) {
+        if (matches[round]->matchFlags)
+            continue;
+        unsigned mine = managed % 4;
+        unsigned pairIndex = round * 4;
+        unsigned a = schedule[pairIndex], b = schedule[pairIndex + 1];
+        if (a != mine && b != mine) {
+            pairIndex += 2;
+            a = schedule[pairIndex];
+            b = schedule[pairIndex + 1];
+        }
+        /* A damaged schedule or mismatched cache must never modify a
+         * fixture. Check both sides of the selected match explicitly. */
+        if (a >= 4 || b >= 4 || a == b || (a != mine && b != mine))
+            return;
+        uint8_t *bytes = (uint8_t *)(void *)matches[round];
+        const uint16_t previousHome = BE_READ_U16(bytes + offsetof(TeamSelectionKeyCacheMatchSlot, teamId1));
+        const uint16_t previousAway = BE_READ_U16(bytes + offsetof(TeamSelectionKeyCacheMatchSlot, teamId2));
+        BE_WRITE_U16(bytes + offsetof(TeamSelectionKeyCacheMatchSlot, teamId1), group[a]);
+        BE_WRITE_U16(bytes + offsetof(TeamSelectionKeyCacheMatchSlot, teamId2), group[b]);
+        if (previousHome != group[a] || previousAway != group[b]) {
+            FILE *f = fopen("swos_national_draw_repair.log", "a");
+            if (f) {
+                fprintf(f, "NATIONAL_CALENDAR_REPAIRED id=%u group=%u round=%u old=%04X/%04X new=%04X/%04X\n",
+                        id, managed / 4, round, previousHome, previousAway,
+                        group[a], group[b]);
+                fclose(f);
+            }
+        }
+    }
 }
 
+/* Each row's fitted competition name, when it needed one (cal_label.c): the 14 rows of
+ * _gameListArray. */
+static uint8_t s_calLabel[14][32];
 
 __attribute__((used, externally_visible))
 void CareerGameListCommon(MenuEntry *item)
@@ -8213,8 +8178,7 @@ void CareerGameListCommon(MenuEntry *item)
     uint16_t d0 = a5->ordinal - entry19->ordinal;
 
     if (d0 == 0) {
-        Career_SynchroniseEuroGroupFixturePreviews();
-        Career_SynchroniseWorldCupGroupFixturePreviews();
+        Career_SynchroniseGroupFixturePreviews();
         _columnMarker = _gameListY;
         _cglmVar3 = 0;
     }
@@ -8277,7 +8241,7 @@ void CareerGameListCommon(MenuEntry *item)
                         (unsigned)stride,
                         p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9],
                         p[10], p[11], p[12], p[13], p[14], p[15]);
-                if (stride < 12 || stride > 256) {
+                if (stride < 12 || stride > KEYCACHE_STRIDE_MAX) {
                     SWOS_DBG("[cglm-dump]   stride out of range, halting dump\n");
                     break;
                 }
@@ -8327,8 +8291,7 @@ void CareerGameListCommon(MenuEntry *item)
             SWOS_DBG_FLUSH();
         }
         TeamFileEx *_topTeamData = VerifyTeamLoaded(topTeamIdx);
-        SWOS_CopyTeamName18(careerFixtureTopName, _topTeamData->team.teamName);
-        _careerGameTopTeamName = careerFixtureTopName;
+        _careerGameTopTeamName = (char *)_topTeamData->team.teamName;
 
         uint16_t botTeamIdx = BE_READ_U16(a4 + 0x0E);
         TeamFileEx *botTeamData = VerifyTeamLoaded(botTeamIdx);
@@ -8339,8 +8302,7 @@ void CareerGameListCommon(MenuEntry *item)
         else
             ctrl = 0xFFFF;
         _careerGameListTeamControl = ctrl;
-        SWOS_CopyTeamName18(careerFixtureBottomName, botTeamData->team.teamName);
-        _careerGameBottomTeamName = careerFixtureBottomName;
+        _careerGameBottomTeamName = (char *)botTeamData->team.teamName;
 
         /* Check if match has been played (matchFlags != 0). a4 is the cache
          * entry base; the first match slot starts at +0x0A. */
@@ -8397,7 +8359,7 @@ pastTeamLoad:
 
     switch (slotType) {
     case 0: /* league */
-        namePtr = (uint8_t *)_divStringTable;
+        namePtr = _aMinus;
         d5 = 2;
         break;
     case 1: /* cup type 1 */
@@ -8431,8 +8393,13 @@ pastTeamLoad:
     {
         /* Get competition slot ptr table entry
          * careerCompetitionSlotPtrTable is really an array of 5 pointers (20 bytes) */
-        uint8_t *a3slot = _careerCompetitionSlotPtrTable[slotType];
-        uint16_t slotVal = *(uint16_t *)a3slot;
+        const DIYCompetition *slot = (const DIYCompetition *)_careerCompetitionSlotPtrTable[slotType];
+        if (!slot)
+            goto hideAll;
+        uint16_t slotVal = (uint16_t)slot->competitionType;
+        char **nameTbl = compInfo ? comp_name_table((Competition *)compInfo) : NULL;
+        if (!compInfo && slot->competitionName[0])
+            namePtr = (uint8_t *)slot->competitionName;
 
         if (slotVal == 0) {
             /* --- League-style header --- */
@@ -8446,17 +8413,26 @@ pastTeamLoad:
             d4 += 8;
 
             /* Get division/competition name string */
-            /* Access the real name[] table. The old offset byte may be
-             * zero even when a data-driven competition has custom names,
-             * and its historic byte offset is not reliable across layouts. */
-            char **nameTbl = compInfo ? comp_name_table((Competition *)compInfo) : NULL;
-            namePtr = (nameTbl && _currentDivisionIndex >= 0 &&
-                       _currentDivisionIndex < 4 &&
-                       nameTbl[_currentDivisionIndex * 2 + 1])
-                      ? (uint8_t *)nameTbl[_currentDivisionIndex * 2 + 1]
-                      : (uint8_t *)_divStringTable[_currentDivisionIndex];
+            /* Embedded char *[] name table — 2 entries per division (full
+             * name + abbreviation): the abbreviation is divIdx * 2 + 1. Found
+             * by the record's type (comp_name_table), not the Amiga's
+             * self-offset byte (compInfo[5]): a league's table moved when
+             * divisions[] grew to LEAGUE_MAX_DIVISIONS, and the byte's offset
+             * then lands inside divisions[] -- garbage once a world's league
+             * fills them (World 2026-27's Italy, 14 divisions). */
+            if (slotType == 0 && compInfo && ((Competition *)compInfo)->type == 0 &&
+                !comp_is_type0_cup(comp_id(compInfo))) {
+                const CompetitionLeague *league = (const CompetitionLeague *)compInfo;
+                if (nameTbl && _currentDivisionIndex < (unsigned)league->header.divisionsCount &&
+                    _currentDivisionIndex < LEAGUE_MAX_DIVISIONS)
+                    namePtr = (uint8_t *)nameTbl[_currentDivisionIndex * 2 + 1];
+                else if (_currentDivisionIndex < sizeof _divStringTable / sizeof _divStringTable[0])
+                    namePtr = (uint8_t *)_divStringTable[_currentDivisionIndex];
+            } else if (nameTbl) {
+                namePtr = (uint8_t *)nameTbl[1];
+            }
 
-            a5->fg = (uintptr_t)namePtr;
+            a5->fg = (uintptr_t)CalLabel_Fit(namePtr, s_calLabel[d0], (int32_t)sizeof s_calLabel[d0]);
             a5->isInvisible = 0;
             a5++; /* next entry */
 
@@ -8464,94 +8440,12 @@ pastTeamLoad:
             a5->y = d2 + 8;
             a5->isInvisible = 1;
             a5++; /* next entry */
-        } else if (slotVal == 1) {
-            /* --- Cup-style header (single line comp name + round info) --- */
-            uint8_t strTableOff = compInfo[5];
-            if (strTableOff != 0) {
-                /* Typed `char **` access — slot 1 is the abbreviation
-                 * (full name + abbreviation pair per div). */
-                int16_t off = (int8_t)strTableOff;
-                char **nameTbl = (char **)(compInfo + 5 + off);
-                namePtr = (uint8_t *)nameTbl[1];
-            }
-
-            a5->fg = (uintptr_t)namePtr;
-
-            /* Height check depends on whether a4 == a6 */
-            if (a4 == a6) {
-                /* Need 16 pixels of space */
-                uint16_t checkY = d2 + 16 - _gameListY;
-                if (checkY >= _contestEntryHeight)
-                    goto hideAll;
-            } else {
-                /* Need 8 pixels */
-                uint16_t checkY = d2 + 8 - _gameListY;
-                if (checkY >= _contestEntryHeight)
-                    goto hideAll;
-            }
-
-            a5->y = d2;
-            d3 += 16;
-            d4 += 8;
-            a5->isInvisible = 0;
-            a5++; /* next entry */
-
-            /* Round info line */
-            a5->y = d2 + 8;
-
-            /* Get round string */
-            int16_t roundIdx = (int8_t)a6[9];
-            uint8_t *roundStr = (uint8_t *)_roundStringTable[roundIdx];
-            if (a6[8] == 3) {
-                /* Replay — use rndStringTable instead */
-                roundStr = (uint8_t *)_rndStringTable[roundIdx];
-            }
-
-            /* Copy round string into entry's string buffer */
-            uint8_t *dst = (uint8_t *)a5->fg;
-            dst = StringCopy((const uint8_t *)roundStr, dst);
-
-            /* Append leg/replay suffix */
-            uint8_t *suffixStr;
-            uint8_t legType = a6[8];
-            if (legType == 1) {
-                suffixStr = _aLeg1;
-                goto appendSuffix;
-            } else if (legType == 2) {
-                suffixStr = _aLeg2;
-                goto appendSuffix;
-            } else if (legType == 3) {
-                suffixStr = _aReplay;
-                goto appendSuffix;
-            }
-            goto noSuffix;
-
-        appendSuffix:
-            *dst++ = ' ';
-            dst = StringCopy((const uint8_t *)suffixStr, dst);
-
-        noSuffix:
-            *dst = 0; /* null terminate */
-            a5->isInvisible = 0;
-            a5++; /* next entry */
-
-            /* Check if should add extra spacing */
-            if (a6[5] == 0) {
-                d4 += 8;
-            } else if (a6[5] == 1 && a2 == 0) {
-                d2 += 4;
-                d4 += 8;  /* fall-through to loc_13C77E in asm */
-            }
         } else {
-            /* --- Default (slotVal >= 2) header: same as cup but different path --- */
-            uint8_t strTableOff = compInfo[5];
-            if (strTableOff != 0) {
-                int16_t off = (int8_t)strTableOff;
-                char **nameTbl = (char **)(compInfo + 5 + off);
+            /* The calendar lays out cup and tournament rounds identically. */
+            if (nameTbl)
                 namePtr = (uint8_t *)nameTbl[1];
-            }
 
-            a5->fg = (uintptr_t)namePtr;
+            a5->fg = (uintptr_t)CalLabel_Fit(namePtr, s_calLabel[d0], (int32_t)sizeof s_calLabel[d0]);
 
             /* Height check */
             if (a4 == a6) {
@@ -8573,11 +8467,13 @@ pastTeamLoad:
             /* Round info line */
             a5->y = d2 + 8;
 
-            int16_t roundIdx = (int8_t)a6[9];
-            uint8_t *roundStr = (uint8_t *)_roundStringTable[roundIdx];
-            if (a6[8] == 3) {
-                roundStr = (uint8_t *)_rndStringTable[roundIdx];
-            }
+            unsigned roundIdx = a6[9];
+            unsigned replay = a6[8] == 3;
+            const char *const *roundTable = replay ? _rndStringTable : _roundStringTable;
+            size_t roundCount = replay ? sizeof _rndStringTable / sizeof _rndStringTable[0] :
+                                         sizeof _roundStringTable / sizeof _roundStringTable[0];
+            const uint8_t *roundStr = roundIdx < roundCount ?
+                (const uint8_t *)roundTable[roundIdx] : _aMinus;
 
             uint8_t *dst = (uint8_t *)a5->fg;
             dst = StringCopy((const uint8_t *)roundStr, dst);

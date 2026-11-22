@@ -3,6 +3,7 @@
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
+#include "mod_hooks.h"    /* the mods' hooks */
 #include "audio.h"
 #include "audio_sfx_filter.h"
 #include "dos_sound.h"
@@ -84,6 +85,7 @@ void Audio_SetSfxObserver(AudioSfxObserver observer)
  * back on a frame played again, like the Amiga's effects, whatever the sound style. */
 void Audio_DosEvent(uint8_t event, uint16_t arg)
 {
+    ModHooks_SoundEvent(event, arg);        /* (the mods: every run, a re-simulated frame's too) */
     if (s_sfxObserver && event != DOS_EV_TICK)
         s_sfxObserver(AUDIO_SFX_DOS, event, arg);
     if (s_sfxFilter && !s_sfxFilter(AUDIO_SFX_DOS, event, arg))
@@ -897,6 +899,24 @@ void StopMusic(void)
     _audioBankLoaded = 0;   /* next TryPlayMusic will re-load the song */
 #endif
 }
+
+#ifdef SWOS_SDL_BUILD
+/* OPTIONS -> MENU MUSIC off: StopMusic's fade, run by the mixer (AudioSDL_FadeOutSong),
+ * so the menu does not stop for it -- StopMusic's loop held it ~2.6 s. 72 ticks, the
+ * Amiga's fade (0x23 steps of two frames). */
+void StopMusicInBackground(void)
+{
+    extern void AudioSDL_FadeOutSong(int ticks);
+
+    if (_audioActive == 0)
+        return;
+    _audioState.channelVolume[0] = _audioState.channelVolume[1] = 0;
+    _audioState.channelVolume[2] = _audioState.channelVolume[3] = 0;
+    AudioSDL_FadeOutSong(72);
+    _audioActive = 0;
+    _audioBankLoaded = 0;   /* next TryPlayMusic will re-load the song */
+}
+#endif
 
 /* ================================================================
  * CycleMenuMusic  (SWOS2.s line 69209)

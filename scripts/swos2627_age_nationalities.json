@@ -1,0 +1,827 @@
+{
+  "0": [
+    "Albania",
+    "Republic of Albania"
+  ],
+  "1": [
+    "Austria",
+    "Republic of Austria"
+  ],
+  "2": [
+    "Belgium",
+    "Kingdom of Belgium"
+  ],
+  "3": [
+    "Bulgaria",
+    "Republic of Bulgaria"
+  ],
+  "4": [
+    "Croatia",
+    "Republic of Croatia"
+  ],
+  "5": [
+    "Cyprus",
+    "Republic of Cyprus"
+  ],
+  "6": [
+    "Czech Republic",
+    "Czechia"
+  ],
+  "7": [
+    "Denmark",
+    "Kingdom of Denmark"
+  ],
+  "8": [
+    "England",
+    "United Kingdom"
+  ],
+  "9": [
+    "Estonia",
+    "Republic of Estonia"
+  ],
+  "10": [
+    "Faroe Islands"
+  ],
+  "11": [
+    "Finland",
+    "Republic of Finland"
+  ],
+  "12": [
+    "France",
+    "French Republic"
+  ],
+  "13": [
+    "Federal Republic of Germany",
+    "Germany"
+  ],
+  "14": [
+    "Greece",
+    "Hellenic Republic"
+  ],
+  "15": [
+    "Hungary"
+  ],
+  "16": [
+    "Iceland",
+    "Republic of Iceland"
+  ],
+  "17": [
+    "Israel",
+    "State of Israel"
+  ],
+  "18": [
+    "Italian Republic",
+    "Italy"
+  ],
+  "19": [
+    "Latvia",
+    "Republic of Latvia"
+  ],
+  "20": [
+    "Lithuania",
+    "Republic of Lithuania"
+  ],
+  "21": [
+    "Grand Duchy of Luxembourg",
+    "Luxembourg"
+  ],
+  "22": [
+    "Malta",
+    "Republic of Malta"
+  ],
+  "23": [
+    "Kingdom of the Netherlands",
+    "Netherlands"
+  ],
+  "24": [
+    "Northern Ireland",
+    "United Kingdom"
+  ],
+  "25": [
+    "Kingdom of Norway",
+    "Norway"
+  ],
+  "26": [
+    "Poland",
+    "Republic of Poland"
+  ],
+  "27": [
+    "Portugal",
+    "Portuguese Republic"
+  ],
+  "28": [
+    "Romania"
+  ],
+  "29": [
+    "Russia",
+    "Russian Federation"
+  ],
+  "30": [
+    "Republic of San Marino",
+    "San Marino"
+  ],
+  "31": [
+    "Scotland",
+    "United Kingdom"
+  ],
+  "32": [
+    "Republic of Slovenia",
+    "Slovenia"
+  ],
+  "33": [
+    "Kingdom of Sweden",
+    "Sweden"
+  ],
+  "34": [
+    "Republic of Türkiye",
+    "Turkey",
+    "Türkiye"
+  ],
+  "35": [
+    "Ukraine"
+  ],
+  "36": [
+    "United Kingdom",
+    "Wales"
+  ],
+  "37": [
+    "Republic of Serbia",
+    "Serbia"
+  ],
+  "38": [
+    "Belarus",
+    "Republic of Belarus"
+  ],
+  "39": [
+    "Slovak Republic",
+    "Slovakia"
+  ],
+  "40": [
+    "Kingdom of Spain",
+    "Spain"
+  ],
+  "41": [
+    "Armenia",
+    "Republic of Armenia"
+  ],
+  "42": [
+    "Bosnia & Herzegovina",
+    "Bosnia and Herzegovina",
+    "Bosnia-Herzegovina",
+    "Republic of Bosnia and Herzegovina"
+  ],
+  "43": [
+    "Azerbaijan",
+    "Republic of Azerbaijan"
+  ],
+  "44": [
+    "Georgia"
+  ],
+  "45": [
+    "Swiss Confederation",
+    "Switzerland"
+  ],
+  "46": [
+    "Ireland",
+    "Republic of Ireland"
+  ],
+  "47": [
+    "Macedonia",
+    "North Macedonia",
+    "Republic of North Macedonia"
+  ],
+  "48": [
+    "Turkmenistan"
+  ],
+  "49": [
+    "Liechtenstein",
+    "Principality of Liechtenstein"
+  ],
+  "50": [
+    "Moldova",
+    "Moldova, Republic of",
+    "Republic of Moldova"
+  ],
+  "51": [
+    "Costa Rica",
+    "Republic of Costa Rica"
+  ],
+  "52": [
+    "El Salvador",
+    "Republic of El Salvador"
+  ],
+  "53": [
+    "Guatemala",
+    "Republic of Guatemala"
+  ],
+  "54": [
+    "Honduras",
+    "Republic of Honduras"
+  ],
+  "55": [
+    "Bahamas",
+    "Commonwealth of the Bahamas"
+  ],
+  "56": [
+    "Mexico",
+    "United Mexican States"
+  ],
+  "57": [
+    "Panama",
+    "Republic of Panama"
+  ],
+  "58": [
+    "USA",
+    "United States",
+    "United States of America"
+  ],
+  "59": [
+    "Bahamas",
+    "Commonwealth of the Bahamas"
+  ],
+  "60": [
+    "Nicaragua",
+    "Republic of Nicaragua"
+  ],
+  "61": [
+    "Bermuda"
+  ],
+  "62": [
+    "Jamaica"
+  ],
+  "63": [
+    "Republic of Trinidad and Tobago",
+    "Trinidad and Tobago"
+  ],
+  "64": [
+    "Canada"
+  ],
+  "65": [
+    "Barbados"
+  ],
+  "66": [
+    "El Salvador",
+    "Republic of El Salvador"
+  ],
+  "67": [
+    "Saint Vincent and the Grenadines"
+  ],
+  "68": [
+    "Argentina",
+    "Argentine Republic"
+  ],
+  "69": [
+    "Bolivia",
+    "Bolivia, Plurinational State of",
+    "Plurinational State of Bolivia"
+  ],
+  "70": [
+    "Brazil",
+    "Federative Republic of Brazil"
+  ],
+  "71": [
+    "Chile",
+    "Republic of Chile"
+  ],
+  "72": [
+    "Colombia",
+    "Republic of Colombia"
+  ],
+  "73": [
+    "Ecuador",
+    "Republic of Ecuador"
+  ],
+  "74": [
+    "Paraguay",
+    "Republic of Paraguay"
+  ],
+  "75": [
+    "Republic of Suriname",
+    "Suriname"
+  ],
+  "76": [
+    "Eastern Republic of Uruguay",
+    "Uruguay"
+  ],
+  "77": [
+    "Bolivarian Republic of Venezuela",
+    "Venezuela",
+    "Venezuela, Bolivarian Republic of"
+  ],
+  "78": [
+    "Guyana",
+    "Republic of Guyana"
+  ],
+  "79": [
+    "Peru",
+    "Republic of Peru"
+  ],
+  "80": [
+    "Algeria",
+    "People's Democratic Republic of Algeria"
+  ],
+  "81": [
+    "Republic of South Africa",
+    "South Africa"
+  ],
+  "82": [
+    "Botswana",
+    "Republic of Botswana"
+  ],
+  "83": [
+    "Burkina Faso"
+  ],
+  "84": [
+    "Burundi",
+    "Republic of Burundi"
+  ],
+  "85": [
+    "Kingdom of Lesotho",
+    "Lesotho"
+  ],
+  "86": [
+    "Congo DR",
+    "Congo, The Democratic Republic of the",
+    "DR Congo",
+    "DR of the Congo",
+    "Democratic Republic of the Congo"
+  ],
+  "87": [
+    "Republic of Zambia",
+    "Zambia"
+  ],
+  "88": [
+    "Ghana",
+    "Republic of Ghana"
+  ],
+  "89": [
+    "Republic of Senegal",
+    "Senegal"
+  ],
+  "90": [
+    "Côte d'Ivoire",
+    "Côte d’Ivoire",
+    "Ivory Coast",
+    "Republic of Côte d'Ivoire"
+  ],
+  "91": [
+    "Republic of Tunisia",
+    "Tunisia"
+  ],
+  "92": [
+    "Mali",
+    "Republic of Mali"
+  ],
+  "93": [
+    "Madagascar",
+    "Republic of Madagascar"
+  ],
+  "94": [
+    "Cameroon",
+    "Republic of Cameroon"
+  ],
+  "95": [
+    "Chad",
+    "Republic of Chad"
+  ],
+  "96": [
+    "Republic of Uganda",
+    "Uganda"
+  ],
+  "97": [
+    "Liberia",
+    "Republic of Liberia"
+  ],
+  "98": [
+    "Mozambique",
+    "Republic of Mozambique"
+  ],
+  "99": [
+    "Kenya",
+    "Republic of Kenya"
+  ],
+  "100": [
+    "Republic of the Sudan",
+    "Sudan"
+  ],
+  "101": [
+    "Eswatini",
+    "Kingdom of Eswatini",
+    "Swaziland"
+  ],
+  "102": [
+    "Angola",
+    "Republic of Angola"
+  ],
+  "103": [
+    "Togo",
+    "Togolese Republic"
+  ],
+  "104": [
+    "Republic of Zimbabwe",
+    "Zimbabwe"
+  ],
+  "105": [
+    "Arab Republic of Egypt",
+    "Egypt"
+  ],
+  "106": [
+    "Tanzania",
+    "Tanzania, United Republic of",
+    "United Republic of Tanzania"
+  ],
+  "107": [
+    "Federal Republic of Nigeria",
+    "Nigeria"
+  ],
+  "108": [
+    "Ethiopia",
+    "Federal Democratic Republic of Ethiopia"
+  ],
+  "109": [
+    "Gabon",
+    "Gabonese Republic"
+  ],
+  "110": [
+    "Republic of Sierra Leone",
+    "Sierra Leone"
+  ],
+  "111": [
+    "Benin",
+    "Republic of Benin"
+  ],
+  "112": [
+    "Congo",
+    "Congo Republic",
+    "Republic of the Congo"
+  ],
+  "113": [
+    "Guinea",
+    "Republic of Guinea"
+  ],
+  "114": [
+    "Republic of Sierra Leone",
+    "Sierra Leone"
+  ],
+  "115": [
+    "Kingdom of Morocco",
+    "Morocco"
+  ],
+  "116": [
+    "Gambia",
+    "Republic of the Gambia",
+    "The Gambia"
+  ],
+  "117": [
+    "Malawi",
+    "Republic of Malawi"
+  ],
+  "118": [
+    "Japan"
+  ],
+  "119": [
+    "Chinese Taipei",
+    "Taiwan",
+    "Taiwan, Province of China"
+  ],
+  "120": [
+    "India",
+    "Republic of India"
+  ],
+  "121": [
+    "Bangladesh",
+    "People's Republic of Bangladesh"
+  ],
+  "122": [
+    "Brunei Darussalam"
+  ],
+  "123": [
+    "Iraq",
+    "Republic of Iraq"
+  ],
+  "124": [
+    "Hashemite Kingdom of Jordan",
+    "Jordan"
+  ],
+  "125": [
+    "Democratic Socialist Republic of Sri Lanka",
+    "Sri Lanka"
+  ],
+  "126": [
+    "Syria",
+    "Syrian Arab Republic"
+  ],
+  "127": [
+    "Korea Republic",
+    "Korea, Republic of",
+    "South Korea"
+  ],
+  "128": [
+    "Iran",
+    "Iran, Islamic Republic of",
+    "Islamic Republic of Iran"
+  ],
+  "129": [
+    "Socialist Republic of Viet Nam",
+    "Viet Nam",
+    "Vietnam"
+  ],
+  "130": [
+    "Malaysia"
+  ],
+  "131": [
+    "Kingdom of Saudi Arabia",
+    "Saudi Arabia"
+  ],
+  "132": [
+    "Republic of Yemen",
+    "Yemen"
+  ],
+  "133": [
+    "Kuwait",
+    "State of Kuwait"
+  ],
+  "134": [
+    "Lao People's Democratic Republic",
+    "Laos"
+  ],
+  "135": [
+    "Democratic People's Republic of Korea",
+    "Korea, Democratic People's Republic of",
+    "North Korea"
+  ],
+  "136": [
+    "Oman",
+    "Sultanate of Oman"
+  ],
+  "137": [
+    "Islamic Republic of Pakistan",
+    "Pakistan"
+  ],
+  "138": [
+    "Philippines",
+    "Republic of the Philippines"
+  ],
+  "139": [
+    "China",
+    "China PR",
+    "People's Republic of China"
+  ],
+  "140": [
+    "Republic of Singapore",
+    "Singapore"
+  ],
+  "141": [
+    "Mauritius",
+    "Republic of Mauritius"
+  ],
+  "142": [
+    "Burma",
+    "Myanmar",
+    "Republic of Myanmar"
+  ],
+  "143": [
+    "Independent State of Papua New Guinea",
+    "Papua New Guinea"
+  ],
+  "144": [
+    "Republic of Tajikistan",
+    "Tajikistan"
+  ],
+  "145": [
+    "Republic of Uzbekistan",
+    "Uzbekistan"
+  ],
+  "146": [
+    "Qatar",
+    "State of Qatar"
+  ],
+  "147": [
+    "UAE",
+    "United Arab Emirates"
+  ],
+  "148": [
+    "Australia"
+  ],
+  "149": [
+    "New Zealand"
+  ],
+  "150": [
+    "Fiji",
+    "Republic of Fiji"
+  ],
+  "151": [
+    "Solomon Islands"
+  ],
+  "156": [
+    "Montenegro"
+  ],
+  "157": [
+    "Kosovo"
+  ],
+  "158": [
+    "Andorra",
+    "Principality of Andorra"
+  ],
+  "159": [
+    "Gibraltar"
+  ],
+  "160": [
+    "Kazakhstan",
+    "Republic of Kazakhstan"
+  ],
+  "161": [
+    "Kyrgyz Republic",
+    "Kyrgyzstan"
+  ],
+  "162": [
+    "Belize"
+  ],
+  "163": [
+    "Haiti",
+    "Republic of Haiti"
+  ],
+  "164": [
+    "Curaçao"
+  ],
+  "165": [
+    "Aruba"
+  ],
+  "166": [
+    "Dominican Republic"
+  ],
+  "167": [
+    "Cuba",
+    "Republic of Cuba"
+  ],
+  "168": [
+    "Puerto Rico"
+  ],
+  "169": [
+    "Grenada"
+  ],
+  "170": [
+    "Guadeloupe"
+  ],
+  "171": [
+    "Martinique"
+  ],
+  "172": [
+    "French Guiana"
+  ],
+  "173": [
+    "Antigua and Barbuda"
+  ],
+  "174": [
+    "Saint Kitts and Nevis"
+  ],
+  "175": [
+    "Saint Lucia"
+  ],
+  "176": [
+    "Montserrat"
+  ],
+  "177": [
+    "Cayman Islands"
+  ],
+  "178": [
+    "Cabo Verde",
+    "Cape Verde",
+    "Republic of Cabo Verde"
+  ],
+  "179": [
+    "Guinea-Bissau",
+    "Republic of Guinea-Bissau"
+  ],
+  "180": [
+    "Equatorial Guinea",
+    "Republic of Equatorial Guinea"
+  ],
+  "181": [
+    "Islamic Republic of Mauritania",
+    "Mauritania"
+  ],
+  "182": [
+    "Niger",
+    "Republic of the Niger"
+  ],
+  "183": [
+    "Rwanda",
+    "Rwandese Republic"
+  ],
+  "184": [
+    "Comoros",
+    "Union of the Comoros"
+  ],
+  "185": [
+    "Central African Republic"
+  ],
+  "186": [
+    "Republic of South Sudan",
+    "South Sudan"
+  ],
+  "187": [
+    "Eritrea",
+    "the State of Eritrea"
+  ],
+  "188": [
+    "Federal Republic of Somalia",
+    "Somalia"
+  ],
+  "189": [
+    "Namibia",
+    "Republic of Namibia"
+  ],
+  "190": [
+    "Libya"
+  ],
+  "191": [
+    "Djibouti",
+    "Republic of Djibouti"
+  ],
+  "192": [
+    "Democratic Republic of Sao Tome and Principe",
+    "Sao Tome and Principe",
+    "São Tomé and Príncipe"
+  ],
+  "193": [
+    "Réunion"
+  ],
+  "194": [
+    "Mayotte"
+  ],
+  "195": [
+    "Lebanese Republic",
+    "Lebanon"
+  ],
+  "196": [
+    "Palestine",
+    "Palestine, State of",
+    "the State of Palestine"
+  ],
+  "197": [
+    "Bahrain",
+    "Kingdom of Bahrain"
+  ],
+  "198": [
+    "Hong Kong",
+    "Hong Kong Special Administrative Region of China"
+  ],
+  "199": [
+    "Kingdom of Thailand",
+    "Thailand"
+  ],
+  "200": [
+    "Indonesia",
+    "Republic of Indonesia"
+  ],
+  "201": [
+    "Cambodia",
+    "Kingdom of Cambodia"
+  ],
+  "202": [
+    "Afghanistan",
+    "Islamic Republic of Afghanistan"
+  ],
+  "203": [
+    "Federal Democratic Republic of Nepal",
+    "Nepal"
+  ],
+  "204": [
+    "Macao",
+    "Macao Special Administrative Region of China",
+    "Macau"
+  ],
+  "205": [
+    "Mongolia"
+  ],
+  "206": [
+    "Maldives",
+    "Republic of Maldives"
+  ],
+  "207": [
+    "Democratic Republic of Timor-Leste",
+    "Timor-Leste"
+  ],
+  "208": [
+    "Guam"
+  ],
+  "209": [
+    "New Caledonia"
+  ],
+  "210": [
+    "French Polynesia"
+  ],
+  "211": [
+    "Republic of Vanuatu",
+    "Vanuatu"
+  ],
+  "212": [
+    "Independent State of Samoa",
+    "Samoa"
+  ],
+  "213": [
+    "Kingdom of Tonga",
+    "Tonga"
+  ]
+}

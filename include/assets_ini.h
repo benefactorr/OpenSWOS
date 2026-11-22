@@ -26,11 +26,12 @@
 #define ASSETS_PARTS(X)                                                                 \
     X(AMIGA_FILES, "amiga_files", 1)  /* data/, grafs/, sound/ from the Amiga disks */  \
     X(DOS_FILES,   "dos_files",   1)  /* grafs_dos/, sound_dos/ from the PC game */     \
-    X(AGA_PC,      "aga_pc",      1)  /* grafs_aga/ backdrops, banks, pitches, credits */\
+    X(AGA_PC,      "aga_pc",      2)  /* grafs_aga/ backdrops, banks, pitches, credits */\
     X(AGA_AMIGA,   "aga_amiga",   1)  /* grafs_aga/ loading and disk screens */         \
     X(TEAMS,       "teams",       1)  /* data_json/teams/ (and data/ teams) */          \
     X(JAGUAR,      "jaguar",      1)  /* grafs_jag/ */                                  \
-    X(SWOS2020,    "swos2020",    1)  /* grafs_2020/, grafs_aga/P2020_n.MAP */
+    X(SWOS2020,    "swos2020",    1)  /* grafs_2020/, grafs_aga/P2020_n.MAP */          \
+    X(WORLD,       "world",       1)  /* data_json/worlds/<tag>/: a world's package */
 
 /* The [sources] keys. */
 #define ASSETS_SRC_AMIGA_DISK1 "amiga_disk1"
@@ -38,7 +39,11 @@
 #define ASSETS_SRC_AMIGA_HDF   "amiga_hdf"      /* a hard disk image with the game on it */
 #define ASSETS_SRC_AMIGA_LHA   "amiga_lha"      /* a WHDLoad install packed as .lha */
 #define ASSETS_SRC_PC          "pc"
+#define ASSETS_SRC_PC_CD       "pc_cd"          /* the PC game's CD (folder or image), for its commentary */
+#define ASSETS_SRC_PC_FLOPPY1  "pc_floppy1"     /* the PC game's floppy release, its two disk images */
+#define ASSETS_SRC_PC_FLOPPY2  "pc_floppy2"
 #define ASSETS_SRC_JAGUAR      "jaguar"
 #define ASSETS_SRC_SWOS2020    "swos2020"
+#define ASSETS_SRC_WORLD       "world"          /* a world's package (OpenSWOS-World-<tag>.zip) */
 
 #endif /* ASSETS_INI_H */

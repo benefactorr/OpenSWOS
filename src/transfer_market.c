@@ -1,55 +1,34 @@
-#include "swos_fixed_team_name.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "modern_world.h"
+#include "modern_career_runtime.h"
+#include "modern_buy_paging.h"
+#include "modern_reserve_purchase.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
-#include "ai_career_pool_capacity.h"
 #include "transfer_market.h"
 #include "endian_helpers.h"
 #include "game_types.h"
 #include "menu_system.h"
 #include "menus.h"
 #include "string_utils.h"
+#include "text_render.h"
+#include "swos_fixed_team_name.h"
 #include "career_teams.h"
+#include "career_status.h"
+#include "menu_dialog.h"
 #include "input_text.h"
 #include "teams.h"
 #include "auto_skip_debug.h"
-#include "swos_age_identity_log.h"
-#include "swos_identity_runtime.h"
-#include <stdio.h>
-#include <string.h>
-/* Career ages remain name-indexed until all live player paths have stable IDs. */
-extern int SWOS_AgesSet(const char *name, unsigned age);
-extern int SWOS_AgesGet(size_t index, const char **name, unsigned *age);
-#include <stdbool.h>
-
-/* Step 4D: context supplied by the three player-list callers. */
-static unsigned s_ageListTeam=0, s_ageListSlot=0, s_ageListMode=0;
-static unsigned AgeListLookup(const PlayerFile *pf)
-{
-    unsigned a=0,id=0;
-    if (s_ageListMode && SWOS_ManualIdentityIsTouched(s_ageListTeam,s_ageListSlot)) {
-        if (SWOS_ManualIdentityAge(s_ageListTeam,s_ageListSlot,&a,&id) && id && a>=15 && a<=60) return a;
-    }
-    if (s_ageListMode) {
-        for(unsigned i=0;i<SWOS_GeneratedIdentityCount();++i) {
-            unsigned g[4];
-            if(SWOS_GeneratedIdentityGet(i,g) && g[0]==s_ageListTeam && g[1]==s_ageListSlot && g[3]>=15 && g[3]<=60) return g[3];
-        }
-        if(SWOS_IdentityAgeForClub(s_ageListTeam,s_ageListSlot,&a,&id) && id && a>=15 && a<=60) return a;
-    }
-    /* Unverified career slots use legacy per-name ages, not guessed IDs. */
-    for(size_t i=0;;++i) {
-        const char *name=0; unsigned age=0;
-        if(!SWOS_AgesGet(i,&name,&age)) break;
-        if(name && strcmp(name,pf->playerName)==0 && age>=15 && age<=60) return age;
-    }
-    return ((uint8_t)pf->form==PLAYER_FORM_TRIALIST || (uint8_t)pf->form==PLAYER_FORM_RESERVE)?17u:25u;
-}
-/* Club names are fixed at 17 bytes. PrintFormatted and menu entries require
- * a terminated string; never read into the neighbouring own-goals byte. */
-#define SWOS_TM_CopyClubName SWOS_CopyTeamName18
+#include "world.h"
+#include "career_params.h"   /* the list capacities (include/career_capacity.h), trialist_count_mode */
+#include "mod_hooks.h"       /* playerMoved / playerCreated (docs/MODS.md §27): SDL builds */
+#include "mod_api.h"         /* (ModPlayerKind: SDL builds) */
+#include "tweaks.h"          /* [tweaks] unlimited_transfers */
 
 /* Offset from GetPlayer() return value to actual PlayerFile data */
 #define PF_OFF              76  /* sizeof(TeamFile) */
@@ -59,7 +38,9 @@ static unsigned AgeListLookup(const PlayerFile *pf)
 /* Home market player entry: 4 bytes (word teamNum + byte playerOrd + pad) */
 #define MARKET_ENTRY_SIZE   4
 #define HOME_MARKET_MAX     25
-#define FOREIGN_MARKET_MAX  45 /* three times the original 15 foreign slots */
+/* The foreign listing's size is a career param (foreign_listing_capacity: 15, the original's,
+ * by default; include/career_capacity.h). */
+#define FOREIGN_MARKET_MAX  (_careerParams.foreign_listing_capacity)
 
 #define POOLPLAYER_COUNT        900
 
@@ -73,6 +54,7 @@ extern uint16_t _offerSwapSlotsUsed;
 extern uint16_t _numOffers;
 extern uint8_t  _transferOfferTable[];
 extern uint16_t _careerNumPlayers;
+extern TeamFileEx _careerTeam;
 extern uint16_t _numHomeMarketPlayers;
 extern uint8_t  _homeMarketPlayers[];
 extern uint16_t _numForeignMarketPlayers;
@@ -133,8 +115,7 @@ extern uint16_t _removedOfferPlayersFromOtherTeamsCount;
 
 /* ---- Additional externs for Chunk 75 ---- */
 extern uint16_t _numPlayersOnTransferMarket;
-/* Actual storage is a byte array in career_transfer_market.c. */
-extern uint8_t _playersOnTransferMarket[20];
+extern uint16_t _playersOnTransferMarket[];
 extern uint16_t _financeTotalsNeedResetFlag;
 extern int32_t  _newBalance;
 extern int32_t  _old_balance;
@@ -167,20 +148,18 @@ uint16_t _cGetPlayerAtIndexFileIdx __attribute__((used, externally_visible));
 __attribute__((used, externally_visible))
 uint16_t GetRemainingTransferPoolSlots(void)
 {
-    /* Remove the original seasonal chairman purchase limit. The real limit is
-     * the expanded career replacement-record array, which is shared with AI
-     * transfers and written to the JSON career save. Do not allow writes
-     * beyond that array, even after many seasons and repeated AI simulations.
-     *
-     * Keep _transferPoolSlotLimit / _transferPoolSlotsUsed intact for save
-     * compatibility; their seasonal quota simply no longer blocks buying.
-     */
-    uint32_t used = _numForeignMarketPlayers2;
-    uint32_t available;
-    if (used >= SWOS_AI_CAREER_POOL_CAPACITY)
+    if (_careerParams.transfer_quota_mode == 1) {   /* (career_params: buys limited by the pool's room) */
+        const uint32_t used = _numForeignMarketPlayers2, cap = _careerParams.foreign_pool_capacity;
+        const uint32_t room = used >= cap ? 0 : cap - used;
+        return (uint16_t)(room > 32767u ? 32767u : room);
+    }
+    /* The original's subtraction, which its own tests never let go below 0. The
+     * unlimited_transfers tweak (BuyPlayerMenu) buys past the season's quota: then none are
+     * left, not 65535 -- and so whether the tweak is still on or not, as a career saved with
+     * it on keeps the count. */
+    if (_transferPoolSlotsUsed > _transferPoolSlotLimit)
         return 0;
-    available = (uint32_t)SWOS_AI_CAREER_POOL_CAPACITY - used;
-    return (uint16_t)(available > 32767u ? 32767u : available);
+    return _transferPoolSlotLimit - _transferPoolSlotsUsed;
 }
 
 /* ================================================================
@@ -194,24 +173,14 @@ uint16_t GetRemainingTransferPoolSlots(void)
 __attribute__((used, externally_visible))
 uint16_t GetRemainingOfferSwapSlots(void)
 {
-    /* Recover older saves that already stored a zero seasonal offer quota
-     * after the enlarged AI replacement pool passed the original 432 slots.
-     * The season initializer now assigns a proper quota for new seasons.
-     * Do not reset used slots or offer counts when loading an old career.
-     */
-    if (_offerSwapSlotLimit == 0 &&
-        _numForeignMarketPlayers2 >= SWOS_AI_CAREER_POOL_LEGACY_COUNT)
-        _offerSwapSlotLimit = 128;
-
-    /* The old unsigned subtraction underflowed when used >= limit,
-     * misleading callers into thinking thousands of slots were available. */
-    if (_offerSwapSlotsUsed >= _offerSwapSlotLimit)
+    /* The original's subtraction (SWOS2.s `sub.w`), which its quota never lets underflow. A
+     * bigger list (a capacity param above the original's) can use more slots than the season's
+     * limit: then none are left, not 65535. */
+    if (CareerParams_CapacitiesRaised() && _offerSwapSlotsUsed > _offerSwapSlotLimit)
         return 0;
-
-    /* Even a restored old career must not append past the real pool. */
-    if (_numForeignMarketPlayers2 >= SWOS_AI_CAREER_POOL_CAPACITY)
+    if (_careerParams.transfer_quota_mode == 1 &&   /* (a fixed quota: none once the pool is full) */
+        (_offerSwapSlotsUsed >= _offerSwapSlotLimit || _numForeignMarketPlayers2 >= _careerParams.foreign_pool_capacity))
         return 0;
-
     return _offerSwapSlotLimit - _offerSwapSlotsUsed;
 }
 
@@ -758,8 +727,9 @@ retry:
     /* Pick a random team from selected teams */
     rand = Rand2();
     teamIdx = (uint16_t)(((uint32_t)rand * _numSelectedTeams) >> 8);  /* mulu+lsr */
-    teamIdx = (uint16_t)((uint32_t)teamIdx * sizeof(TeamFileEx));
-    teamEntry = &_selTeamsPtr + teamIdx;
+    /* mulu.w #684 gives a 32-bit offset (adda.l): kept as 32 bits. In 16 it wrapped for
+     * team 96 on (96 * 684 = 65664) and picked the wrong team. */
+    teamEntry = &_selTeamsPtr + (uint32_t)teamIdx * sizeof(TeamFileEx);
 
     /* Must be same country but different team. teamEntry points at
      * a TeamFile so byte[0]=country, byte[1]=ordinal. Read teamNum
@@ -769,7 +739,8 @@ retry:
      * format mismatch — both with the selTeamNumber check here AND
      * with downstream consumers via AddPlayerToCareerContest →
      * homeMarketPlayers → PlayerMarketBuildVisiblePlayerList. */
-    if (*teamEntry != homeCountry)                          /* cmp.b (a0),d3 */
+    if (World_FileCountry(*teamEntry) != World_FileCountry(homeCountry))  /* cmp.b (a0),d3 (a second
+                                                             * team file's clubs: their country's, include/world.h) */
         goto retry;
     teamNum = PACK_BE_U16(teamEntry[0], teamEntry[1]);
     if (teamNum == _selTeamNumber)                            /* cmp.w (selTeamNumber).l,d1 */
@@ -848,6 +819,9 @@ void FillCareerTeamPlayers(void)
 __attribute__((used, externally_visible))
 void AddRandomForeignMarketPlayer(void)
 {
+    if (_numForeignMarketPlayers >= FOREIGN_MARKET_MAX)
+        return;
+    unsigned remaining = 2 * POOLPLAYER_COUNT;
     uint32_t priceRange = GetLowestAndHighestPlayerPrice();
     uint8_t lowestPrice = (uint8_t)(priceRange >> 16);     /* d4 */
     uint8_t highestPrice = (uint8_t)(priceRange & 0xFFFF); /* d5 */
@@ -868,14 +842,17 @@ void AddRandomForeignMarketPlayer(void)
         attemptsLeft = 0xB4;                                /* move.w #$B4,d6 */
 
 retry:
-    attemptsLeft--;
-    if (attemptsLeft == 0)                                  /* tst.w d6; bne skip */
+    if (!remaining--)
+        return;
+    if (attemptsLeft && --attemptsLeft == 0)
         _foreignMarketRandomPickRetries++;
 
     /* Pick random pool entry using GetRandomWord for full 16-bit random */
     rand = GetRandomWord();
     poolIdx = (uint16_t)((uint32_t)rand * POOLPLAYER_COUNT >> 16);  /* mulu #900; lsr.l #8; lsr.l #8 */
     poolEntry = &_poolplyrDatBuffer[poolIdx];
+    if (!poolEntry->player.playerName[0] || (uint8_t)poolEntry->player.playerName[0] == 255)
+        goto retry;
 
     /* Must be different country. Byte access at offset 0 is endian-
      * safe (the file format stores [country, ordinal] bytes). */
@@ -918,6 +895,10 @@ retry:
 __attribute__((used, externally_visible))
 void FillForeignMarketPlayers(void)
 {
+    if (ModernRuntime_Enabled()) {
+        _numForeignMarketPlayers = 0;
+        return;
+    }
     uint16_t numToAdd;
     int16_t i;
 
@@ -928,8 +909,9 @@ void FillForeignMarketPlayers(void)
     if (_isNationalSelector != 0)
         return;
 
-    /* Triple the original 8-15 foreign listings: 24, 27, ..., 45. */
-    numToAdd = (uint16_t)(3u * (15u - (Rand2() & 7u)));
+    numToAdd = 15;                                          /* move.w #$F,d7 */
+    numToAdd -= (Rand2() & 7);                             /* andi.w #7,d0; sub.w */
+    numToAdd = (uint16_t)(numToAdd * _careerParams.foreign_refill_mult);   /* (career_params: 1) */
     if ((int16_t)numToAdd <= 0)
         return;
 
@@ -1165,8 +1147,8 @@ int16_t IsTeamEligibleForOfferByRefSkill(TeamFileEx *team, uint16_t refSkill)
     if (teamNum == _selTeamNumber)
         return 1;
 
-    /* League type 4 → not eligible */
-    if (tfx->team.league == 4)
+    /* Outside its country's league → not eligible (was league == 4) */
+    if (Team_IsOutsideLeague(&tfx->team))
         return 1;
 
     flags = 0;
@@ -1349,13 +1331,11 @@ __attribute__((used, externally_visible))
 int16_t FindPlayerOnTransferMarket(uint16_t playerId)
 {
     uint16_t count = _numPlayersOnTransferMarket;
-    const uint8_t *p;
+    uint16_t *p;
     uint16_t i;
 
     if (count == 0)
         return 1;
-    if (count > 10)
-        count = 10;
 
     p = _playersOnTransferMarket;
     for (i = 0; i < count; i++) {
@@ -1368,7 +1348,8 @@ int16_t FindPlayerOnTransferMarket(uint16_t playerId)
 /* ================================================================
  * AddPlayerToTransferMarket  (SWOS2.s line 72992)
  *
- * Appends a playerId to the transfer market list (max 10 entries).
+ * Appends a playerId to the transfer market list (max transfer_list_capacity entries: 5, the
+ * original's, by default).
  *
  * Asm register convention:
  *   in:  d0.w = playerId
@@ -1378,16 +1359,11 @@ void AddPlayerToTransferMarket(uint16_t playerId)
 {
     uint16_t count;
 
-    /* Entries are byte-sized physical player slots (0..31), NOT words.
-     * Guard against duplicates and invalid indices, including repeated
-     * selections after selling or moving players. */
-    if (_numPlayersOnTransferMarket >= 10 || playerId >= 32)
-        return;
-    if (FindPlayerOnTransferMarket(playerId) == 0)
+    if (_numPlayersOnTransferMarket >= _careerParams.transfer_list_capacity)
         return;
 
     count = _numPlayersOnTransferMarket;
-    _playersOnTransferMarket[count] = (uint8_t)playerId;
+    _playersOnTransferMarket[count] = playerId;
     _numPlayersOnTransferMarket = count + 1;
 }
 
@@ -1404,7 +1380,7 @@ __attribute__((used, externally_visible))
 void RemovePlayerFromTransferMarket(uint16_t playerId)
 {
     uint16_t count = _numPlayersOnTransferMarket;
-    uint8_t *p = _playersOnTransferMarket;
+    uint16_t *p = _playersOnTransferMarket;
     uint16_t i;
     int16_t foundIdx = -1;
 
@@ -1420,42 +1396,15 @@ void RemovePlayerFromTransferMarket(uint16_t playerId)
     if (foundIdx < 0)
         return;
 
-    /* Compact byte entries, and clear the old final slot so a reload
-     * cannot expose a stale player ordinal. */
+    /* Shift entries left to fill gap */
     {
+        uint16_t remaining = count - (uint16_t)foundIdx - 1;
+        volatile uint16_t *dst = (volatile uint16_t *)&p[foundIdx];
         uint16_t j;
-        for (j = (uint16_t)foundIdx; j + 1 < count; ++j)
-            p[j] = p[j + 1];
-        p[count - 1] = 0;
+        for (j = 0; j < remaining; j++)
+            dst[j] = dst[j + 1];
     }
     _numPlayersOnTransferMarket = count - 1;
-}
-
-/* Correct old transfer lists after loading an affected save. Older builds
- * treated this byte array as uint16_t[], leaving duplicate zero entries.
- * Preserve a single 0 entry because goalkeeper slot 0 is a legitimate
- * player selection. No changes to the roster or transfer offers. */
-static void SWOS_RepairTransferList(void)
-{
-    uint16_t count = _numPlayersOnTransferMarket;
-    uint16_t write = 0;
-    uint16_t i;
-    if (count > 10)
-        count = 10;
-    for (i = 0; i < count; ++i) {
-        uint8_t slot = _playersOnTransferMarket[i];
-        uint16_t j;
-        int seen = 0;
-        if (slot >= 32)
-            continue;
-        for (j = 0; j < write; ++j)
-            if (_playersOnTransferMarket[j] == slot) { seen = 1; break; }
-        if (!seen)
-            _playersOnTransferMarket[write++] = slot;
-    }
-    for (i = write; i < 10; ++i)
-        _playersOnTransferMarket[i] = 0;
-    _numPlayersOnTransferMarket = write;
 }
 
 /* ================================================================
@@ -1522,8 +1471,6 @@ __attribute__((used, externally_visible))
 void AddCareerPoolPlayer(uint16_t teamNumber, uint16_t playerOrdinal, PlayerFile *playerFile)
 {
     uint16_t idx = _numForeignMarketPlayers2;
-    if (idx >= SWOS_AI_CAREER_POOL_CAPACITY)
-        return; /* Never overflow pool during normal game transfers. */
     MarketPlayer *entry = &_careerForeignMarketPlayers[idx];
     volatile uint16_t *dst;
     uint16_t *src;
@@ -1563,7 +1510,77 @@ void AddCareerPoolPlayer(uint16_t teamNumber, uint16_t playerOrdinal, PlayerFile
 
     _numForeignMarketPlayers2 = idx + 1;
     _pendingForeignPlayerCount = _pendingForeignPlayerCount + 1;
+    Career_SyncClubPlayerCopies(teamNumber, playerOrdinal, &entry->player);
     _lastLoadedExtNumber = 255;
+}
+
+/* ================================================================
+ * Career_WriteTeamPlayer -- a career mod's change to another club's player (ModApi_SetCareerPlayer):
+ * the player at `slot` of team `teamId` becomes `player`, for the rest of the career. Written as
+ * the game writes its own transfers, into the career's foreign-market pool (every claim on that
+ * slot, or a new one appended: Career_PatchTeamWithForeignMarketPlayers puts it on the team
+ * whenever its file is read), and into every live copy -- the selected teams, the TMD pool, the
+ * current team -- so a screen and a match see it at once (benefactorr's Career+,
+ * SWOS_AI_P3WriteOverrideAt / SyncLiveSlot). Not the career club (its squad is its own), not a
+ * slot past 15. 0 written; -1 refused (the pool full: foreign_pool_capacity).
+ * ================================================================ */
+int32_t Career_WriteTeamPlayer(uint16_t teamId, uint16_t slot, const PlayerFile *player)
+{
+    if (slot >= 16 || teamId == _selTeamNumber || !player)
+        return -1;
+    const uint8_t hi = (uint8_t)(teamId >> 8), lo = (uint8_t)teamId;
+    int32_t claimed = 0;
+    for (uint16_t k = 0; k < _numForeignMarketPlayers2; k++) {
+        MarketPlayer *e = &_careerForeignMarketPlayers[k];
+        if (((uint8_t *)&e->teamId)[0] == hi && ((uint8_t *)&e->teamId)[1] == lo && (uint8_t)e->playerOrdinal == slot) {
+            e->player = *player;
+            claimed = 1;
+        }
+    }
+    if (!claimed) {
+        if (_numForeignMarketPlayers2 >= _careerParams.foreign_pool_capacity)
+            return -1;
+        MarketPlayer *e = &_careerForeignMarketPlayers[_numForeignMarketPlayers2];
+        ((uint8_t *)&e->teamId)[0] = hi;
+        ((uint8_t *)&e->teamId)[1] = lo;
+        e->playerOrdinal = (int8_t)slot;
+        e->padding = (int8_t)_viewRandomPhase;
+        e->player = *player;
+        _numForeignMarketPlayers2++;
+        _pendingForeignPlayerCount++;
+    }
+    Career_SyncClubPlayerCopies(teamId, slot, player);
+    _lastLoadedExtNumber = 255;     /* (a team file read again gets the pool's change) */
+    return 0;
+}
+
+/* ================================================================
+ * Career_WriteOwnPlayer -- the career club's player at `slot` (0..31: the squad and the reserves)
+ * becomes `player`: a new man in his place (ModApi_SetOwnPlayer; Career+'s retirements). Into the
+ * career squad and every live copy of it -- the current team, the selected teams (their 16) --
+ * with the squad's values marked to be worked out again. 0 written, -1 not (no player, a slot
+ * past 31, a national selector's team).
+ * ================================================================ */
+int32_t Career_WriteOwnPlayer(uint16_t slot, const PlayerFile *player)
+{
+    extern uint16_t _currentTeamNumber, _isNationalSelector;
+    extern uint8_t  _currentTeam[];
+        if (slot >= 32 || !player || _isNationalSelector)
+        return -1;
+    /* (the squad's 16 and then its 16 reserves, one run of PlayerFiles after the header) */
+    *(PlayerFile *)((uint8_t *)&_careerTeam + sizeof(TeamFile) + slot * sizeof(PlayerFile)) = *player;
+    if (_currentTeamNumber == _selTeamNumber) {
+        *(PlayerFile *)(_currentTeam + sizeof(TeamFile) + slot * sizeof(PlayerFile)) = *player;
+        ((TeamFileEx *)_currentTeam)->team.playerValuesDirty = TEAM_VALUES_DIRTY;
+    }
+    _careerTeam.team.playerValuesDirty = TEAM_VALUES_DIRTY;
+    if (slot < 16)
+        for (uint16_t i = 0; i < _numSelectedTeams; i++)
+            if (PACK_BE_U16(_selectedTeams[i].team.countryNumber, _selectedTeams[i].team.teamOrdinal) == _selTeamNumber) {
+                _selectedTeams[i].players[slot] = *player;
+                _selectedTeams[i].team.playerValuesDirty = TEAM_VALUES_DIRTY;
+            }
+    return 0;
 }
 
 /* ================================================================
@@ -1846,12 +1863,75 @@ void BuyPlayerInit(void)
 {
     uint8_t *str = (uint8_t *)_menuEntries[1].fg;
     GetBankBalance(str);
+    /* (a mod's row, entry 8, above EXIT: the five rows close up to make room -- local y 48 to
+     * 136, 22 apart, the row at 158; without it the original's layout) */
+    if (ModRow_Show(8, MODROW_BUY_PLAYER)) {
+        const uint16_t top = _menuEntries[0].y;
+        for (uint16_t e = 2; e <= 6; e++)
+            _menuEntries[e].y = (uint16_t)(top + 48 + 22 * (e - 2));
+        _menuEntries[8].y = (uint16_t)(top + 158);
+        _menuEntries[6].downEntry = 8;
+        _menuEntries[7].upEntry = 8;
+    }
+}
+
+/* The TRANSFER MARKET's list rows: the original's five are entries 9-13; rows 6-10 (entries
+ * 26-30, OpenSWOS) show only when transfer_list_capacity is above the original's 5, and then
+ * the screen is laid out for ten. */
+#define TM_ROWS_FIRST        9
+#define TM_ROWS_EXTRA_FIRST  26
+#define TM_ROWS_ORIG         5
+
+static uint16_t tmRowEntry(uint16_t row)
+{
+    return (uint16_t)(row < TM_ROWS_ORIG ? TM_ROWS_FIRST + row : TM_ROWS_EXTRA_FIRST + (row - TM_ROWS_ORIG));
+}
+
+static uint16_t tmRowOfEntry(const MenuEntry *entry)
+{
+    uint16_t row = (uint16_t)(entry->ordinal - _menuEntries[TM_ROWS_FIRST].ordinal);
+    if (row >= TM_ROWS_ORIG)
+        row = (uint16_t)(entry->ordinal - _menuEntries[TM_ROWS_EXTRA_FIRST].ordinal + TM_ROWS_ORIG);
+    return row;
+}
+
+/* The original's layout with five rows; with a longer list (local y, the menu's own
+ * coordinates): BUY 34, VIEW OFFERS 52, PUT ON MARKET 70, the list's title 88, ten rows from
+ * 100, the bottom row at 201 (below the original's 185, as Career+ had it). Positions are set
+ * from the title's (entry 0, local y 0), so a call after a return redraws the same. */
+static void tmLayoutRows(void)
+{
+    if (ModRow_Show(31, MODROW_TRANSFER_MARKET)) {  /* (a mod's row, entry 31: BUY PLAYER and it side */
+        const uint16_t left = (uint16_t)(_menuEntries[0].x - 92);   /* by side, centred: local x 46 and */
+        _menuEntries[2].x = (uint16_t)(left + 46);                  /* 158, from the title's, so a call */
+        _menuEntries[31].x = (uint16_t)(left + 158);                /* after a return lays out the same) */
+        _menuEntries[2].rightEntry = 31;
+    }
+    const int32_t big = _careerParams.transfer_list_capacity > TM_ROWS_ORIG;
+    for (uint16_t k = 0; k < TM_ROWS_ORIG; k++)
+        _menuEntries[TM_ROWS_EXTRA_FIRST + k].isInvisible = !big;
+    if (!big)
+        return;
+    const uint16_t top = _menuEntries[0].y;
+    _menuEntries[2].y = (uint16_t)(top + 34);
+    _menuEntries[31].y = _menuEntries[2].y;     /* (the mod's row, beside BUY PLAYER) */
+    _menuEntries[3].y = (uint16_t)(top + 52);
+    _menuEntries[4].y = (uint16_t)(top + 70);
+    _menuEntries[8].y = (uint16_t)(top + 88);
+    for (uint16_t row = 0; row < 2 * TM_ROWS_ORIG; row++)
+        _menuEntries[tmRowEntry(row)].y = (uint16_t)(top + 100 + 9 * row);
+    for (uint16_t e = 5; e <= 7; e++) {
+        _menuEntries[e].y = (uint16_t)(top + 201);
+        _menuEntries[e].upEntry = (int8_t)tmRowEntry(2 * TM_ROWS_ORIG - 1);
+    }
+    _menuEntries[tmRowEntry(TM_ROWS_ORIG - 1)].downEntry = (int8_t)tmRowEntry(TM_ROWS_ORIG);
 }
 
 /* TransferMarketFinish — refresh all transfer menu state (SWOS2.s line 76181) */
 __attribute__((used, externally_visible))
 void TransferMarketFinish(void)
 {
+    tmLayoutRows();
     TransferMenuSetBankState();
     CheckNumPlayersOnTransferMarket();
     CheckIfPlayerSelected();
@@ -1861,10 +1941,15 @@ void TransferMarketFinish(void)
 /* ShowDomesticPlayerMarket — update home market, show market menu (SWOS2.s line 70638) */
 extern uint16_t _showDomesticPlayerMarket;
 extern uint8_t _showPlayerMarketMenu[];
+static void showModernPlayerMarket(int domestic);
 
 __attribute__((used, externally_visible))
 void ShowDomesticPlayerMarket(void)
 {
+    if (ModernRuntime_Enabled()) {
+        showModernPlayerMarket(1);
+        return;
+    }
     UpdateHomeMarketPlayers();
     _showDomesticPlayerMarket = 1;
     ShowMenu(_showPlayerMarketMenu);
@@ -1889,17 +1974,91 @@ void ViewDomesticPlayerMarket(void)
     }
 }
 
+/* Modern listings keep a live roster identity behind each native menu row. */
+typedef struct ModernMarketListing {
+    const ModernRoster *club;
+    size_t slot;
+    uint16_t team;
+} ModernMarketListing;
+
+static ModernMarketListing modernMarketListings[CAREER_MAX_FOREIGN_LISTING];
+static size_t modernMarketCount;
+static int modernMarketOpen;
+static int modernListedOffer;
+
+static void buildModernMarket(int domestic)
+{
+    extern uint16_t _currentSeasonShowing, _seasonWeeksDeducted;
+    ModernWorld *world = ModernWorld_Active();
+    const uint8_t home = World_FileCountry(_selTeamNumber >> 8);
+    uint32_t seed = ((uint32_t)_currentSeasonShowing << 24) ^
+        ((uint32_t)_seasonWeeksDeducted << 16) ^ _selTeamNumber ^
+        (world->ai_transfer_run * UINT32_C(2654435761));
+    size_t capacity = domestic ? HOME_MARKET_MAX : FOREIGN_MARKET_MAX;
+    if (capacity > CAREER_MAX_FOREIGN_LISTING)
+        capacity = CAREER_MAX_FOREIGN_LISTING;
+    modernMarketCount = 0;
+    size_t seen = 0;
+    for (size_t c = 0; c < world->count; ++c) {
+        const ModernRoster *club = &world->clubs[c];
+        uint16_t team;
+        if (!ModernRuntime_ActiveClub(club, &team) || team == _selTeamNumber ||
+            (World_FileCountry(team >> 8) == home) != domestic)
+            continue;
+        for (size_t slot = 0; slot < club->count; ++slot) {
+            const PlayerFile *player = &club->players[slot].swos;
+            if ((player->positionAndFace & PF_LOAN) || !player->playerName[0] ||
+                (uint8_t)player->playerName[0] == 255)
+                continue;
+            ++seen;
+            size_t index;
+            if (modernMarketCount < capacity)
+                index = modernMarketCount++;
+            else {
+                seed = seed * UINT32_C(1664525) + UINT32_C(1013904223);
+                index = (seed >> 8) % seen;
+                if (index >= capacity) continue;
+            }
+            modernMarketListings[index] = (ModernMarketListing){club, slot, team};
+        }
+    }
+}
+
+static void showModernPlayerMarket(int domestic)
+{
+    buildModernMarket(domestic);
+    _showDomesticPlayerMarket = (uint16_t)domestic;
+    modernMarketOpen = 1;
+    ShowMenu(_showPlayerMarketMenu);
+    modernMarketOpen = 0;
+    modernMarketCount = 0;
+}
+
 /* ---- Chunk 144: ShowForeignPlayerMarket ---- */
 /* SWOS2.s line 66050 — load pool data, maybe add random player, show foreign market menu */
 __attribute__((used, externally_visible))
 void ShowForeignPlayerMarket(void)
 {
+    if (ModernRuntime_Enabled()) {
+        showModernPlayerMarket(0);
+        return;
+    }
     LoadPoolplyrDat();
     if (_removedOfferPlayersFromOtherTeamsCount != 0) {
         _removedOfferPlayersFromOtherTeamsCount--;
         AddRandomForeignMarketPlayer();
     }
     UpdateForeignMarketPlayers();
+    /* Older save files can still have the smaller list until first opened. */
+    unsigned minimum = 8u * _careerParams.foreign_refill_mult;
+    if (minimum > FOREIGN_MARKET_MAX)
+        minimum = FOREIGN_MARKET_MAX;
+    while (!_isNationalSelector && _numForeignMarketPlayers < minimum) {
+        uint16_t previous = _numForeignMarketPlayers;
+        AddRandomForeignMarketPlayer();
+        if (_numForeignMarketPlayers == previous)
+            break;
+    }
     _showDomesticPlayerMarket = 0;
     ShowMenu(_showPlayerMarketMenu);
 }
@@ -1995,8 +2154,7 @@ void PlayerOffersInit(void)
 
     /* Entry 3 (0xA8/56): "WE HERE AT %a WISH TO BUY" with our team name */
     TeamFileEx *ourTeam = GetTeamPointer(_selTeamNumber);
-    uint8_t ourName[18];
-    SWOS_TM_CopyClubName(ourName, ourTeam->team.teamName);
+    uint8_t *ourName = (uint8_t *)ourTeam->team.teamName;
     MenuEntry *entry3 = &_menuEntries[3];
     uint8_t *dst3 = (uint8_t *)entry3->fg;
     PrintFormatted((const uint8_t *)"WE HERE AT %a WISH TO BUY", dst3,
@@ -2004,8 +2162,7 @@ void PlayerOffersInit(void)
 
     /* Entry 4 (0xE0/56): "FROM %a IN EXCHANGE FOR" with offering team name */
     TeamFileEx *offeringTeam = GetTeamPointer(_offerOrdinals.teamOffering);
-    uint8_t offeringName[18];
-    SWOS_TM_CopyClubName(offeringName, offeringTeam->team.teamName);
+    uint8_t *offeringName = (uint8_t *)offeringTeam->team.teamName;
     MenuEntry *entry4 = &_menuEntries[4];
     uint8_t *dst4 = (uint8_t *)entry4->fg;
     PrintFormatted((const uint8_t *)"FROM %a IN EXCHANGE FOR", dst4,
@@ -2057,7 +2214,7 @@ void GenerateRandomTransferOffers(void)
                 int onMarket = 0;
                 /* _cGetPlayerAtIndexFileIdx holds the file index from last GetPlayerAtIndex call */
                 if (FindPlayerOnTransferMarket(fileIdx) == 0) {
-                    threshold = 36; /* 36/256 chance per eligible transfer-listed player check */
+                    threshold = _careerParams.listed_bid_chance;   /* (11, the original's) */
                     onMarket = 1;
                     boostedFound++;
                 }
@@ -2070,9 +2227,9 @@ void GenerateRandomTransferOffers(void)
                     offersCreated++;
                 } else if (onMarket) {
                     /* Only log misses for players who were boosted, otherwise log
-                     * floods every match with all 16 players' default 1/256 rolls. */
-                    SWOS_AUTOSKIP_LOG("[bug2]   idx=%u fileIdx=%u onMarket=1 roll=%u th=36 -> miss",
-                                      (unsigned)idx, (unsigned)fileIdx, (unsigned)roll);
+                     * floods every match with all unlisted players' 1/256 rolls. */
+                    SWOS_AUTOSKIP_LOG("[bug2]   idx=%u fileIdx=%u onMarket=1 roll=%u th=%u -> miss",
+                                      (unsigned)idx, (unsigned)fileIdx, (unsigned)roll, (unsigned)threshold);
                 }
             } else {
                 if (FindPlayerOnTransferMarket(fileIdx) == 0) {
@@ -2144,15 +2301,136 @@ void ProcessOfferExpiryCountdown(void)
 /* SWOS2.s line 69577/69584 — init/return callbacks for Buy Other Players menu */
 extern TeamFileEx *_buyOtherPlayersTeamPtr;
 extern uint8_t *_buyOtherPlayersTitlePtr;
+/* Original Buy Other Players menu is a fixed 16-row menu. Do not replace its
+ * layout. The last row becomes the existing-style continuation entry only in
+ * Modernised careers that have more than 16 registered players. */
+static size_t modernBuyPage = 0;
+static size_t modernBuyTotal = 0;
+static ModernRoster *modernBuyRoster = NULL;
+/* The buying list is a VIEW of the AI match selection, not the persistent
+ * roster's storage order. Store original roster indexes, so drawing a row
+ * and offering its player always refer to the same permanent UUID. */
+static size_t *modernBuyOrder = NULL;
+static size_t modernBuyOrderCount = 0;
+static void ModernBuy_RebuildOrder(void)
+{
+    size_t selected[MODERN_MATCH_PLAYERS], i, j, next;
+    size_t *order;
+    free(modernBuyOrder);
+    modernBuyOrder = NULL;
+    modernBuyOrderCount = 0;
+    if (!modernBuyRoster || modernBuyRoster->count < MODERN_MATCH_PLAYERS ||
+        !ModernCareer_SelectAI16(modernBuyRoster, selected)) return;
+    order = malloc(modernBuyRoster->count * sizeof *order);
+    if (!order) return;
+    for (i = 0; i < MODERN_MATCH_PLAYERS; ++i) {
+        if (selected[i] >= modernBuyRoster->count) { free(order); return; }
+        for (j = 0; j < i; ++j)
+            if (selected[i] == selected[j]) { free(order); return; }
+        order[i] = selected[i];
+    }
+    next = MODERN_MATCH_PLAYERS;
+    for (i = 0; i < modernBuyRoster->count; ++i) {
+        for (j = 0; j < MODERN_MATCH_PLAYERS; ++j)
+            if (selected[j] == i) break;
+        if (j == MODERN_MATCH_PLAYERS) order[next++] = i;
+    }
+    if (next != modernBuyRoster->count) { free(order); return; }
+    modernBuyOrder = order;
+    modernBuyOrderCount = next;
+}
+static size_t ModernBuy_RosterIndex(size_t display_index)
+{
+    return modernBuyOrder && modernBuyRoster &&
+        modernBuyOrderCount == modernBuyRoster->count &&
+        display_index < modernBuyOrderCount
+        ? modernBuyOrder[display_index] : display_index;
+}
+static const uint8_t modernBuyNext[] = "MORE PLAYERS  >>";
+/* R8b: Original SWOS negotiation is authoritative. This context only
+ * remembers the permanent identity of the player being negotiated for.
+ * Reserve players temporarily occupy an OFFER PREVIEW slot, never a match
+ * selection or a permanent owner slot. Its bytes are restored on exit. */
+typedef struct ModernNegotiatedBuy {
+    int active;
+    int preview_active;
+    int committed;
+    uint16_t team_number;
+    uint16_t offer_slot;
+    uint16_t listed_asking;
+    TeamFileEx *team;
+    PlayerFile saved_preview;
+    char player_id[MODERN_ID_LEN];
+    char seller_id[MODERN_ID_LEN];
+} ModernNegotiatedBuy;
+static ModernNegotiatedBuy modernNegotiatedBuy;
+static void ModernBuy_ClearOffer(void) {
+    if(modernNegotiatedBuy.preview_active && modernNegotiatedBuy.team)
+        memcpy(&modernNegotiatedBuy.team->players[15],
+               &modernNegotiatedBuy.saved_preview,sizeof(PlayerFile));
+    memset(&modernNegotiatedBuy,0,sizeof modernNegotiatedBuy);
+}
+/* A reserve can use the original SWOS offer menu only while it is represented
+ * at a legacy 0..15 slot. The original slot's player and UUID binding never
+ * change: restoration must happen BEFORE any roster flush. */
+static int ModernBuy_BeginOffer(ModernWorld *world,ModernRoster *seller,
+                               TeamFileEx *team,const char *player_id,
+                               uint16_t slot,int reserve_preview) {
+    size_t i;
+    if(!world||!seller||!team||!player_id||!player_id[0]||slot>=16u||
+       modernNegotiatedBuy.active)return 0;
+    if(ModernRuntime_Roster(world,team->team.countryNumber,
+             team->team.teamOrdinal)!=seller)return 0;
+    for(i=0;i<seller->count;i++)
+        if(!strcmp(seller->players[i].id,player_id))break;
+    if(i==seller->count)return 0;
+    if(reserve_preview) {
+        /* Slot 15 is a short-lived display proxy only. The original match
+         * record and binding are restored whether the offer is accepted,
+         * refused, cancelled, or the negotiation window is closed. */
+        if(slot!=15u)return 0;
+        memcpy(&modernNegotiatedBuy.saved_preview,&team->players[15],
+               sizeof(PlayerFile));
+        memcpy(&team->players[15],&seller->players[i].swos,
+               sizeof(PlayerFile));
+        modernNegotiatedBuy.preview_active=1;
+    }
+    modernNegotiatedBuy.active=1;
+    modernNegotiatedBuy.team=team;
+    modernNegotiatedBuy.team_number=PACK_BE_U16(team->team.countryNumber,
+                                                 team->team.teamOrdinal);
+    modernNegotiatedBuy.offer_slot=slot;
+    if (modernListedOffer)
+        modernNegotiatedBuy.listed_asking =
+            ModernPlayerTransferValueBase((uint8_t)seller->players[i].swos.price);
+    memcpy(modernNegotiatedBuy.player_id,player_id,MODERN_ID_LEN);
+    memcpy(modernNegotiatedBuy.seller_id,seller->club_id,MODERN_ID_LEN);
+    return 1;
+}
+static int modernSellOfferCommitted=0;
+extern uint16_t GetDisplayedPlayerValue(uint8_t *ptr);
+extern uint16_t _avgTeamValueBases[];
+extern void ClampNewBalanceAndUpdateClubStatus(void);
+extern void ClearOverdraftStateIfRecovered(void);
+extern void Career_CommitNewBalanceAndResetFinanceTotals(void);
+static uint8_t modernBuyDisplay[sizeof(TeamFile)+sizeof(PlayerFile)];
+static ModernRoster *modernBuyLookup(void) {
+    ModernWorld *world;
+    if(!ModernRuntime_Enabled() || !(world=ModernWorld_Active()) ||
+       !_buyOtherPlayersTeamPtr)return NULL;
+    return ModernRuntime_Roster(world,
+        _buyOtherPlayersTeamPtr->team.countryNumber,
+        _buyOtherPlayersTeamPtr->team.teamOrdinal);
+}
+
 
 /* BuyOtherPlayersFinish: set menu entry 0 title and entry 1 team name */
 __attribute__((used, externally_visible))
 void BuyOtherPlayersFinish(void)
 {
     _menuEntries[0].fg = (uintptr_t)_buyOtherPlayersTitlePtr;
-    static uint8_t buyOtherTeamName[18];
-    SWOS_TM_CopyClubName(buyOtherTeamName, _buyOtherPlayersTeamPtr->team.teamName);
-    _menuEntries[1].fg = (uintptr_t)buyOtherTeamName;
+    uint8_t *teamName = _buyOtherPlayersTeamPtr->team.teamName;
+    _menuEntries[1].fg = (uintptr_t)teamName;
 }
 
 /* BuyOtherPlayersInit: get team pointer from offerOrdinals.teamOffering, store it, then finish */
@@ -2160,6 +2438,16 @@ __attribute__((used, externally_visible))
 void BuyOtherPlayersInit(void)
 {
     _buyOtherPlayersTeamPtr = GetTeamPointer(_offerOrdinals.teamOffering);
+    modernBuyPage=0;
+    ModernBuy_ClearOffer();
+    modernBuyRoster=modernBuyLookup();
+    if(modernBuyRoster && ModernWorld_Active() && _buyOtherPlayersTeamPtr &&
+       !ModernRuntime_Activate(ModernWorld_Active(),_buyOtherPlayersTeamPtr)) {
+        /* Without a reliable slot-to-UUID binding the old 16 cannot be sold. */
+        modernBuyRoster=NULL;
+    }
+    modernBuyTotal=modernBuyRoster?modernBuyRoster->count:16u;
+    ModernBuy_RebuildOrder();
     BuyOtherPlayersFinish();
 }
 
@@ -2181,7 +2469,7 @@ void ViewOffersMenu(void)
         return;
     }
     if (_numOffers == 0) {
-        SetCurrentEntry(7);
+        SetCurrentEntry(6);
         DrawMenu();
     }
 }
@@ -2250,18 +2538,18 @@ extern void ShowChairmanMessage(void);
 /* ================================================================
  * CheckNumPlayersOnTransferMarket  (SWOS2.s line 70068)
  *
- * If 10 players on market, hide "put on market" entry (4).
+ * If the list is full (5 players, transfer_list_capacity), hide "put on market" entry (4).
  * If 0 players, hide "take off market" entry (8).
  * ================================================================ */
 static void checkNumPlayersOnTransferMarket(void)
 {
-    if (_numPlayersOnTransferMarket >= 10) {
-        _menuEntries[5].isInvisible = 1;
+    if (_numPlayersOnTransferMarket >= _careerParams.transfer_list_capacity) {
+        _menuEntries[4].isInvisible = 1;
     } else {
-        _menuEntries[5].isInvisible = 0;
+        _menuEntries[4].isInvisible = 0;
     }
     if (_numPlayersOnTransferMarket == 0) {
-        _menuEntries[9].isInvisible = 1;
+        _menuEntries[8].isInvisible = 1;
     }
 }
 
@@ -2280,11 +2568,11 @@ void CheckNumPlayersOnTransferMarket(void)
 static void checkIfPlayerSelected(void)
 {
     if ((int16_t)_playerSelected < 0) {
-        _menuEntries[6].isInvisible = 1;
-        _menuEntries[8].isInvisible = 1;
+        _menuEntries[5].isInvisible = 1;
+        _menuEntries[7].isInvisible = 1;
     } else {
-        _menuEntries[6].isInvisible = 0;
-        _menuEntries[8].isInvisible = 0;
+        _menuEntries[5].isInvisible = 0;
+        _menuEntries[7].isInvisible = 0;
     }
 }
 
@@ -2305,7 +2593,7 @@ __attribute__((used, externally_visible))
 void EnableDisableOffers(void)
 {
     /* Entry at offset 0xA8: (8 + 0xA8) = 0xB0 / 0x38 = 3.14... entry 3 */
-    MenuEntry *entry = &_menuEntries[4];
+    MenuEntry *entry = &_menuEntries[3];
 
     if (CheckForTransferOffers() == 0) {
         /* No offers eligible — set bit 13 of stringFlags */
@@ -2331,12 +2619,11 @@ void EnableDisableOffers(void)
 __attribute__((used, externally_visible))
 void TransferMarketInit(void)
 {
-    SWOS_RepairTransferList();
     _transferCompleted = 0;
     _playerSelected = 0xFFFF;
     checkNumPlayersOnTransferMarket();
     if (CheckForTransferOffers() == 0) {
-        SetCurrentEntry(4);
+        SetCurrentEntry(3);
     }
     TransferMarketFinish();
 }
@@ -2351,7 +2638,18 @@ void TransferMarketInit(void)
 __attribute__((used, externally_visible))
 void BuyPlayerMenu(void)
 {
-    uint16_t slots = GetRemainingTransferPoolSlots();
+    /* SWOS 2020's UNLIMITED TRANSFERS (g_UnlimitedBuyingPlayers, its swos.asm BuyPlayerMenu):
+     * the [tweaks] unlimited_transfers key, off by default (include/tweaks.h). It skips the
+     * season's quota; what is still asked is room for 2 in the career's player pool (a
+     * club that sells gets a replacement there, and AddCareerPoolPlayer has no bound of
+     * its own). SWOS 2020 skips the test altogether. */
+    uint16_t slots;
+    if (Tweaks_On(TWEAK_UNLIMITED_TRANSFERS)) {
+        const uint32_t used = _numForeignMarketPlayers2, cap = _careerParams.foreign_pool_capacity;
+        const uint32_t room = used >= cap ? 0 : cap - used;
+        slots = (uint16_t)(room > 32767u ? 32767u : room);
+    } else
+        slots = GetRemainingTransferPoolSlots();
     if (slots < 2) {
         _currentMessage = CLUB_UNWILLING_TO_PURCHASE_PLAYERS;
         ShowChairmanMessage();
@@ -2374,13 +2672,26 @@ __attribute__((used, externally_visible))
 void GiveFreeTransfer(void)
 {
     uint16_t idx = _playerSelected;
+    if (idx >= _numPlayersOnTransferMarket)
+        return;
+
     uint16_t playerOrd = _playersOnTransferMarket[idx];
-    RemovePlayerFromTeam(playerOrd);
+    if (ModernRuntime_Enabled()) {
+        /* The expanded roster owns this player. Its removal also remaps
+         * any surviving listings and offers to the new squad slots. */
+        if (!ModernCareer_ReleasePlayer(playerOrd)) {
+            static uint8_t message[] = "CANNOT RELEASE THIS PLAYER";
+            ShowErrorMenu(message);
+            return;
+        }
+    } else {
+        RemovePlayerFromTeam(playerOrd);
+    }
     _playerSelected = 0xFFFF;
     checkNumPlayersOnTransferMarket();
     checkIfPlayerSelected();
     EnableDisableOffers();
-    SetCurrentEntry(7);
+    SetCurrentEntry(6);
     DrawMenu();
 }
 
@@ -2399,7 +2710,7 @@ void TakeOffMarketMenu(void)
     _playerSelected = 0xFFFF;
     checkNumPlayersOnTransferMarket();
     checkIfPlayerSelected();
-    SetCurrentEntry(7);
+    SetCurrentEntry(6);
     DrawMenu();
 }
 
@@ -2417,7 +2728,7 @@ void TransferMarketCommon(void *entryPtr)
     /* Compute relative index: entry ordinal minus base entry ordinal */
     /* Base entry is at menuEntries + MENUENTRY_ALREADYDRAWN + 0x1F8
      * = entry (8+0x1F8)/0x38 = 0x200/0x38 = 9.14... = entry 9 */
-    uint16_t d7 = entry->ordinal - _menuEntries[10].ordinal;
+    uint16_t d7 = tmRowOfEntry(entry);   /* (entries 9-13, and 26-30 for rows 6-10) */
     if (d7 == _playerSelected)
         d7 = 0xFFFF;
 
@@ -2426,7 +2737,7 @@ void TransferMarketCommon(void *entryPtr)
 
     /* If old selection was valid, redraw that entry */
     if ((int16_t)oldSel >= 0) {
-        uint16_t entryIdx = oldSel + 10;
+        uint16_t entryIdx = tmRowEntry(oldSel);
         MenuEntry *oldEntry = CalcMenuEntryAddress(entryIdx);
         CallDrawMenuItem(oldEntry);
     }
@@ -2460,6 +2771,64 @@ extern void FormTopSkillsString(uint8_t *dst, PlayerFile *playerFile);
 extern void SetSquadMenuEntryStatusSprite_AfterSim(MenuEntry *entry, PlayerFile *playerFile);
 extern void InitPlayerValueDisplayStruct(uint8_t *playerEntry, uint8_t *dst);
 extern void FormatPlayerValueOrStatusText(uint8_t *base, uint8_t *dst);
+
+/* The player the next BuildTransferPlayerMenuEntry row shows, when its caller knows it (for the
+ * mods' playerRowDrawn); taken by that call. */
+static uint16_t s_rowTeam = 0xFFFF;
+static uint8_t  s_rowSlot = 0xFF;
+static int16_t  s_rowIndex = -1;
+void TransferRow_Identity(uint16_t team, uint16_t slot, int16_t row)
+{
+    s_rowTeam = team;
+    s_rowSlot = (uint8_t)slot;
+    s_rowIndex = row;
+}
+
+/* The TEAM roster's physical slot follows the live classic identity.
+ * POOLPLYR entries use their own ordinals, so match their names instead. */
+static unsigned classic_transfer_age(uint16_t team, unsigned slot, const PlayerFile *player)
+{
+#ifdef SWOS_SDL_BUILD
+    extern unsigned SWOS_IdentityAgeForClub(unsigned, unsigned, unsigned *, unsigned *);
+    extern int SWOS_AgesLookupExact(const char *, unsigned *);
+    unsigned age = 0, identity = 0;
+    if (SWOS_IdentityAgeForClub(team, slot, &age, &identity) && identity &&
+        age >= 14 && age <= 60)
+        return age;
+    if (SWOS_AgesLookupExact(player->playerName, &age) && age >= 14 && age <= 60)
+        return age;
+#endif
+    return 0;
+}
+
+static unsigned transfer_text_width(const char *text)
+{
+    extern void *_charTables[];
+    /* The name and club cells both use SWOS's small menu font. */
+    if (_charTables[0])
+        return GetTextWidth((uint8_t *)text, (uint8_t *)_charTables[0]);
+    return (unsigned)strlen(text) * 6;
+}
+
+static void transfer_player_name(MenuEntry *row, const PlayerFile *player,
+                                 unsigned age, unsigned rightEdge)
+{
+    static char label[32];
+    if (row[3].isInvisible || !player->playerName[0]) return;
+    size_t length = 0;
+    while (length < sizeof player->playerName && player->playerName[length])
+        ++length;
+    char suffix[8] = "";
+    if (age >= 14 && age <= 60) snprintf(suffix, sizeof suffix, " (%u)", age);
+    unsigned room = rightEdge > (unsigned)row[3].x + 5 ? rightEdge - row[3].x - 5 : 0;
+    for (;;) {
+        while (length && player->playerName[length - 1] == ' ') --length;
+        snprintf(label, sizeof label, "%.*s%s", (int)length, player->playerName, suffix);
+        if (!length || transfer_text_width(label) <= room) break;
+        --length;
+    }
+    row[3].fg = (uintptr_t)label;
+}
 
 /* ================================================================
  * BuildTransferPlayerMenuEntry  (SWOS2.s line 70078)
@@ -2495,6 +2864,7 @@ void BuildTransferPlayerMenuEntry(void *itemPtr, uint8_t *player,
             a0->y = y;
             a0++;
         } while (--count >= 0);
+        s_rowTeam = 0xFFFF; s_rowSlot = 0xFF; s_rowIndex = -1;     /* (an empty row: no one's) */
         return;
     }
 
@@ -2545,17 +2915,7 @@ void BuildTransferPlayerMenuEntry(void *itemPtr, uint8_t *player,
         }
         uint16_t extractParam = 0x0D + maxNameLen;
         uint8_t *nameResult = ExtractSurname((uint8_t *)pf->playerName, extractParam);
-        if (s_ageListMode) {
-            /* Retain the complete extracted SWOS surname and append age.
-             * The display field has sufficient horizontal space. */
-            static char namesWithAge[64][48];
-            unsigned ix=((unsigned)y/4u)&63u;
-            snprintf(namesWithAge[ix],sizeof namesWithAge[ix],"%.22s (%u)",
-                     (const char *)nameResult,AgeListLookup(pf));
-            a0->fg=(uintptr_t)namesWithAge[ix];
-        } else {
-            a0->fg=(uintptr_t)nameResult;
-        }
+        a0->fg = (uintptr_t)nameResult;
         a0->y = y;
         a0->isInvisible = 0;
         a0++;
@@ -2576,13 +2936,13 @@ void BuildTransferPlayerMenuEntry(void *itemPtr, uint8_t *player,
     a0->y = y;
     a0++;
 
-    /* Entry 5: original position, no attached age or shifted coordinates. */
+    /* Entry 5: Position */
     {
-        uint16_t posIdx=(pf->positionAndFace & PF_POSITION_MASK)>>3;
-        a0->fg=(uintptr_t)_playerPositionsStringTable[posIdx/4];
+        uint16_t posIdx = (pf->positionAndFace & PF_POSITION_MASK) >> 3;
+        a0->fg = (uintptr_t)_playerPositionsStringTable[posIdx / 4];
     }
-    a0->y=y;
-    a0->isInvisible=0;
+    a0->y = y;
+    a0->isInvisible = 0;
     a0++;
 
     /* Entry 6: Top skills */
@@ -2591,7 +2951,7 @@ void BuildTransferPlayerMenuEntry(void *itemPtr, uint8_t *player,
     a0->isInvisible = 0;
     a0++;
 
-    /* Entry 7: an icon/sprite slot, not a text label. */
+    /* Entry 7: invisible padding */
     a0->isInvisible = 1;
     a0->y = y;
     a0++;
@@ -2649,6 +3009,9 @@ void BuildTransferPlayerMenuEntry(void *itemPtr, uint8_t *player,
         flags = (flags & 0xFFF0) | colorBits;
         a0->stringFlags = flags;
     }
+    ModHooks_PlayerRowDrawn(2 /* MODROWS_MARKET */, s_rowTeam, s_rowSlot, s_rowIndex,
+                            (int16_t)((MenuEntry *)itemPtr - _menuEntries), 12, pf);
+    s_rowTeam = 0xFFFF; s_rowSlot = 0xFF; s_rowIndex = -1;
 }
 
 /* ================================================================
@@ -2664,8 +3027,8 @@ __attribute__((used, externally_visible))
 void TransferMarketAfterDrawCommon(void *entryPtr)
 {
     MenuEntry *entry = (MenuEntry *)entryPtr;
-    /* Base entry is menuEntries[9] */
-    uint16_t d6 = entry->ordinal - _menuEntries[10].ordinal;
+    /* Base entry is menuEntries[9] (rows 6-10: entries 26-30) */
+    uint16_t d6 = tmRowOfEntry(entry);
     uint8_t *player;
 
     if (d6 >= _numPlayersOnTransferMarket) {
@@ -2684,20 +3047,24 @@ void TransferMarketAfterDrawCommon(void *entryPtr)
         d6++;   /* 1-based index for display */
 
         uint16_t yCoord = entry->y;
-        s_ageListTeam=_selTeamNumber; s_ageListSlot=playerOrd; s_ageListMode=1;
-        BuildTransferPlayerMenuEntry(&_menuEntries[20], player, yCoord,
-                                       (int16_t)d6, style, 0);
-        s_ageListMode=0;
+        TransferRow_Identity(_selTeamNumber, playerOrd, (int16_t)(d6 - 1));  /* (your transfer list) */
+        MenuEntry *row = &_menuEntries[14];
+        BuildTransferPlayerMenuEntry(row, player, yCoord, (int16_t)d6, style, 0);
+        const PlayerFile *record = (const PlayerFile *)(player + PF_OFF);
+        unsigned age = ModernRuntime_Enabled()
+            ? ModernRuntime_PlayerAge(ModernWorld_Active(), &_careerTeam, playerOrd)
+            : classic_transfer_age(_selTeamNumber, playerOrd, record);
+        transfer_player_name(row, record, age, row[5].x);
         /* Draw 12 entries starting from menuEntries[14] */
-        DrawMultipleItems(12, &_menuEntries[20]);
+        DrawMultipleItems(12, &_menuEntries[14]);
         return;
     }
 
     /* NULL player path */
     uint16_t yCoord = entry->y;
-    BuildTransferPlayerMenuEntry(&_menuEntries[20], player, yCoord,
+    BuildTransferPlayerMenuEntry(&_menuEntries[14], player, yCoord,
                                    (int16_t)d6, 0, 0);
-    DrawMultipleItems(12, &_menuEntries[20]);
+    DrawMultipleItems(12, &_menuEntries[14]);
 }
 
 /* =============================================================== */
@@ -2713,6 +3080,17 @@ extern uint8_t _aList[];
 extern uint16_t _playerMarketFilterPosition;
 extern uint16_t _playerMarketFilterRatingIndex;
 extern uint16_t _playerMarketFilterAgeGroup;
+/* 0: native market order, 1: highest transfer value, 2: lowest.
+ * Kept separate from the legacy skill filter so TYPE keeps working. */
+uint16_t _careerMarketValueSort = 0;
+struct __attribute__((packed)) {
+    void *indexPtr;
+    uint16_t base;
+    void *entries[3];
+} _careerMarketSortStrings = {
+    &_careerMarketValueSort, 0, { "ORIGINAL", "HIGH FIRST", "LOW FIRST" }
+};
+
 extern uint16_t _playerMarketFilterCountry;
 extern uint16_t _playerMarketTotalMatchCount;
 extern uint16_t _playerMarketVisibleItemCount;
@@ -2720,6 +3098,18 @@ extern uint16_t _playerMarketListScrollOffset;
 
 extern TeamFileEx *GetTeamPointer(uint16_t teamId);
 extern uint16_t GetAvgTeamValueBaseForCurrentPlayer(uint16_t teamNumber, uint16_t playerIndex);
+
+/* Keep wage and club finances on the existing balance model. Only the
+ * market valuation uses the modern curve's base accounting units. */
+static uint16_t marketPlayerValue(uint16_t team, uint16_t slot)
+{
+    if (ModernRuntime_Enabled()) {
+        const PlayerFile *player = (const PlayerFile *)(GetPlayer(team, slot) + sizeof(TeamFile));
+        return ModernPlayerTransferValueBase((uint8_t)player->price);
+    }
+    return GetAvgTeamValueBaseForCurrentPlayer(team, slot);
+}
+
 extern void ShowMenu(uint8_t *packedMenu);
 extern void DrawMenu(void);
 extern void SetCurrentEntry(uint16_t entryIndex);
@@ -2729,17 +3119,36 @@ extern uint8_t *GetPlayerInfoBreakPosition(uint8_t *teamPtr, uint16_t requestedS
 
 /* ShowPlayerOfferMenuForPlayer (Chunk 163)
  * d0 = teamNumber, d1 = playerOrdinal */
-__attribute__((used, externally_visible))
-void ShowPlayerOfferMenuForPlayer(uint16_t teamNumber, uint16_t playerOrdinal)
+static uint16_t classicListedAsking;
+
+static void showPlayerOffer(uint16_t teamNumber, uint16_t playerOrdinal, uint16_t classicAsking)
 {
     TeamFileEx *teamPtr = GetTeamPointer(teamNumber);
+    if(ModernRuntime_Enabled() && !modernNegotiatedBuy.active) {
+        ModernWorld *world=ModernWorld_Active();
+        ModernRoster *seller=world?ModernRuntime_Roster(world,
+                   teamPtr->team.countryNumber,teamPtr->team.teamOrdinal):NULL;
+        char pid[MODERN_ID_LEN]={0};
+        if(!seller || playerOrdinal>=16u)return;
+        if(!ModernRuntime_PlayerUUID(teamPtr,playerOrdinal,pid)) {
+            if(!ModernRuntime_Activate(world,teamPtr) ||
+               !ModernRuntime_PlayerUUID(teamPtr,playerOrdinal,pid))return;
+        }
+        if(!ModernBuy_BeginOffer(world,seller,teamPtr,pid,
+                                 playerOrdinal,0))return;
+    }
+    if(ModernRuntime_Enabled() &&
+       (!modernNegotiatedBuy.active || modernNegotiatedBuy.team!=teamPtr ||
+        modernNegotiatedBuy.offer_slot!=playerOrdinal))return;
     _offerOrdinals.teamOffering = PACK_BE_U16(teamPtr->team.countryNumber, teamPtr->team.teamOrdinal);
     _offerOrdinals.offerPrimaryPlayerOrdinal = playerOrdinal;
     _offerOrdinals.numExtraPlayersWanted = (int16_t)-1;
     _offerOrdinals.offerSwapPlayerOrdinal = (int16_t)-1;
     _offerOrdinals.offerExtraPlayerOrdinal = (int16_t)-1;
 
-    uint16_t avgValue = GetAvgTeamValueBaseForCurrentPlayer(_offerOrdinals.teamOffering, _offerOrdinals.offerPrimaryPlayerOrdinal);
+    uint16_t avgValue = classicAsking ? classicAsking : modernNegotiatedBuy.listed_asking;
+    if (!avgValue)
+        avgValue = marketPlayerValue(_offerOrdinals.teamOffering, _offerOrdinals.offerPrimaryPlayerOrdinal);
     uint32_t total = (uint32_t)avgValue * 1000;
     if ((int32_t)total <= _newBalance) {
         _offerOrdinals.offerAmount = avgValue;
@@ -2749,7 +3158,21 @@ void ShowPlayerOfferMenuForPlayer(uint16_t teamNumber, uint16_t playerOrdinal)
             bal = 0;
         _offerOrdinals.offerAmount = (uint16_t)((uint32_t)bal / 1000);
     }
+    uint16_t previousAsking = classicListedAsking;
+    classicListedAsking = classicAsking;
     ShowMenu(_playerOffersMenu);
+    classicListedAsking = previousAsking;
+    if (ModernRuntime_Enabled()) {
+        ModernBuy_ClearOffer();
+        if (!ModernRuntime_Suspend(ModernWorld_Active(), teamPtr))
+            fprintf(stderr, "[modern-rosters] Could not release transfer preview\n");
+    }
+}
+
+__attribute__((used, externally_visible))
+void ShowPlayerOfferMenuForPlayer(uint16_t teamNumber, uint16_t playerOrdinal)
+{
+    showPlayerOffer(teamNumber, playerOrdinal, 0);
 }
 
 /* ShowPlayerMarketInit (Chunk 163)
@@ -2769,10 +3192,13 @@ void ShowPlayerMarketInit(void)
     _playerMarketFilterPosition = 0xFFFF;
     _playerMarketFilterRatingIndex = 0xFFFF;
     _playerMarketFilterAgeGroup = 0xFFFF;
+    _careerMarketValueSort = 0;
     _playerMarketFilterCountry = 6;
     _playerMarketTotalMatchCount = 0;
     _playerMarketVisibleItemCount = 0;
     _playerMarketListScrollOffset = 0;
+    PlayerMarketBuildVisiblePlayerList();
+    PlayerMarketUpdateMoreListLabel();
     ShowPlayerMarket();   /* SWOS2.s `bra.w *+4` fall-through */
 }
 
@@ -2781,16 +3207,10 @@ void ShowPlayerMarketInit(void)
 __attribute__((used, externally_visible))
 void PlayerMarketUpdateFilterMenuEntryState(void)
 {
-    MenuEntry *entry = &_menuEntries[6]; /* 0x150/56 = 6 */
-    if (_playerMarketFilterPosition != 0) {
-        /* Active: bright blue, enabled */
-        entry->bgColor = (entry->bgColor & 0xFFF0) | 13; /* BRIGHT_BLUE_TO_BLUE_13 */
-        entry->isDisabled = 0;
-    } else {
-        /* Inactive: pink/brown, disabled */
-        entry->bgColor = (entry->bgColor & 0xFFF0) | 9; /* PINK_TO_BROWN_9 */
-        entry->isDisabled = 1;
-    }
+    /* Value ordering is valid even when TYPE is set to goalkeepers. */
+    MenuEntry *entry = &_menuEntries[6];
+    entry->bgColor = (entry->bgColor & 0xFFF0) | 13;
+    entry->isDisabled = 0;
 }
 
 /* ShowPlayerMarket (Chunk 163) */
@@ -2837,8 +3257,20 @@ void PlayerMarketFilterPositionOnSelect(MenuEntry *entry)
     playerMarketUpdateFiltersAndRedraw();
 }
 
-/* PlayerMarketFilterAgeGroupOnSelect (was loc_144F90)
- * Cycles the age group filter through 0→1→...→6→-1(all)→0→... */
+/* Cycle the market value order, preserving the TYPE filter. */
+__attribute__((used, externally_visible))
+void PlayerMarketValueSortOnSelect(MenuEntry *entry)
+{
+    (void)entry;
+    _careerMarketValueSort = (uint16_t)((_careerMarketValueSort + 1u) % 3u);
+    PlayerMarketResetListState();
+    playerMarketUpdateFiltersAndRedraw();
+}
+
+/* Compatibility for the original menu symbol registry.  The market now uses
+ * PlayerMarketValueSortOnSelect in its SORT control, but menu_symbols.c still
+ * exports the former SKILLS callback by name.  Keep the original callable
+ * entry point so linking older menu symbol registries remains possible. */
 __attribute__((used, externally_visible))
 void PlayerMarketFilterAgeGroupOnSelect(MenuEntry *entry)
 {
@@ -2886,12 +3318,31 @@ void PlayerMarketItemOnSelect(MenuEntry *entry)
     /* Compute relative index from entry ordinal vs base entry 10 */
     uint16_t relIdx = entry->ordinal - _menuEntries[10].ordinal;
 
-    /* Get the visible item pointer */
-    uint8_t *item = (uint8_t *)_playerMarketVisibleItems[relIdx];
-    uint16_t teamNum = PACK_BE_U16(item[0], item[1]);
-    int16_t playerOrd = (int8_t)item[2];
+    if (relIdx >= _playerMarketVisibleItemCount)
+        return;
 
-    ShowPlayerOfferMenuForPlayer(teamNum, (uint16_t)playerOrd);
+    if (modernMarketOpen) {
+        const ModernMarketListing *item = (const ModernMarketListing *)_playerMarketVisibleItems[relIdx];
+        char id[MODERN_ID_LEN];
+        memcpy(id, item->club->players[item->slot].id, sizeof id);
+        modernListedOffer = 1;
+        ModernSearch_Offer(item->team, id);
+        modernListedOffer = 0;
+    } else {
+        const uint8_t *item = (const uint8_t *)_playerMarketVisibleItems[relIdx];
+        uint16_t team = PACK_BE_U16(item[0], item[1]);
+        uint16_t slot = item[2];
+        uint8_t *player;
+        if (_showDomesticPlayerMarket) {
+            player = (uint8_t *)VerifyTeamLoaded(team) + slot * sizeof(PlayerFile);
+        } else {
+            PoolPlayer *listed = FindPoolplyrDatPlayer(team, slot);
+            if (!listed) return;
+            player = (uint8_t *)&listed->player - PF_OFF;
+        }
+        uint16_t asking = _avgTeamValueBases[GetDisplayedPlayerValue(player)];
+        showPlayerOffer(team, slot, asking);
+    }
 
     if (_transferCompleted) {
         SetExitMenuFlag();
@@ -2913,32 +3364,48 @@ void PlayerMarketItemBeforeDraw(MenuEntry *entry)
     uint16_t relIdx = entry->ordinal - _menuEntries[10].ordinal;
     uint8_t *player = 0;
     uint8_t *extra = 0;
+    static TeamFileEx projected;
+    char clubName[18];
+    unsigned age = 0;
+    const ModernRosterPlayer *listedPlayer = NULL;
 
     if (relIdx >= _playerMarketVisibleItemCount) {
         /* Beyond visible count — disable entry */
         entry->isDisabled = 1;
         player = 0;
+    } else if (modernMarketOpen) {
+        const ModernMarketListing *item = (const ModernMarketListing *)_playerMarketVisibleItems[relIdx];
+        projected.team = item->club->header;
+        listedPlayer = &item->club->players[item->slot];
+        projected.players[0] = listedPlayer->swos;
+        SWOS_CopyTeamName18(clubName, item->club->header.teamName);
+        player = (uint8_t *)&projected;
+        extra = (uint8_t *)clubName;
+        age = listedPlayer->age;
+        TransferRow_Identity(item->team, (uint16_t)item->slot, (int16_t)relIdx);
     } else {
         uint8_t *item = (uint8_t *)_playerMarketVisibleItems[relIdx];
+        TransferRow_Identity(PACK_BE_U16(item[0], item[1]), item[2], (int16_t)relIdx);   /* (a market's player) */
 
         if (_showDomesticPlayerMarket) {
             /* Domestic player */
             uint16_t teamNum = PACK_BE_U16(item[0], item[1]);
             TeamFileEx *teamData = VerifyTeamLoaded(teamNum);
-            static uint8_t marketClubNames[64][18];
-            unsigned nameSlot = relIdx < 64 ? relIdx : 63;
-            SWOS_TM_CopyClubName(marketClubNames[nameSlot], teamData->team.teamName);
-            extra = marketClubNames[nameSlot];
+            SWOS_CopyTeamName18(clubName, teamData->team.teamName);
+            extra = (uint8_t *)clubName;
             uint8_t ordinal = item[2];
             player = (uint8_t *)teamData + (uint16_t)ordinal * 0x26;
+            age = classic_transfer_age(teamNum, ordinal, &teamData->players[ordinal]);
         } else {
             /* Foreign player */
             uint16_t teamNum = PACK_BE_U16(item[0], item[1]);
             uint8_t playerOrd = item[2];
             PoolPlayer *pp = FindPoolplyrDatPlayer(teamNum, playerOrd);
             if (pp) {
-                extra = (uint8_t *)pp + 3; /* name area */
+                SWOS_CopyTeamName18(clubName, (uint8_t *)pp + 3);
+                extra = (uint8_t *)clubName;
                 player = (uint8_t *)pp - 0x38;
+                age = classic_transfer_age(teamNum, 0xFFFF, (const PlayerFile *)(player + PF_OFF));
             } else {
                 /* Stale market entry — pool entry no longer exists
                  * (legacy bad-saved data). Disable this row rather
@@ -2953,16 +3420,37 @@ void PlayerMarketItemBeforeDraw(MenuEntry *entry)
     uint16_t idx = relIdx + 1 + _playerMarketListScrollOffset;
     uint16_t yCoord = entry->y;
 
-    s_ageListMode=1;
-    if(relIdx < _playerMarketVisibleItemCount) {
-        uint8_t *rec=(uint8_t *)_playerMarketVisibleItems[relIdx];
-        s_ageListTeam=PACK_BE_U16(rec[0],rec[1]);
-        s_ageListSlot=rec[2];
+    MenuEntry *row = &_menuEntries[20];
+    if (extra) {
+        /* Leave room for the name with age and keep the club parentheses. */
+        size_t length = strlen(clubName);
+        unsigned parentheses = transfer_text_width("()");
+        while (length && (length > 13 ||
+               transfer_text_width(clubName) + parentheses > 76))
+            clubName[--length] = 0;
     }
-    BuildTransferPlayerMenuEntry(&_menuEntries[20], player, yCoord,
-                                   (int16_t)idx, 0, extra);
-    s_ageListMode=0;
-    DrawMultipleItems(12, &_menuEntries[20]);
+    BuildTransferPlayerMenuEntry(row, player, yCoord, (int16_t)idx, 0, extra);
+    if (player && !row[3].isInvisible) {
+        row[4].x = 215;
+        row[5].x = 220;
+        row[6].x = 237;
+        row[6].dwWidth = 20;
+        row[10].x = 257;
+        row[10].dwWidth = 25;
+        row[11].x = 283;
+        row[11].dwWidth = 45;
+        unsigned clubWidth = extra ? transfer_text_width((const char *)row[4].fg) : 0;
+        transfer_player_name(row, (const PlayerFile *)(player + PF_OFF), age,
+                             row[4].x - clubWidth);
+    }
+    if (listedPlayer) {
+        _fundsBuffer[0] = 0x9C;
+        FormatCompactMoney(ModernPlayerTransferValueBase((uint8_t)listedPlayer->swos.price) *
+                           CareerMoneyScale(), _fundsBuffer + 1);
+        row[11].fg = (uintptr_t)_fundsBuffer;
+        row[11].stringFlags = (row[11].stringFlags & 0xFFF0u) | 2u;
+    }
+    DrawMultipleItems(12, row);
 }
 
 /* PlayerMarketUpdateMoreListLabel (Chunk 163)
@@ -2983,11 +3471,10 @@ void PlayerMarketUpdateMoreListLabel(void)
 __attribute__((used, externally_visible))
 void PlayerMarketResetListState(void)
 {
-    if (_playerMarketTotalMatchCount == 0)
-        return;
-    _playerMarketTotalMatchCount = 0;
-    _playerMarketVisibleItemCount = 0;
+    /* Both markets, including modern domestic, must immediately rebuild
+     * their filtered and sorted view before the next click. */
     _playerMarketListScrollOffset = 0;
+    PlayerMarketBuildVisiblePlayerList();
     PlayerMarketUpdateMoreListLabel();
     DrawMenu();
 }
@@ -2998,43 +3485,119 @@ __attribute__((used, externally_visible))
 void BuyOtherPlayersCommon(void *entryPtr)
 {
     MenuEntry *a5 = (MenuEntry *)entryPtr;
-    MenuEntry *entry3 = &_menuEntries[3]; /* 0xA8/56 = 3 */
-    uint16_t relIdx = a5->ordinal - entry3->ordinal;
+    MenuEntry *entry3 = &_menuEntries[3];
+    size_t row=(size_t)(a5->ordinal-entry3->ordinal);
+    size_t realIndex;
+    uint16_t outSlot,outPlayerIndex;
 
-    uint16_t outSlot, outPlayerIndex;
-    GetPlayerInfoBreakPosition((uint8_t *)_buyOtherPlayersTeamPtr, relIdx, &outSlot, &outPlayerIndex);
-
-    ShowPlayerOfferMenuForPlayer(_offerOrdinals.teamOffering, outPlayerIndex);
-
-    if (_transferCompleted) {
-        SetExitMenuFlag();
+    if(ModernBuy_IsContinuation(modernBuyTotal,row)) {
+        modernBuyPage=(modernBuyPage+1u)%ModernBuy_PageCount(modernBuyTotal);
+        BuyOtherPlayersFinish();
+        SetCurrentEntry(3);
+        DrawMenu();
         return;
     }
+    if(!ModernBuy_PlayerIndex(modernBuyTotal,modernBuyPage,row,&realIndex))return;
+    if (ModernRuntime_Enabled() && modernBuyRoster)
+        realIndex = ModernBuy_RosterIndex(realIndex);
+    /* Keep the original SWOS offer negotiation, including rejection,
+     * counter-offers and cancellation. Only the eventual ACCEPT event uses
+     * a permanent-ID transfer. This is NOT a fixed-price click-to-buy. */
+    if(ModernRuntime_Enabled()) {
+        if (!modernBuyRoster || realIndex >= modernBuyRoster->count) return;
+        char player_id[MODERN_ID_LEN];
+        memcpy(player_id, modernBuyRoster->players[realIndex].id, sizeof player_id);
+        ModernSearch_Offer(_offerOrdinals.teamOffering, player_id);
+        /* The offer menu restores the reserve preview before returning. */
+        if(_transferCompleted) {SetExitMenuFlag();return;}
+        SetCurrentEntry(2);
+        DrawMenu();
+        return;
+    }
+    GetPlayerInfoBreakPosition((uint8_t *)_buyOtherPlayersTeamPtr,
+                               (uint16_t)realIndex,&outSlot,&outPlayerIndex);
+    ShowPlayerOfferMenuForPlayer(_offerOrdinals.teamOffering,outPlayerIndex);
+    if(_transferCompleted) {SetExitMenuFlag();return;}
     SetCurrentEntry(2);
     DrawMenu();
 }
 
-/* BuyOtherPlayersAfterDrawCommon (Chunk 163)
- * a5 = current menu entry (register bridge) */
-__attribute__((used, externally_visible))
+void ModernSearch_Offer(uint16_t team_number, const char *player_id)
+{
+    _transferCompleted = 0;
+    if (!ModernRuntime_Enabled() || team_number == _selTeamNumber) return;
+    ModernWorld *world = ModernWorld_Active();
+    ModernRoster *seller = ModernRuntime_Roster(world, team_number >> 8, team_number & 255);
+    if (!seller) return;
+    TeamFileEx *team = GetTeamPointer(team_number);
+    if (!ModernRuntime_Activate(world, team)) return;
+    uint16_t slot;
+    for (slot = 0; slot < MODERN_MATCH_PLAYERS; ++slot) {
+        char visible_id[MODERN_ID_LEN];
+        if (ModernRuntime_PlayerUUID(team, slot, visible_id) && !strcmp(visible_id, player_id))
+            break;
+    }
+    int preview = slot == MODERN_MATCH_PLAYERS;
+    if (preview) slot = MODERN_MATCH_PLAYERS - 1;
+    if (ModernBuy_BeginOffer(world, seller, team, player_id, slot, preview))
+        ShowPlayerOfferMenuForPlayer(team_number, slot);
+    else
+        ModernRuntime_Suspend(world, team);
+}
+
 void BuyOtherPlayersAfterDrawCommon(void *entryPtr)
 {
-    MenuEntry *a5 = (MenuEntry *)entryPtr;
-    MenuEntry *entry3 = &_menuEntries[3]; /* 0xA8/56 = 3 */
-    uint16_t d6 = a5->ordinal - entry3->ordinal;
-    uint16_t d1 = d6;
-    d6++;
+    MenuEntry *a5=(MenuEntry *)entryPtr;
+    MenuEntry *entry3=&_menuEntries[3];
+    size_t row=(size_t)(a5->ordinal-entry3->ordinal);
+    size_t realIndex, displayIndex;
+    uint16_t outSlot,outPlayerIndex;
+    uint8_t *player;
+    uint16_t yCoord=a5->y;
 
-    uint16_t outSlot, outPlayerIndex;
-    uint8_t *player = GetPlayerInfoBreakPosition((uint8_t *)_buyOtherPlayersTeamPtr,
-                                                    d1, &outSlot, &outPlayerIndex);
-
-    uint16_t yCoord = a5->y;
-    s_ageListMode=2; s_ageListTeam=_offerOrdinals.teamOffering; s_ageListSlot=outPlayerIndex;
-    BuildTransferPlayerMenuEntry(&_menuEntries[19], player, yCoord,
-                                   (int16_t)d6, 0, 0);
-    s_ageListMode=0;
-    DrawMultipleItems(12, &_menuEntries[19]);
+    if(ModernBuy_IsContinuation(modernBuyTotal,row)) {
+        /* Draw one regular SWOS text item, keeping the menu row and its
+         * existing mouse/keyboard navigation. No new screen or popup. */
+        size_t i;
+        for(i=0;i<12u;i++) {
+            _menuEntries[19+i].y=yCoord;
+            _menuEntries[19+i].isInvisible=1;
+        }
+        _menuEntries[19].isInvisible=0;
+        _menuEntries[22].isInvisible=0;
+        _menuEntries[22].fg=(uintptr_t)modernBuyNext;
+        DrawMultipleItems(12,&_menuEntries[19]);
+        return;
+    }
+    if(!ModernBuy_PlayerIndex(modernBuyTotal,modernBuyPage,row,&realIndex)) {
+        BuildTransferPlayerMenuEntry(&_menuEntries[19],NULL,yCoord,0,0,0);
+        DrawMultipleItems(12,&_menuEntries[19]);
+        return;
+    }
+    displayIndex = realIndex;
+    if(ModernRuntime_Enabled() && modernBuyRoster) {
+        realIndex = ModernBuy_RosterIndex(realIndex);
+        /* Draw the exact UUID record that will be offered for purchase.
+         * The previous first-16 branch displayed match-order players while
+         * the extended branch displayed roster-order players, causing
+         * duplicate names and potential wrong-player transfers. */
+        if(realIndex>=modernBuyRoster->count)return;
+        memset(modernBuyDisplay,0,sizeof modernBuyDisplay);
+        memcpy(modernBuyDisplay+sizeof(TeamFile),
+               &modernBuyRoster->players[realIndex].swos,sizeof(PlayerFile));
+        player=modernBuyDisplay;
+    } else if(realIndex<16u) {
+        player=GetPlayerInfoBreakPosition((uint8_t *)_buyOtherPlayersTeamPtr,
+                                         (uint16_t)realIndex,&outSlot,&outPlayerIndex);
+    } else return;
+    MenuEntry *entries = &_menuEntries[19];
+    BuildTransferPlayerMenuEntry(entries, player, yCoord, (int16_t)(displayIndex + 1), 0, 0);
+    const PlayerFile *record = (const PlayerFile *)(player + PF_OFF);
+    unsigned age = ModernRuntime_Enabled() && modernBuyRoster
+        ? modernBuyRoster->players[realIndex].age
+        : classic_transfer_age(_offerOrdinals.teamOffering, outPlayerIndex, record);
+    transfer_player_name(entries, record, age, entries[5].x);
+    DrawMultipleItems(12, entries);
 }
 
 /* =============================================================== */
@@ -3086,7 +3649,6 @@ void OffersInit(void)
 /* =============================================================== */
 
 extern uint16_t _offerStatus;
-extern uint16_t _timeToNegotiate;
 extern uint16_t _lastOfferPrimaryPlayerOrdinal;
 extern uint16_t _lastOfferExtraPlayersWanted;
 extern uint16_t _lastOfferSwapPlayerOrdinal;
@@ -3136,6 +3698,8 @@ static void offerAfterDrawCommonShared(MenuEntry *a5,
 
     uint16_t yCoord = a5->y;
     MenuEntry *targetEntry = &_menuEntries[targetEntryIdx];
+    if (playerOrd >= 0)
+        TransferRow_Identity(teamId, (uint16_t)playerOrd, -1);    /* (an offer's player) */
     BuildTransferPlayerMenuEntry(targetEntry, playerData, yCoord,
                                    (int16_t)0xFFFF, 0xD, (uint8_t *)0);
     DrawMultipleItems(12, targetEntry);
@@ -3222,9 +3786,19 @@ restart:;
         return;
     }
     if (result == 1) {
-        /* Accept */
+        /* The native Modernised path updates the UUID roster and finances
+         * together. An unsupported offer cannot be marked complete. */
         Career_AcceptOffer_SellPlayer();
-        _timeToNegotiate--;
+        if (ModernRuntime_Enabled() && !modernSellOfferCommitted) {
+            const char *const buttons[] = {"CONTINUE"};
+            const char *message = (_offerOrdinals.offerSwapPlayerOrdinal >= 0 ||
+                                   _offerOrdinals.offerExtraPlayerOrdinal >= 0 ||
+                                   _offerOrdinals.numExtraPlayersWanted >= 0)
+                ? "THIS OFFER INCLUDES A PLAYER SWAP.|NEW OFFERS ARE CASH ONLY."
+                : "SALE COULD NOT BE COMPLETED.|CHECK THAT THE OFFER IS STILL VALID.";
+            MenuDialog_Show("TRANSFER OFFER", message, buttons, 1, 0);
+            return;
+        }
         _transferCompleted = 1;
         SetExitMenuFlag();
         return;
@@ -3419,7 +3993,6 @@ void PlayerOffersOnSelect12(void)
         (uint16_t)_offerOrdinals.offerExtraPlayerOrdinal != _lastOfferExtraPlayerOrdinal) {
 
         _offerNegotiationAttemptCount = 0;
-        _timeToNegotiate--;
         _lastOfferPrimaryPlayerOrdinal = _offerOrdinals.offerPrimaryPlayerOrdinal;
         _lastOfferExtraPlayersWanted = (uint16_t)_offerOrdinals.numExtraPlayersWanted;
         _lastOfferSwapPlayerOrdinal = (uint16_t)_offerOrdinals.offerSwapPlayerOrdinal;
@@ -3434,8 +4007,16 @@ void PlayerOffersOnSelect12(void)
         return;
     }
     if (result > 0) {
-        /* Accepted: finalize the purchase */
+        /* SWOS has agreed the price. Now commit the UUID transaction; an
+         * unsuccessful commit must never be reported as a completed deal. */
         Career_AcceptOffer_BuyPlayer();
+        if(ModernRuntime_Enabled() && !modernNegotiatedBuy.committed) {
+            const char *const buttons[] = {"CONTINUE"};
+            MenuDialog_Show("TRANSFER OFFER", "THE DEAL COULD NOT BE COMPLETED.|CHECK THE PLAYERS, SQUAD SPACE AND CASH.",
+                            buttons, 1, 0);
+            SetExitMenuFlag();
+            return;
+        }
         _transferCompleted = 1;
     }
     /* result == 0 or > 0: exit menu */
@@ -3450,7 +4031,9 @@ void PlayerOffersAdjustOfferAmount(void)
     int32_t bal = _newBalance;
     if (bal < 0)
         bal = 0;
-    uint16_t maxAmount = (uint16_t)((uint32_t)bal / 1000u);
+    uint32_t funds = (uint32_t)bal / 1000u;
+    uint16_t maxAmount = ModernRuntime_Enabled() && funds > 50000u ?
+        50000u : (uint16_t)funds;
 
     /* Determine direction from controlMask */
     if (_controlMask == 0x81 || _controlMask == 0x101) {
@@ -3565,13 +4148,12 @@ void TransferPlayerInit(void *entryPtr)
     void **strPair = _sellExchangeStrings;
     if (_teamWillingToSellOrExchange != 0)
         strPair += 2;
-    if (_offerOrdinals.offerSwapPlayerOrdinal >= 0)
+    if (_offerOrdinals.offerSwapPlayerOrdinal >= 0 || _offerOrdinals.offerExtraPlayerOrdinal >= 0)
         strPair += 1;
 
     /* Get offering team name and format into entry 2 */
     TeamFileEx *teamPtr = GetTeamPointer(_offerOrdinals.teamOffering);
-    uint8_t teamName[18];
-    SWOS_TM_CopyClubName(teamName, teamPtr->team.teamName);
+    uint8_t *teamName = (uint8_t *)teamPtr->team.teamName;
     PrintFormatted((const uint8_t *)*strPair,
                     (uint8_t *)_menuEntries[2].fg,
                     0, 0, 0, 0, 0, 0, 0,
@@ -3579,7 +4161,7 @@ void TransferPlayerInit(void *entryPtr)
 
     /* Get our team name and format "IN A DEAL WITH %a FOR" into entry 3 */
     teamPtr = GetTeamPointer(_selTeamNumber);
-    SWOS_TM_CopyClubName(teamName, teamPtr->team.teamName);
+    teamName = (uint8_t *)teamPtr->team.teamName;
     PrintFormatted(_aInADealWithAFo, (uint8_t *)_menuEntries[3].fg,
                     0, 0, 0, 0, 0, 0, 0,
                     teamName, 0, 0);
@@ -3655,8 +4237,7 @@ void ThirdPartyOfferMenuInit(void *entryPtr)
 
     /* Get offering team name */
     TeamFileEx *teamPtr = GetTeamPointer(_offerOrdinals.teamOffering);
-    uint8_t teamName[18];
-    SWOS_TM_CopyClubName(teamName, teamPtr->team.teamName);
+    uint8_t *teamName = (uint8_t *)teamPtr->team.teamName;
 
     if (_offerStatus == 0) {
         /* "WE HERE AT %a WISH TO BUY" into entry 2 */
@@ -3699,7 +4280,7 @@ void ThirdPartyOfferMenuInit(void *entryPtr)
 
     /* "FROM %a IN EXCHANGE FOR" into entry 4 */
     teamPtr = GetTeamPointer(_selTeamNumber);
-    SWOS_TM_CopyClubName(teamName, teamPtr->team.teamName);
+    teamName = (uint8_t *)teamPtr->team.teamName;
     PrintFormatted(_aFromAInExchang, (uint8_t *)_menuEntries[4].fg,
                     0, 0, 0, 0, 0, 0, 0,
                     teamName, 0, 0);
@@ -3924,8 +4505,7 @@ void OffersAfterDrawCommon(void *entryPtr)
 
     /* Get team name pointer (offset 5 from team data = teamName field) */
     TeamFileEx *teamPtr = GetTeamPointer(offer->teamOffering);
-    uint8_t teamName[18];
-    SWOS_TM_CopyClubName(teamName, teamPtr->team.teamName);
+    uint8_t *teamName = (uint8_t *)teamPtr->team.teamName;
 
     /* Determine format string and player names based on offer type */
     uint8_t *fmtStr;
@@ -4040,6 +4620,8 @@ extern void Career_RemovePlayerFromTeamInternal(uint16_t teamNumber, uint16_t pl
 extern void AddCareerPoolPlayer(uint16_t teamNumber, uint16_t playerOrdinal, PlayerFile *playerFile);
 extern void Career_RemovePlayerFromSelectedTeamRoster(uint16_t playerIndex);
 extern void SetBenchPlayersNumbers(TeamFileEx *team);
+extern int32_t SquadNumbers_On(void);           /* (real squad numbers: teams.c) */
+extern void SquadNumbers_Free(uint16_t slot);
 extern void TrainingMatch_SaveSelectedPlayerId(uint16_t value);
 extern void Career_UpdatePlayerWeeklyWageCache(uint16_t playerIndex);
 extern int16_t SearchTeamInTmdFile(uint16_t teamNumber);
@@ -4063,77 +4645,53 @@ extern void PanicHaltLoop(void);
 __attribute__((used, externally_visible, optimize("no-tree-loop-distribute-patterns")))
 void Career_BuildForeignMarketPoolFromSelectedTeam(void)
 {
-    int16_t i;
+    uint8_t *src, *dst;
+    int16_t i, j;
 
-    /* The human squad can contain as many as 32 physical players, even
-     * though a regular AI club's team file has only 16.  In particular,
-     * transfers can place new starters in physical slots 16..31.
-     *
-     * Earlier departure patches copied only the first 684 bytes and rejected
-     * any currentMatchPlayers[] index >= 16.  When a new signing occupied an
-     * extended slot, that silently kept the old physical player instead.
-     *
-     * Snapshot the 16 DISPLAYED players (starting XI + first five reserves)
-     * first, including extended slots.  Do not sort or pick replacements:
-     * the exact order visible to the manager must be the AI club's order.
-     * Write them to the 16 persistent physical slots addressed by the
-     * original team playerNumbers permutation, which is also the mapping
-     * used when the ordinary club database is reloaded later.
-     */
-    {
-        PlayerFile ordered[16];
-        uint8_t stableSlots[16];
-        uint8_t seenSources[32] = {0};
-        uint8_t seenDestinations[16] = {0};
-        bool valid = (_careerNumPlayers >= 16 && _careerNumPlayers <= 32);
+    /* Copy careerTeam (0x2AC bytes) to tempTeamBuffer */
+    src = (uint8_t *)&_careerTeam;
+    dst = _tempTeamBuffer;
+    for (i = 0x2AB; i >= 0; i--)
+        *dst++ = *src++;
 
-        for (i = 0; valid && i < 16; ++i) {
-            uint8_t sourceIndex = _currentMatchPlayers[i];
-            uint8_t destinationIndex = _careerTeam.team.playerNumbers[i];
-            if (sourceIndex >= 32 || destinationIndex >= 16 ||
-                seenSources[sourceIndex] || seenDestinations[destinationIndex]) {
-                valid = false;
-                break;
-            }
-            seenSources[sourceIndex] = 1;
-            seenDestinations[destinationIndex] = 1;
-            const PlayerFile *sourcePlayer = (const PlayerFile *)(
-                (const uint8_t *)&_careerTeam + PF_OFF +
-                (size_t)sourceIndex * sizeof(PlayerFile));
-            ordered[i] = *sourcePlayer;
-            stableSlots[i] = destinationIndex;
-        }
+    /* Rearrange players: for each ordinal 0-15, get the player data from
+       selTeamPlayerIndices[ordinal] and copy 0x26 bytes of player data */
+    uint8_t *indices = _selTeamPlayerIndices;
+    for (i = 0; i < 16; i++) {
+        uint8_t *playerSrc = GetPlayerAtIndex(_selTeamNumber, (uint16_t)i);
+        playerSrc += PF_OFF;  /* point to actual PlayerFile data */
 
-        if (valid) {
-            for (i = 0; i < 16; ++i) {
-                PlayerFile *destinationPlayer = (PlayerFile *)(
-                    (uint8_t *)&_careerTeam + PF_OFF +
-                    (size_t)stableSlots[i] * sizeof(PlayerFile));
-                *destinationPlayer = ordered[i];
-                _currentMatchPlayers[i] = stableSlots[i];
-            }
-            /* Keep the last manager-selected tactic.  Player order is already
-             * preserved above; forcing 4-4-2 here would mismatch tactics
-             * such as 4-3-3 with the departing club's saved XI. */
-        }
-        /* Invalid index maps: do not perform any destructive reorder. */
+        uint8_t idx = *indices++;
+        uint16_t off = (uint16_t)((int8_t)idx) * 0x26;  /* ext.w d0; mulu.w #$26,d0 */
+        uint8_t *playerDst = _tempTeamBuffer + PF_OFF + off;
+
+        for (j = 0x25; j >= 0; j--)
+            *playerDst++ = *playerSrc++;
     }
 
-    _careerNumPlayers = 16;
-    _careerTeam.team.playerValuesDirty = TEAM_VALUES_DIRTY;
+    /* Copy tempTeamBuffer back to careerTeam */
+    src = _tempTeamBuffer;
+    dst = (uint8_t *)&_careerTeam;
+    for (i = 0x2AB; i >= 0; i--)
+        *dst++ = *src++;
 
-    /* Persist PHYSICAL slots only.  AddCareerPoolPlayer expects a pointer
-     * 76 bytes before the player record (the team's virtual base), and
-     * adds PF_OFF internally.  Avoid GetPlayer(), whose selection may
-     * depend on _currentTeamNumber during a job transition. */
-    for (i = 0; i < 16; ++i) {
-        uint8_t *base = (uint8_t *)&_careerTeam + (size_t)i * 0x26;
-        PlayerFile *pf = (PlayerFile *)(base + PF_OFF);
-        pf->positionAndFace &= ~PF_LOAN;
+    /* Copy selTeamPlayerIndices to currentMatchPlayers */
+    src = _selTeamPlayerIndices;
+    dst = _currentMatchPlayers;
+    for (i = 0xF; i >= 0; i--)
+        *dst++ = *src++;
+
+    _careerNumPlayers = 16;
+
+    /* Clear flags on all 16 players and add to career pool */
+    for (i = 15; i >= 0; i--) {
+        uint8_t *p = GetPlayerAtIndex(_selTeamNumber, (uint16_t)i);
+        PlayerFile *pf = (PlayerFile *)(p + PF_OFF);
+        pf->positionAndFace &= ~PF_LOAN;  /* bclr #1 */
         pf->cardsInjuries = 0;
-        pf->positionAndFace &= ~PF_INFORM;
+        pf->positionAndFace &= ~PF_INFORM;  /* bclr #0 */
         pf->form = 0;
-        AddCareerPoolPlayer(_selTeamNumber, (uint16_t)i, (PlayerFile *)base);
+        AddCareerPoolPlayer(_selTeamNumber, (uint16_t)i, (PlayerFile *)p);
     }
 
     /* If team found in TMD file, remove and re-add with updated data */
@@ -4157,8 +4715,6 @@ void Career_TransferPlayerAndAddReplacedToMarketPool(uint16_t sourceTeam, uint16
 {
     uint16_t savedOrd = playerOrd;
     uint16_t d6 = sourceTeam;
-    swos_age_log("TRANSFER_ENTRY", "source_team=%04X selected_team=%04X ordinal=%u",
-                 (unsigned)sourceTeam, (unsigned)_selTeamNumber, (unsigned)playerOrd);
 
     /* Remove player from selected team's internal roster */
     Career_RemovePlayerFromTeamInternal(_selTeamNumber, playerOrd);
@@ -4232,14 +4788,14 @@ void Career_TransferPlayerAndAddReplacedToMarketPool(uint16_t sourceTeam, uint16
             d += 2;
         }
 
-        /* The sold player's 38-byte record now occupies the source club's
-         * replacement slot. Preserve an attached generated identity. */
-        if (!SWOS_GeneratedIdentityMove((unsigned)_selTeamNumber,(unsigned)playerOrd,
-                                        (unsigned)d6,(unsigned)bestOrdinal))
-            SWOS_ManualIdentityCopy((unsigned)_selTeamNumber,(unsigned)playerOrd,
-                                    (unsigned)d6,(unsigned)bestOrdinal);
-
-
+#ifdef SWOS_SDL_BUILD
+        if (!ModernRuntime_Enabled()) {
+            extern unsigned SWOS_GeneratedIdentityMove(unsigned, unsigned, unsigned, unsigned);
+            extern unsigned SWOS_ManualIdentityCopy(unsigned, unsigned, unsigned, unsigned);
+            if (!SWOS_GeneratedIdentityMove(_selTeamNumber, playerOrd, d6, bestOrdinal))
+                SWOS_ManualIdentityCopy(_selTeamNumber, playerOrd, d6, bestOrdinal);
+        }
+#endif
         /* Restore shirt numbers */
         transferredPf->shirtNumber = (int8_t)srcShirt;
         bestReplacePf->shirtNumber = (int8_t)dstShirt;
@@ -4258,11 +4814,180 @@ void Career_TransferPlayerAndAddReplacedToMarketPool(uint16_t sourceTeam, uint16
         Career_RemovePlayerFromTeamInternal(d6, bestOrdinal);
         AddCareerPoolPlayer(d6, bestOrdinal, (PlayerFile *)bestPlayer);
         _offerSwapSlotsUsed++;
+        /* (sold: your player is now the buyer's, in the slot of the one he replaced) */
+        ModHooks_PlayerMoved(_selTeamNumber, (uint8_t)savedOrd, d6, (uint8_t)bestOrdinal);
 
         /* Remove from selected team roster */
         Career_RemovePlayerFromSelectedTeamRoster(savedOrd);
         return;
     }
+}
+
+/* Legacy offers and listings refer to physical player slots. Rebind them
+ * after the expanded squad is projected again. */
+static void remap_modern_roster_slots(const char previous[32][MODERN_ID_LEN])
+{
+    int8_t slots[32];
+    memset(slots, -1, sizeof slots);
+    for (uint16_t slot = 0; slot < _careerNumPlayers && slot < 32; ++slot) {
+        char id[MODERN_ID_LEN];
+        if (!ModernRuntime_PlayerUUID(&_careerTeam, slot, id)) continue;
+        for (size_t old = 0; old < 32; ++old) {
+            if (!strcmp(previous[old], id)) {
+                slots[old] = (int8_t)slot;
+                break;
+            }
+        }
+    }
+    extern uint8_t _playerFormModifiers[32];
+    uint8_t previous_form[32];
+    memcpy(previous_form, _playerFormModifiers, sizeof previous_form);
+    memset(_playerFormModifiers, 0, sizeof previous_form);
+    for (size_t old = 0; old < 32; ++old)
+        if (slots[old] >= 0) _playerFormModifiers[slots[old]] = previous_form[old];
+
+    uint16_t kept = 0;
+    for (uint16_t i = 0; i < _numPlayersOnTransferMarket; ++i) {
+        uint16_t old = _playersOnTransferMarket[i];
+        if (old < 32 && slots[old] >= 0)
+            _playersOnTransferMarket[kept++] = (uint16_t)slots[old];
+    }
+    memset(_playersOnTransferMarket + kept, 0,
+           (CAREER_MAX_TRANSFER_LIST - kept) * sizeof _playersOnTransferMarket[0]);
+    _numPlayersOnTransferMarket = kept;
+    for (uint16_t i = _numOffers; i > 0; --i) {
+        TransferOfferEntry *offer = &((TransferOfferEntry *)_transferOfferTable)[i - 1];
+        uint8_t primary = (uint8_t)offer->primaryPlayerOrdinal;
+        int second = offer->secondPlayerOrdinal;
+        if (primary >= 32 || slots[primary] < 0 ||
+            (second >= 0 && (second >= 32 || slots[second] < 0))) {
+            RemoveTransferOfferAtIndex(i - 1);
+        } else {
+            offer->primaryPlayerOrdinal = slots[primary];
+            if (second >= 0) offer->secondPlayerOrdinal = slots[second];
+        }
+    }
+    uint16_t old_selected = _selTeamSelectedPlayerPosition;
+    _selTeamSelectedPlayerPosition = old_selected < 32 && slots[old_selected] >= 0
+        ? (uint16_t)slots[old_selected] : UINT16_MAX;
+}
+
+/* A roster transaction may replace records, but selection belongs to the manager. */
+static int rebind_modern_roster(ModernWorld *world,
+                               const char previous[32][MODERN_ID_LEN],
+                               const uint8_t order[32], size_t count)
+{
+    if (!ModernRuntime_RebindCareerSquad(world, &_careerTeam, previous, order, count) &&
+        !ModernRuntime_ExpandCareerSquad(world, &_careerTeam)) return 0;
+    remap_modern_roster_slots(previous);
+    return 1;
+}
+
+/* Evaluate the live records before releasing loans: the roster copy may
+ * still have last match's injury or suspension flags. */
+static void release_modern_match_loans(ModernWorld *world, ModernRoster *roster,
+                                      int16_t availability,
+                                      unsigned required_keepers, unsigned required_field)
+{
+    char previous[32][MODERN_ID_LEN] = {{0}};
+    uint8_t order[32], remove[32] = {0};
+    size_t count = _careerNumPlayers;
+    if (count <= MODERN_MATCH_PLAYERS || count > 32 || roster->count != count)
+        return;
+
+    unsigned available[2] = {0};
+    unsigned required[2] = {required_keepers, required_field};
+    for (size_t slot = 0; slot < count; ++slot) {
+        if (!ModernRuntime_PlayerUUID(&_careerTeam, slot, previous[slot]))
+            return;
+        const PlayerFile *player = (const PlayerFile *)((const uint8_t *)&_careerTeam +
+            PF_OFF + slot * sizeof(PlayerFile));
+        if (!Career_PlayerUnavailable(player, availability))
+            ++available[!!(player->positionAndFace & PF_POSITION_MASK)];
+    }
+
+    size_t remaining = count;
+    /* Prefer returning reserve loans before touching the selected XI. */
+    for (size_t row = count; row > 0 && remaining > MODERN_MATCH_PLAYERS; --row) {
+        unsigned slot = _currentMatchPlayers[row - 1];
+        if (slot >= count)
+            return;
+        const PlayerFile *player = (const PlayerFile *)((const uint8_t *)&_careerTeam +
+            PF_OFF + slot * sizeof(PlayerFile));
+        if (!(player->positionAndFace & PF_LOAN) || strncmp(previous[slot], "53574c4e-", 9))
+            continue;
+        unsigned role = !!(player->positionAndFace & PF_POSITION_MASK);
+        int fit = !Career_PlayerUnavailable(player, availability);
+        if (available[role] < required[role] + (unsigned)fit)
+            continue;
+        available[role] -= (unsigned)fit;
+        remove[slot] = 1;
+        --remaining;
+    }
+    if (remaining == count || !ModernRuntime_Suspend(world, &_careerTeam))
+        return;
+
+    memcpy(order, _currentMatchPlayers, sizeof order);
+    extern uint16_t _removedPlayerStatAccum, _wageScalingDivisor;
+    for (size_t slot = 0; slot < count; ++slot) {
+        if (!remove[slot])
+            continue;
+        const PlayerFile *player = (const PlayerFile *)((const uint8_t *)&_careerTeam +
+            PF_OFF + slot * sizeof(PlayerFile));
+        if (ModernRoster_Remove(roster, previous[slot]))
+            for (size_t stat = 0; stat < sizeof player->goalStats; ++stat)
+                _removedPlayerStatAccum += player->goalStats[stat];
+    }
+    if (rebind_modern_roster(world, previous, order, count) && _wageScalingDivisor)
+        for (uint16_t slot = 0; slot < _careerNumPlayers; ++slot)
+            Career_UpdatePlayerWeeklyWageCache(slot);
+}
+
+void ModernCareer_ReleaseUnneededLoans(void)
+{
+    if (!ModernRuntime_Enabled() || _isNationalSelector || _trainingGame)
+        return;
+    ModernWorld *world = ModernWorld_Active();
+    ModernRoster *roster = ModernRuntime_Roster(world, _careerTeam.team.countryNumber,
+                                               _careerTeam.team.teamOrdinal);
+    if (roster)
+        release_modern_match_loans(world, roster, -1, 2, MODERN_MATCH_PLAYERS - 2);
+}
+
+/* Release from the authoritative roster and remap references by player identity. */
+int ModernCareer_ReleasePlayer(uint16_t slot)
+{
+    ModernWorld *world = ModernWorld_Active();
+    ModernRoster *roster = ModernRuntime_Roster(world, _careerTeam.team.countryNumber,
+                                               _careerTeam.team.teamOrdinal);
+    if (!roster || roster->count <= MODERN_MATCH_PLAYERS || slot >= 32) return 0;
+    char previous[32][MODERN_ID_LEN] = {{0}};
+    uint8_t order[32];
+    size_t previous_count = _careerNumPlayers;
+    memcpy(order, _currentMatchPlayers, sizeof order);
+    for (uint16_t i = 0; i < _careerNumPlayers && i < 32; ++i)
+        ModernRuntime_PlayerUUID(&_careerTeam, i, previous[i]);
+    if (!previous[slot][0] || !ModernRuntime_Suspend(world, &_careerTeam)) return 0;
+    unsigned keepers = 0;
+    for (size_t i = 0; i < roster->count; ++i)
+        keepers += (roster->players[i].swos.positionAndFace & PF_POSITION_MASK) == 0 &&
+                   strcmp(roster->players[i].id, previous[slot]) != 0;
+    PlayerFile departing;
+    memcpy(&departing, (uint8_t *)&_careerTeam + PF_OFF + slot * sizeof(PlayerFile),
+           sizeof departing);
+    int removed = keepers && ModernRoster_Remove(roster, previous[slot]);
+    if (removed) {
+        extern uint16_t _removedPlayerStatAccum;
+        for (size_t i = 0; i < sizeof departing.goalStats; ++i)
+            _removedPlayerStatAccum += departing.goalStats[i];
+    }
+    if (rebind_modern_roster(world, previous, order, previous_count)) {
+        extern uint16_t _wageScalingDivisor;
+        if (_wageScalingDivisor)
+            for (uint16_t i = 0; i < _careerNumPlayers; ++i)
+                Career_UpdatePlayerWeeklyWageCache(i);
+    }
+    return removed;
 }
 
 /* ================================================================
@@ -4274,6 +4999,58 @@ void Career_TransferPlayerAndAddReplacedToMarketPool(uint16_t sourceTeam, uint16
 __attribute__((used, externally_visible))
 void Career_AcceptOffer_SellPlayer(void)
 {
+    modernSellOfferCommitted=0;
+    if(ModernRuntime_Enabled()) {
+        ModernWorld *world = ModernWorld_Active();
+        uint16_t slot = _offerOrdinals.offerPrimaryPlayerOrdinal;
+        if (_offerOrdinals.offerSwapPlayerOrdinal >= 0 ||
+            _offerOrdinals.offerExtraPlayerOrdinal >= 0 ||
+            _offerOrdinals.numExtraPlayersWanted >= 0 ||
+            slot >= 32 || !_offerOrdinals.offerAmount)
+            return;
+
+        ModernRoster *from = ModernRuntime_Roster(world, _careerTeam.team.countryNumber,
+                                                  _careerTeam.team.teamOrdinal);
+        uint16_t buyer = _offerOrdinals.teamOffering;
+        ModernRoster *to = ModernRuntime_Roster(world, buyer >> 8, buyer & 255);
+        if (!from || !to || from == to) return;
+
+        char previous[32][MODERN_ID_LEN] = {{0}};
+        uint8_t order[32];
+        size_t previous_count = _careerNumPlayers;
+        memcpy(order, _currentMatchPlayers, sizeof order);
+        for (uint16_t i = 0; i < _careerNumPlayers && i < 32; ++i)
+            ModernRuntime_PlayerUUID(&_careerTeam, i, previous[i]);
+        if (!previous[slot][0]) return;
+        PlayerFile sold = *(PlayerFile *)((uint8_t *)&_careerTeam + PF_OFF +
+                                          slot * sizeof(PlayerFile));
+        if (!ModernRuntime_Suspend(world, &_careerTeam)) return;
+
+        int32_t sales = _financeTotalsNeedResetFlag ? 0 : _playerSales;
+        int32_t balance = _newBalance;
+        int32_t fee = (int32_t)_offerOrdinals.offerAmount * 1000;
+        modernSellOfferCommitted = ModernPurchase_SellReserve(world, from->club_id, to->club_id,
+            previous[slot], fee, &balance, &sales);
+        rebind_modern_roster(world, previous, order, previous_count);
+        if (!modernSellOfferCommitted) return;
+
+        Career_CommitNewBalanceAndResetFinanceTotals();
+        _newBalance = balance;
+        _playerSales = sales;
+        ClampNewBalanceAndUpdateClubStatus();
+        ClearOverdraftStateIfRecovered();
+        _careerTeam.team.playerValuesDirty = TEAM_VALUES_DIRTY;
+
+        extern uint16_t _removedPlayerStatAccum, _wageScalingDivisor;
+        for (size_t i = 0; i < sizeof sold.goalStats; ++i)
+            _removedPlayerStatAccum += sold.goalStats[i];
+        if (_wageScalingDivisor)
+            for (uint16_t i = 0; i < _careerNumPlayers; ++i)
+                Career_UpdatePlayerWeeklyWageCache(i);
+        ModernRuntime_ProjectOpponent(world, GetTeamPointer(buyer));
+        return;
+    }
+
     Career_CommitNewBalanceAndResetFinanceTotals();
 
     uint32_t saleAmount = (uint32_t)_offerOrdinals.offerAmount * 1000;
@@ -4313,12 +5090,6 @@ void Career_AcceptOffer_SellPlayer(void)
     tp->team.playerValuesDirty = TEAM_VALUES_DIRTY;
     _careerTeam.team.playerValuesDirty = TEAM_VALUES_DIRTY;
 
-    /* An AI club acquiring our player must re-evaluate its starting XI now.
-     * The regular AI-to-AI optimiser is only called by the seasonal/world
-     * transfer pass, not by this human sale path. */
-    extern void SWOS_AI_OptimiseClubAfterHumanSale(unsigned teamId);
-    SWOS_AI_OptimiseClubAfterHumanSale(_offerOrdinals.teamOffering);
-
     PrunePlayerOffersAgainstRosterLimits();
 
     if (GetRemainingOfferSwapSlots() == 0) {
@@ -4337,6 +5108,80 @@ void Career_AcceptOffer_SellPlayer(void)
 __attribute__((used, externally_visible))
 void Career_AcceptOffer_BuyPlayer(void)
 {
+    if(ModernRuntime_Enabled()) {
+        ModernWorld *world=ModernWorld_Active();
+        ModernRoster *seller,*buyer;
+        int32_t fee;
+        modernNegotiatedBuy.committed=0;
+        if (!modernNegotiatedBuy.active ||
+            _offerOrdinals.teamOffering != modernNegotiatedBuy.team_number ||
+            _offerOrdinals.offerPrimaryPlayerOrdinal != modernNegotiatedBuy.offer_slot)
+            return;
+        seller = ModernWorld_Find(world, modernNegotiatedBuy.seller_id);
+        buyer = ModernRuntime_Roster(world, _selTeamNumber >> 8, _selTeamNumber & 255);
+        if (!seller || !buyer || seller == buyer) return;
+        fee = (int32_t)_offerOrdinals.offerAmount * 1000;
+
+        const char *wanted[2] = {modernNegotiatedBuy.player_id, NULL};
+        char second[MODERN_ID_LEN];
+        size_t wanted_count = 1;
+        int extra = _offerOrdinals.numExtraPlayersWanted;
+        if (extra >= 0) {
+            if (extra >= 16 || extra == modernNegotiatedBuy.offer_slot ||
+                !ModernRuntime_PlayerUUID(modernNegotiatedBuy.team, (unsigned)extra, second)) return;
+            wanted[wanted_count++] = second;
+        }
+
+        char previous[32][MODERN_ID_LEN] = {{0}};
+        uint8_t order[32];
+        size_t previous_count = _careerNumPlayers;
+        memcpy(order, _currentMatchPlayers, sizeof order);
+        for (uint16_t slot = 0; slot < _careerNumPlayers && slot < 32; ++slot)
+            ModernRuntime_PlayerUUID(&_careerTeam, slot, previous[slot]);
+        const char *offered[2];
+        size_t offered_count = 0;
+        int outgoing[] = {_offerOrdinals.offerSwapPlayerOrdinal, _offerOrdinals.offerExtraPlayerOrdinal};
+        for (size_t i = 0; i < 2; ++i) {
+            int slot = outgoing[i];
+            if (slot < 0) continue;
+            if (slot >= 32 || !previous[slot][0]) return;
+            offered[offered_count++] = previous[slot];
+        }
+        if (buyer->count + wanted_count > 32 + offered_count) return;
+        /* Restore the displaced player BEFORE flushing the 16-player cache.
+         * Otherwise a reserve preview could overwrite a different UUID. */
+        if(modernNegotiatedBuy.preview_active) {
+            memcpy(&modernNegotiatedBuy.team->players[15],
+                   &modernNegotiatedBuy.saved_preview,sizeof(PlayerFile));
+            modernNegotiatedBuy.preview_active=0;
+        }
+        if(!ModernRuntime_Suspend(world,modernNegotiatedBuy.team) ||
+           !ModernRuntime_Suspend(world,&_careerTeam))return;
+        int32_t balance = _newBalance;
+        int32_t purchases = _financeTotalsNeedResetFlag ? 0 : _playerPurchases;
+        modernNegotiatedBuy.committed = ModernPurchase_Exchange(world, seller, buyer,
+            wanted, wanted_count, offered, offered_count, fee, &balance, &purchases);
+        ModernRuntime_ProjectOpponent(world, modernNegotiatedBuy.team);
+        rebind_modern_roster(world, previous, order, previous_count);
+        if (!modernNegotiatedBuy.committed) return;
+        Career_CommitNewBalanceAndResetFinanceTotals();
+        _newBalance = balance;
+        _playerPurchases = purchases;
+        ModernCareer_ReleaseUnneededLoans();
+        extern uint16_t _wageScalingDivisor;
+        if (_wageScalingDivisor)
+            for (uint16_t i = 0; i < _careerNumPlayers; ++i)
+                Career_UpdatePlayerWeeklyWageCache(i);
+        ClampNewBalanceAndUpdateClubStatus();
+        ClearOverdraftStateIfRecovered();
+        _careerTeam.team.playerValuesDirty=TEAM_VALUES_DIRTY;
+        modernBuyRoster=modernBuyLookup();
+        modernBuyTotal=modernBuyRoster?modernBuyRoster->count:16u;
+        ModernBuy_RebuildOrder();
+        modernBuyPage=0;
+        return;
+    }
+
     Career_CommitNewBalanceAndResetFinanceTotals();
 
     uint32_t purchaseAmount = (uint32_t)_offerOrdinals.offerAmount * 1000;
@@ -4393,8 +5238,6 @@ void Career_RemovePlayerAndAddAsTrialist(uint16_t sourceTeam, uint16_t playerOrd
 {
     uint16_t savedTeam = sourceTeam;
     uint16_t savedOrd = playerOrd;
-    swos_age_log("TRIAL_REPLACEMENT_ENTRY", "source_team=%04X selected_team=%04X ordinal=%u",
-                 (unsigned)sourceTeam, (unsigned)_selTeamNumber, (unsigned)playerOrd);
 
     /* Remove from source team */
     Career_RemovePlayerFromTeamInternal(sourceTeam, playerOrd);
@@ -4440,13 +5283,14 @@ void Career_RemovePlayerAndAddAsTrialist(uint16_t sourceTeam, uint16_t playerOrd
         d += 2;
     }
 
-    /* A player was physically copied into the selected team's free slot. */
-    if (!SWOS_GeneratedIdentityMove((unsigned)sourceTeam,(unsigned)playerOrd,
-                                    (unsigned)_selTeamNumber,(unsigned)freeSlot))
-        SWOS_ManualIdentityCopy((unsigned)sourceTeam,(unsigned)playerOrd,
-                                (unsigned)_selTeamNumber,(unsigned)freeSlot);
-
-
+#ifdef SWOS_SDL_BUILD
+    if (!ModernRuntime_Enabled()) {
+        extern unsigned SWOS_GeneratedIdentityMove(unsigned, unsigned, unsigned, unsigned);
+        extern unsigned SWOS_ManualIdentityCopy(unsigned, unsigned, unsigned, unsigned);
+        if (!SWOS_GeneratedIdentityMove(sourceTeam, playerOrd, _selTeamNumber, freeSlot))
+            SWOS_ManualIdentityCopy(sourceTeam, playerOrd, _selTeamNumber, freeSlot);
+    }
+#endif
     /* Determine insertion position in currentMatchPlayers. The original asm read
      * raw 16-bit offsets into the slot-0 competition buffer: type-2 (tournament)
      * -> 0x4E, else -> 0x66. Those are now TYPED field reads (S6 FLAG-3 fix):
@@ -4487,20 +5331,19 @@ void Career_RemovePlayerAndAddAsTrialist(uint16_t sourceTeam, uint16_t playerOrd
     SetBenchPlayersNumbers(&_careerTeam);
 
     _careerNumPlayers++;
+    SquadNumbers_Free(freeSlot);        /* (real squad numbers: his own, or a free one; teams.c) */
     Career_UpdatePlayerWeeklyWageCache(freeSlot);
+    /* (bought: his club's player is now yours; his old slot gets a new player, below) */
+    ModHooks_PlayerMoved(savedTeam, (uint8_t)savedOrd, _selTeamNumber, (uint8_t)freeSlot);
 
     /* Convert player to trialist using source name */
     Career_ConvertPlayerToTrialistFromName(savedTeam, savedOrd);
-
-    /* The sold player's identity moved to the managed club above. The AI
-     * source slot now contains a NEW trialist, not that sold footballer.
-     * Assign it a fresh ID and age 17, replacing the transfer tombstone.
-     * This survives saving/loading and advances with other manual IDs. */
-    if (savedTeam != _selTeamNumber) {
-        unsigned youthId=SWOS_ManualIdentityCreateYouth(savedTeam,savedOrd);
-        swos_age_log("PURCHASE_AI_YOUTH_AGE", "club=%04X slot=%u id=%u age=17 registered=%u",
-                     (unsigned)savedTeam,(unsigned)savedOrd,youthId,(unsigned)(youthId!=0));
+#ifdef SWOS_SDL_BUILD
+    if (!ModernRuntime_Enabled() && savedTeam != _selTeamNumber) {
+        extern unsigned SWOS_ManualIdentityCreateYouth(unsigned, unsigned);
+        SWOS_ManualIdentityCreateYouth(savedTeam, savedOrd);
     }
+#endif
 }
 
 /* ================================================================
@@ -4541,7 +5384,7 @@ static uint8_t *pickRandomTeamRecordAvoidingTeam(uint16_t avoidTeamWord, uint8_t
             uint16_t candTeamId = PACK_BE_U16(result->team.countryNumber,
                                               result->team.teamOrdinal);
             if (candTeamId != avoidTeamWord) {
-                if (result->team.countryNumber == countryByte)
+                if (World_FileCountry(result->team.countryNumber) == World_FileCountry(countryByte))
                     return (uint8_t *)result;
             }
             if (retries == 0)
@@ -4557,7 +5400,7 @@ static uint8_t *pickRandomTeamRecordAvoidingTeam(uint16_t avoidTeamWord, uint8_t
         uint16_t candTeamId2 = PACK_BE_U16(result->team.countryNumber,
                                            result->team.teamOrdinal);
         if (candTeamId2 != avoidTeamWord) {
-            if (result->team.countryNumber == countryByte)
+            if (World_FileCountry(result->team.countryNumber) == World_FileCountry(countryByte))
                 return (uint8_t *)result;
         }
         if (retries == 0)
@@ -4687,13 +5530,7 @@ restart:;
     return ((uint32_t)posFlags << 8) | (uint32_t)nationality;
 }
 
-/* Emergency RES/TRIAL players for the human club.  Compare the sum of
- * the seven outfield attributes with established players in the same
- * position, not each attribute separately.  The generated total is
- * 8..14 points below the rounded peer average; individual attributes
- * retain the full legal 0..7 range and some random variation.
- * Goalkeepers use the existing goalkeeper ability/price scale instead.
- */
+#ifdef SWOS_SDL_BUILD
 static void Career_GenerateSquadRelativeTrialistSkills(PlayerFile *pf)
 {
     uint8_t position = (uint8_t)((pf->positionAndFace & PF_POSITION_MASK) >> 5);
@@ -4780,18 +5617,7 @@ static void Career_GenerateSquadRelativeTrialistSkills(PlayerFile *pf)
     }
 }
 
-/* ASCII case-insensitive comparison for SWOS player names, portable on MinGW. */
-static int swos_trial_name_matches(const char *a, const char *b)
-{
-    if (!a || !b) return 0;
-    while (*a && *b) {
-        unsigned char ca = (unsigned char)*a++, cb = (unsigned char)*b++;
-        if (ca >= 'a' && ca <= 'z') ca -= 'a' - 'A';
-        if (cb >= 'a' && cb <= 'z') cb -= 'a' - 'A';
-        if (ca != cb) return 0;
-    }
-    return *a == *b;
-}
+#endif
 
 /* ================================================================
  * Career_GenerateTrialistForTeamPlayer  (SWOS2.s line 63941)
@@ -4807,8 +5633,6 @@ void Career_GenerateTrialistForTeamPlayer(uint16_t playerIndex)
     uint16_t d4 = _selTeamNumber;
     uint16_t d5 = _selTeamNumber;
     uint16_t d6 = playerIndex;
-    swos_age_log("TRIAL_GENERATE", "team=%04X slot=%u identity_action=pending",
-                 (unsigned)_selTeamNumber, (unsigned)playerIndex);
 
     uint8_t *base = GetPlayer(_selTeamNumber, playerIndex);
     PlayerFile *pf = (PlayerFile *)(base + PF_OFF);
@@ -4842,42 +5666,14 @@ void Career_GenerateTrialistForTeamPlayer(uint16_t playerIndex)
     /* Mark as trialist (bit 1) */
     pf->positionAndFace |= PF_LOAN;  /* bset #1 */
     pf->form = 0;
-
-    /* Generated players have form=0, so the AGE menu cannot recognise them
-     * as trialists and otherwise displays the default age 25. Register their
-     * starting age at creation; the normal annual snapshot increment ages
-     * it to 18 after the following season. This is a compatibility bridge,
-     * not yet a permanent-ID mapping. */
-    {
-        const char *existing = NULL;
-        unsigned existing_age = 0;
-        int collision = 0;
-        for (size_t n = 0; SWOS_AgesGet(n, &existing, &existing_age); ++n) {
-            if (existing && swos_trial_name_matches(existing, pf->playerName)) {
-                collision = 1;
-                break;
-            }
-        }
-        if (!collision) {
-            int ok = SWOS_AgesSet(pf->playerName, 17u);
-            swos_age_log("TRIAL_AGE_CREATE", "team=%04X slot=%u name=%s age=17 saved=%d",
-                         (unsigned)_selTeamNumber, (unsigned)playerIndex,
-                         pf->playerName, ok);
-        } else {
-            swos_age_log("TRIAL_AGE_COLLISION", "team=%04X slot=%u name=%s existing_age=%u",
-                         (unsigned)_selTeamNumber, (unsigned)playerIndex,
-                         pf->playerName, existing_age);
-        }
+#ifdef SWOS_SDL_BUILD
+    if (!ModernRuntime_Enabled()) {
+        extern unsigned SWOS_GeneratedIdentityCreate(unsigned, unsigned, unsigned);
+        SWOS_GeneratedIdentityCreate(_selTeamNumber, playerIndex, 17);
+        Career_GenerateSquadRelativeTrialistSkills(pf);
     }
-    /* Unique generated ID is independent of name collisions. The original
-     * AI-only shadow registry remains untouched. */
-    {
-        unsigned generated_id=SWOS_GeneratedIdentityCreate(_selTeamNumber,playerIndex,17u);
-        swos_age_log("TRIAL_ID_ATTACH","team=%04X slot=%u id=%u age=17",
-                     (unsigned)_selTeamNumber,(unsigned)playerIndex,generated_id);
-    }
-    /* Replacement player is playable immediately, not a zero-skill placeholder. */
-    Career_GenerateSquadRelativeTrialistSkills(pf);
+#endif
+    ModHooks_PlayerCreated(d4, (uint8_t)d6, MODPLAYER_TRIALIST, pf);   /* (a career mod may change him) */
 }
 
 /* ================================================================
@@ -4892,12 +5688,6 @@ void Career_GenerateTrialistForTeamPlayer(uint16_t playerIndex)
  * ================================================================ */
 static void careerInitTrialistAttributes(PlayerFile *pf, uint16_t sourceTeam)
 {
-    /* New trialists for the managed club match its current talent level. */
-    if (sourceTeam == _selTeamNumber) {
-        Career_GenerateSquadRelativeTrialistSkills(pf);
-        return;
-    }
-
     /* Save current player data to tempTeamBuffer */
     uint8_t *src = (uint8_t *)pf;
     uint8_t *dst = _tempTeamBuffer;
@@ -5084,6 +5874,13 @@ void Career_ConvertPlayerToTrialistFromName(uint16_t sourceTeam, uint16_t player
 
     /* Init skill attributes */
     careerInitTrialistAttributes(pf, d5);
+#ifdef SWOS_SDL_BUILD
+    if (!ModernRuntime_Enabled() && d5 == _selTeamNumber)
+        Career_GenerateSquadRelativeTrialistSkills(pf);
+#endif
+    /* (his name, nationality and skills made: a career mod may change him -- before another
+     * club's copy goes into the career pool, so the pool has the changed one) */
+    ModHooks_PlayerCreated(d5, (uint8_t)d6, d5 == _selTeamNumber ? MODPLAYER_TRIALIST : MODPLAYER_REPLACEMENT, pf);
 
     if (d5 == _selTeamNumber) {
         /* Same team: set as goalkeeper sub and clear trialist/other flags */
@@ -5133,6 +5930,8 @@ void TrainingMatch_AddTrialPlayerToSelectedTeam(uint16_t role)
     PlayerFile *pf = (PlayerFile *)(base + PF_OFF);
     pf->positionAndFace |= PF_TRIALIST;  /* bset #2 — mark as trialist */
     pf->shirtNumber = 0x10;       /* shirt number 16 */
+    if (_selTeamNumber == BE_READ_U16(&_careerTeam))
+        SquadNumbers_Free(freeSlot);    /* (real squad numbers: a free one, teams.c) */
 
     /* Set position/role: lsl.w #5,d7; move.b d7,$66(a3) */
     pf->positionAndFace = (uint8_t)(role << 5);  /* this overwrites — matches asm: move.b d7,$66 */
@@ -5147,36 +5946,107 @@ void TrainingMatch_AddTrialPlayerToSelectedTeam(uint16_t role)
     Career_UpdatePlayerWeeklyWageCache(freeSlot);
 }
 
+/* Prepare the live career roster, using the same availability rules as
+ * the match screen. Work with UUIDs when rebuilding the legacy 16 slots. */
+static void prepare_modern_match_loans(int16_t availability, unsigned subs)
+{
+    ModernWorld *world = ModernWorld_Active();
+    ModernRoster *roster = ModernRuntime_Roster(world, _careerTeam.team.countryNumber,
+                                               _careerTeam.team.teamOrdinal);
+    if (!roster || !ModernRuntime_ExpandCareerSquad(world, &_careerTeam)) return;
+
+    unsigned target = _trainingGame ? 26 : 11 + (subs > 5 ? 5 : subs);
+    unsigned required_keepers = subs > 2 || _trainingGame ? 2 : 1;
+    unsigned required_field = target - required_keepers;
+    if (!_trainingGame)
+        release_modern_match_loans(world, roster, availability, required_keepers, required_field);
+    unsigned keepers = (uint16_t)GetNumberOfAvailableSubstitutes(&_careerTeam, availability);
+    unsigned field = (uint16_t)GetNumberOfAvailableStartingPlayers(&_careerTeam, availability);
+    PlayerFile origin = roster->players[0].swos;
+    while (keepers < required_keepers || field < required_field) {
+        unsigned position = keepers < required_keepers ? 0 :
+            ((field % 7) + 1) << PF_POSITION_SHIFT;
+        ModernRosterPlayer loan = ModernCareer_NewLoan(world, roster, &origin, position, 0);
+        int slot = ModernRuntime_AppendCareerPlayer(world, &_careerTeam, &loan);
+        if (slot < 0) break;
+        extern uint16_t _wageScalingDivisor;
+        if (_wageScalingDivisor) Career_UpdatePlayerWeeklyWageCache((uint16_t)slot);
+        if (position) ++field;
+        else ++keepers;
+    }
+    if (!_trainingGame) return;
+
+    /* The training lineup is temporary. Save the manager's order before
+     * arranging two sides and keep the physical UUID slots in place. */
+    extern void TrainingMatch_SaveLastMatchState(void);
+    TrainingMatch_SaveLastMatchState();
+    uint8_t keepers_available[32], field_available[32], order[32];
+    unsigned keeper_count = 0, field_count = 0;
+    for (unsigned i = 0; i < _careerNumPlayers; ++i) {
+        unsigned slot = _currentMatchPlayers[i];
+        PlayerFile *base = (PlayerFile *)((uint8_t *)&_careerTeam + slot * sizeof(PlayerFile));
+        if (IsPlayerInjured(base, availability)) continue;
+        PlayerFile *player = base + 2;
+        if (player->positionAndFace & PF_POSITION_MASK)
+            field_available[field_count++] = (uint8_t)slot;
+        else
+            keepers_available[keeper_count++] = (uint8_t)slot;
+    }
+    if (keeper_count < 2 || field_count < required_field) return;
+    unsigned n = 0;
+    order[n++] = keepers_available[0];
+    for (unsigned i = 0; i < 12; ++i) order[n++] = field_available[i];
+    order[n++] = keepers_available[1];
+    for (unsigned i = 12; i < field_count; ++i) order[n++] = field_available[i];
+    for (unsigned i = 0; i < _careerNumPlayers; ++i) {
+        unsigned slot = _currentMatchPlayers[i];
+        unsigned j = 0;
+        while (j < n && order[j] != slot) ++j;
+        if (j == n) order[n++] = (uint8_t)slot;
+    }
+    memcpy(_currentMatchPlayers, order, n);
+
+}
+
 /* ================================================================
  * TrainingMatch_AdjustSelectedTeamRosterForTrialists  (SWOS2.s line 63660)
  *
  * Adjusts the selected team roster for training match by removing
  * excess goalkeepers/subs and adding trial players to fill gaps.
  *
- * in: d0 = team number, d1 = base count, a0 = team pointer
+ * in: d0 = the availability flag (playMatchExcludeFlags; each GetNumberOfAvailable* gets it,
+ *     SWOS2.s `move.w d4,d0` -- it was passed as 0, counting suspended players: Career+'s
+ *     §3.1), d1 = base count, a0 = team pointer
  * ================================================================ */
 __attribute__((used, externally_visible))
-void TrainingMatch_AdjustSelectedTeamRosterForTrialists(uint16_t teamNum, uint16_t baseCount, TeamFileEx *teamPtr)
+void TrainingMatch_AdjustSelectedTeamRosterForTrialists(uint16_t excludeFlags, uint16_t baseCount, TeamFileEx *teamPtr)
 {
     if (_isNationalSelector != 0)
         return;
+    if (ModernRuntime_Enabled()) {
+        if (teamPtr == &_careerTeam ||
+            (!_trainingGame && PACK_BE_U16(teamPtr->team.countryNumber, teamPtr->team.teamOrdinal) ==
+                              _selTeamNumber)) {
+            prepare_modern_match_loans((int16_t)excludeFlags, baseCount);
 
-    /* Emergency TRIAL/LOAN generation must count players with the same
-     * injury AND suspension rules as match eligibility. Previously mode 0
-     * ignored cards, so an injured player plus a suspended player could
-     * leave too few eligible outfielders even though no trialist spawned.
-     * Training matches deliberately continue to ignore these restrictions. */
-    const int16_t availabilityMode = _trainingGame ? 0 : -1;
+        }
+        return;
+    }
 
     if (_trainingGame != 0)
         baseCount <<= 1;  /* lsl.w #1,d1 */
 
-    uint16_t d4 = teamNum;
+    uint16_t d4 = excludeFlags;   /* (the availability flag, not a team: `move.w d4,d0` before each count) */
     uint16_t d5 = baseCount;
+    /* trialist_count_mode 1 (Career+): every non-training match counts injured AND suspended
+     * players out (-1), so an injury and a suspension together still bring a trialist in; a
+     * training match counts everyone (0). 0 = the caller's flag, as the original. */
+    const int16_t availability = _careerParams.trialist_count_mode == 1 ? (_trainingGame ? 0 : -1)
+                                                                        : (int16_t)excludeFlags;
 
     if (_trainingGame == 0) {
         /* Non-training: remove excess goalkeepers if more than 2 subs */
-        uint32_t subsResult = GetNumberOfAvailableSubstitutes(teamPtr, availabilityMode);
+        uint32_t subsResult = GetNumberOfAvailableSubstitutes(teamPtr, availability);
         uint16_t subs = (uint16_t)(subsResult & 0xFFFF);
         if (subs > 2) {
             int16_t d2 = (int16_t)_careerNumPlayers - 1;
@@ -5199,7 +6069,7 @@ void TrainingMatch_AdjustSelectedTeamRosterForTrialists(uint16_t teamNum, uint16
         }
 
         /* Remove excess starting players if more than 16 */
-        uint32_t startResult = GetNumberOfAvailableStartingPlayers(teamPtr, availabilityMode);
+        uint32_t startResult = GetNumberOfAvailableStartingPlayers(teamPtr, availability);
         uint16_t starters = (uint16_t)(startResult & 0xFFFF);
         if (starters > 16) {
             int16_t d2 = (int16_t)_careerNumPlayers - 1;
@@ -5226,7 +6096,7 @@ void TrainingMatch_AdjustSelectedTeamRosterForTrialists(uint16_t teamNum, uint16
 
     /* Add trial GK if needed: ensure at least 2 goalkeeper subs */
     while (_careerNumPlayers < 30) {
-        uint32_t subsResult = GetNumberOfAvailableSubstitutes(teamPtr, availabilityMode);
+        uint32_t subsResult = GetNumberOfAvailableSubstitutes(teamPtr, availability);
         uint16_t subs = (uint16_t)(subsResult & 0xFFFF);
         if (subs >= 2)
             break;
@@ -5243,7 +6113,7 @@ void TrainingMatch_AdjustSelectedTeamRosterForTrialists(uint16_t teamNum, uint16
 
     /* Add trial field players if needed: fill to required starter count */
     while (_careerNumPlayers < 30) {
-        uint32_t startResult = GetNumberOfAvailableStartingPlayers(teamPtr, availabilityMode);
+        uint32_t startResult = GetNumberOfAvailableStartingPlayers(teamPtr, availability);
         uint16_t starters = (uint16_t)(startResult & 0xFFFF);
 
         uint16_t required = 11;
@@ -5276,7 +6146,6 @@ __attribute__((used, externally_visible))
 void PutPlayerOnMarketMenu(void)
 {
     uint16_t preselect = 0xFFFF;
-    SWOS_RepairTransferList();
 
     for (;;) {
         /* Build eligible player bitfield (bit 1 of positionAndFace set).
@@ -5319,14 +6188,14 @@ void PutPlayerOnMarketMenu(void)
         } else {
             /* Not on market — add */
             AddPlayerToTransferMarket(playerIdx);
-            if (_numPlayersOnTransferMarket == 10)
+            if (_numPlayersOnTransferMarket >= _careerParams.transfer_list_capacity)
                 break;
         }
     }
 
     /* Update transfer market UI state */
     CheckNumPlayersOnTransferMarket();
-    if (_numPlayersOnTransferMarket == 10)
+    if (_numPlayersOnTransferMarket >= _careerParams.transfer_list_capacity)
         SetCurrentEntry(6);
 }
 
@@ -5348,13 +6217,15 @@ __attribute__((used, externally_visible))
 void BuyOtherDomesticPlayer(void)
 {
     /* move.b (selTeamNumber).l,d0 — reads HIGH byte on big-endian = country code */
-    uint16_t nationality = (uint8_t)(_selTeamNumber >> 8);
+    uint16_t nationality = World_FileCountry((uint8_t)(_selTeamNumber >> 8));
     ChooseTeamsDialogWithNationality(nationality, 1, 0, 0, _aBuyOtherDomest, (void *)0);
     if ((int16_t)_selectedTeamCountryNumber == -1)
         return;
     _offerOrdinals.teamOffering = _selectedTeamCountryNumber;
     _buyOtherPlayersTitlePtr = (uint8_t *)_aBuyOtherDomest;
     ShowMenu(_buyOtherPlayersMenu);
+    if (ModernRuntime_Enabled() && _buyOtherPlayersTeamPtr)
+        ModernRuntime_Suspend(ModernWorld_Active(), _buyOtherPlayersTeamPtr);
     /* Original asm has duplicate check — preserve as-is */
     if (_transferCompleted != 0) {
         BuyPlayerExit();
@@ -5377,6 +6248,8 @@ void BuyOtherForeignPlayer(void)
     _offerOrdinals.teamOffering = _selectedTeamCountryNumber;
     _buyOtherPlayersTitlePtr = (uint8_t *)_aBuyOtherForeig;
     ShowMenu(_buyOtherPlayersMenu);
+    if (ModernRuntime_Enabled() && _buyOtherPlayersTeamPtr)
+        ModernRuntime_Suspend(ModernWorld_Active(), _buyOtherPlayersTeamPtr);
     /* Original asm has duplicate check — preserve as-is */
     if (_transferCompleted != 0) {
         BuyPlayerExit();
@@ -5398,14 +6271,11 @@ extern uint8_t  _playerRatingFilterThresholds[];  /* 17-byte lookup: filter inde
 extern uintptr_t _playerMarketVisibleItems[];      /* up to 10 pointers to market entries */
 
 /* PlayerMarketPlayerMatchesFilters — filter predicate for player market.
- * blockPtr uses the "block pointer" convention: blockPtr + 0x4C = PlayerFile start.
  * Returns 0 if player matches all active filters, 1 otherwise. */
-static int16_t playerMarketPlayerMatchesFilters(uint8_t *blockPtr, int16_t ratingThreshold,
+static int16_t playerMarketPlayerMatchesFilters(const PlayerFile *pf, int16_t ratingThreshold,
                                                  uint8_t *countryRange, uint8_t *positionList,
                                                  int16_t skillBitIndex)
 {
-    PlayerFile *pf = (PlayerFile *)(blockPtr + 76);  /* blockPtr + $4C */
-
     /* --- Rating/price filter --- */
     if (ratingThreshold >= 0) {
         int8_t diff = (int8_t)((uint8_t)pf->price - (uint8_t)ratingThreshold);
@@ -5452,6 +6322,25 @@ static int16_t playerMarketPlayerMatchesFilters(uint8_t *blockPtr, int16_t ratin
     return 0;   /* all filters passed */
 }
 
+/* Value sorting is a presentation index only. Offer selection continues to use
+ * the original market-entry pointer or the modern roster UUID. */
+typedef struct MarketSortedEntry {
+    uintptr_t item;
+    uint32_t value;
+    uint32_t insertion;
+} MarketSortedEntry;
+
+static int marketCompareValues(const void *a, const void *b)
+{
+    const MarketSortedEntry *x = (const MarketSortedEntry *)a;
+    const MarketSortedEntry *y = (const MarketSortedEntry *)b;
+    if (x->value != y->value) {
+        if (_careerMarketValueSort == 1) return x->value > y->value ? -1 : 1;
+        return x->value < y->value ? -1 : 1;
+    }
+    return x->insertion < y->insertion ? -1 : x->insertion > y->insertion ? 1 : 0;
+}
+
 /* PlayerMarketBuildVisiblePlayerList — builds the visible player list for the
  * transfer market browser.  Sets up filter state from globals, iterates
  * domestic or foreign market entries, applies filters, and populates the
@@ -5495,7 +6384,82 @@ void PlayerMarketBuildVisiblePlayerList(void)
 
     uintptr_t *visPtr = _playerMarketVisibleItems;
 
-    if (_showDomesticPlayerMarket != 0) {
+    if (_careerMarketValueSort != 0) {
+        size_t capacity = modernMarketOpen ? modernMarketCount :
+                          _showDomesticPlayerMarket ? _numHomeMarketPlayers : _numForeignMarketPlayers;
+        MarketSortedEntry *sorted = capacity ? malloc(capacity * sizeof(*sorted)) : NULL;
+        size_t n = 0;
+        if (capacity && !sorted) {
+            /* Do not silently show an unsorted list under a SORT heading. */
+            _playerMarketVisibleItemCount = 0;
+            _playerMarketTotalMatchCount = 0;
+            return;
+        }
+        for (size_t i = 0; i < capacity; ++i) {
+            const PlayerFile *pf = NULL;
+            uintptr_t item = 0;
+            if (modernMarketOpen) {
+                const ModernMarketListing *listing = &modernMarketListings[i];
+                pf = &listing->club->players[listing->slot].swos;
+                item = (uintptr_t)listing;
+            } else if (_showDomesticPlayerMarket) {
+                uint8_t *entry = _homeMarketPlayers + i * MARKET_ENTRY_SIZE;
+                uint16_t team = PACK_BE_U16(entry[0], entry[1]);
+                TeamFileEx *t = VerifyTeamLoaded(team);
+                if (entry[2] >= 16) continue;
+                pf = &t->players[entry[2]];
+                item = (uintptr_t)entry;
+            } else {
+                uint8_t *entry = _foreignMarketPlayers + i * MARKET_ENTRY_SIZE;
+                PoolPlayer *pool = FindPoolplyrDatPlayer(PACK_BE_U16(entry[0], entry[1]), entry[2]);
+                if (!pool) continue;
+                pf = &pool->player;
+                item = (uintptr_t)entry;
+            }
+            if (playerMarketPlayerMatchesFilters(pf, ratingThreshold, countryRange,
+                                                 positionList, skillBitIndex)) continue;
+            sorted[n].item = item;
+            /* Compare actual displayed transfer values, not raw SWOS price
+             * bytes: the classic 50+ price codes wrap to low value bands. */
+            if (modernMarketOpen) {
+                sorted[n].value = ModernPlayerTransferValueBase((uint8_t)pf->price);
+            } else {
+                extern int8_t _avgTeamValues[];
+                extern uint16_t _avgTeamValueBases[];
+                unsigned priceCode = (uint8_t)pf->price;
+                unsigned band = priceCode < 128u ? (uint8_t)_avgTeamValues[priceCode] : 1u;
+                if (band > 80u) band = 80u;
+                sorted[n].value = _avgTeamValueBases[band];
+            }
+            sorted[n].insertion = (uint32_t)i;
+            ++n;
+        }
+        qsort(sorted, n, sizeof(*sorted), marketCompareValues);
+        _playerMarketTotalMatchCount = (uint16_t)n;
+        const size_t offset = _playerMarketListScrollOffset;
+        for (size_t i = offset; i < n && i < offset + 10; ++i) {
+            *visPtr++ = sorted[i].item;
+            ++_playerMarketVisibleItemCount;
+        }
+        free(sorted);
+        return;
+    }
+
+    if (modernMarketOpen) {
+        const unsigned offset = _playerMarketListScrollOffset;
+        for (size_t i = 0; i < modernMarketCount; ++i) {
+            const ModernMarketListing *item = &modernMarketListings[i];
+            const PlayerFile *player = &item->club->players[item->slot].swos;
+            if (playerMarketPlayerMatchesFilters(player, ratingThreshold, countryRange,
+                                                 positionList, skillBitIndex))
+                continue;
+            unsigned match = _playerMarketTotalMatchCount++;
+            if (match >= offset && match < offset + 10) {
+                *visPtr++ = (uintptr_t)item;
+                _playerMarketVisibleItemCount++;
+            }
+        }
+    } else if (_showDomesticPlayerMarket != 0) {
         /* ---- Domestic market path ---- */
         uint8_t *a1 = _homeMarketPlayers;
         uint16_t count = _numHomeMarketPlayers;
@@ -5513,8 +6477,7 @@ void PlayerMarketBuildVisiblePlayerList(void)
             uint16_t teamNum = PACK_BE_U16(a1[0], a1[1]);
             TeamFileEx *teamData = VerifyTeamLoaded(teamNum);
             uint16_t ordinal = (uint16_t)(uint8_t)a1[2];
-            uint8_t *blockPtr = (uint8_t *)teamData + (uint32_t)ordinal * 38;  /* mulu #$26 */
-            if (playerMarketPlayerMatchesFilters(blockPtr, ratingThreshold,
+            if (playerMarketPlayerMatchesFilters(&teamData->players[ordinal], ratingThreshold,
                                                   countryRange, positionList,
                                                   skillBitIndex) == 0) {
                 _playerMarketTotalMatchCount++;
@@ -5549,8 +6512,7 @@ void PlayerMarketBuildVisiblePlayerList(void)
                 i--;
                 continue;
             }
-            uint8_t *blockPtr = (uint8_t *)pool - 0x38;   /* lea -$38(a0),a0 */
-            if (playerMarketPlayerMatchesFilters(blockPtr, ratingThreshold,
+            if (playerMarketPlayerMatchesFilters(&pool->player, ratingThreshold,
                                                   countryRange, positionList,
                                                   skillBitIndex) == 0) {
                 _playerMarketTotalMatchCount++;
@@ -5586,7 +6548,7 @@ extern uint16_t _offerExtraPositionMask;
 extern uint16_t _offerTargetValueBase;
 extern uint16_t _offerValueBaseSum;
 extern uint16_t _offerSwapValueBaseSum;
-extern uint8_t  _offerCandidateTeamIndexBuffer[];
+
 extern uint8_t  _offerLifespanTable[];
 /* offerNegotiationStep1Amount is now offerOrdinals.offerNegotiationStep1Amount */
 extern uint16_t _offerNegotiationStep2Amount;
@@ -5601,25 +6563,21 @@ extern void RestoreRand2State(void);
 extern void Randomize2(uint16_t _seed);
 extern uint16_t GetPlayerRandomNum(PlayerFile *playerFile);
 
-/* When the manager lists an expensive player, domestic clubs need not have
- * an equally valuable player already on their books to submit a bid.
- * Keep the original range test first and relax ONLY the domestic-buyer scan:
- * the buyer must have at least one player worth 50% of the seller's
- * reference price. Same-team and excluded-league guards remain mandatory. */
-static int16_t IsDomesticTeamEligibleForListedPlayerOffer(TeamFileEx *team,
-                                                          uint16_t refSkill)
+/* A home club that may bid for your listed player: the original's (IsTeamEligibleForOfferByRefSkill),
+ * and with domestic_buyer_mode 1 also any club in the league with a player priced at half the
+ * listed one's or more (benefactorr's Career+). 0 = eligible, as IsTeamEligibleForOfferByRefSkill. */
+static int16_t domesticBuyerEligible(TeamFileEx *team, uint16_t refSkill)
 {
-    const uint16_t teamNum = PACK_BE_U16(team->team.countryNumber,
-                                         team->team.teamOrdinal);
-    uint8_t minimumComparablePrice;
-    int i;
-    if (teamNum == _selTeamNumber || team->team.league == 4)
-        return 1;
     if (IsTeamEligibleForOfferByRefSkill(team, refSkill) == 0)
         return 0;
-    minimumComparablePrice = (uint8_t)(((uint8_t)refSkill + 1u) / 2u);
-    for (i = 0; i < 16; ++i)
-        if ((uint8_t)team->players[i].price >= minimumComparablePrice)
+    if (_careerParams.domestic_buyer_mode != 1)
+        return 1;
+    if (PACK_BE_U16(team->team.countryNumber, team->team.teamOrdinal) == _selTeamNumber ||
+        Team_IsOutsideLeague(&team->team))
+        return 1;
+    const uint8_t minPrice = (uint8_t)(((uint8_t)refSkill + 1u) / 2u);
+    for (int32_t i = 0; i < 16; i++)
+        if ((uint8_t)team->players[i].price >= minPrice)
             return 0;
     return 1;
 }
@@ -5627,15 +6585,17 @@ static int16_t IsDomesticTeamEligibleForListedPlayerOffer(TeamFileEx *team,
 __attribute__((used, externally_visible))
 void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
 {
+    int modern = ModernRuntime_Enabled();
     _offerOrdinals.offerPrimaryPlayerOrdinal = playerOrdinal;
 
     /* Get value base for the primary player */
-    uint16_t avgVal = GetAvgTeamValueBaseForCurrentPlayer(_selTeamNumber, playerOrdinal);
+    uint16_t avgVal = marketPlayerValue(_selTeamNumber, playerOrdinal);
     _offerValueBaseSum = avgVal;
 
     /* Get player data and check injury */
     uint8_t *playerEntry = GetPlayer(_selTeamNumber, playerOrdinal);
     PlayerFile *pfEntry = (PlayerFile *)(playerEntry + PF_OFF);
+    if (modern && (pfEntry->positionAndFace & PF_LOAN)) return;
     uint16_t refSkill = (uint8_t)pfEntry->price;
     if (IsPlayerInjured((PlayerFile *)playerEntry, -1) != 0) {
         SWOS_AUTOSKIP_LOG("[bug2]   CreateOffer playerOrd=%u: BAILED — injured",
@@ -5651,9 +6611,10 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
     uint16_t rnd = Rand2();
     uint8_t *teamsBase;
     uint16_t teamCount;
+    uint8_t candidateIndices[SELECTED_TEAMS_MAX > TMD_POOL_RECORDS ? SELECTED_TEAMS_MAX : TMD_POOL_RECORDS];
 
-    if (rnd >= 64) {
-        /* Home market path: 75% domestic, 25% foreign */
+    if (rnd >= _careerParams.foreign_bid_chance) {     /* (8, the original's) */
+        /* Home market path */
         _homeMarketRandomPickRetries++;
         uint8_t *a0 = &_selTeamsPtr;
         teamsBase = a0;
@@ -5666,10 +6627,12 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
          * and the home-market scan would almost never match, leaving
          * teamCount=0 and the function bailing at "no eligible buyer". */
         uint8_t selTeamByte = (uint8_t)(_selTeamNumber >> 8);
-        while (d4 < _numSelectedTeams) {
-            if (selTeamByte == *a0) {
-                if (IsDomesticTeamEligibleForListedPlayerOffer((TeamFileEx *)a0, refSkill) == 0) {
-                    _offerCandidateTeamIndexBuffer[d5] = (uint8_t)d4;
+        while (d4 < _numSelectedTeams && d4 < SELECTED_TEAMS_MAX) {
+            if ((modern ? World_FileCountry(selTeamByte) == World_FileCountry(*a0) : selTeamByte == *a0) &&
+                (!modern || (PACK_BE_U16(a0[0], a0[1]) != _selTeamNumber &&
+                             ModernRuntime_Roster(ModernWorld_Active(), a0[0], a0[1])))) {
+                if (domesticBuyerEligible((TeamFileEx *)a0, refSkill) == 0) {
+                    candidateIndices[d5] = (uint8_t)d4;
                     d5++;
                 }
             }
@@ -5691,10 +6654,11 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
          * coincides with another country code) and the foreign offer rate
          * was only "broken into mostly working", but it's still wrong. */
         uint8_t selTeamByte = (uint8_t)(_selTeamNumber >> 8);
-        while (d4 < numCareerTeams) {
-            if (selTeamByte != *a0) {
+        while (d4 < numCareerTeams && d4 < TMD_POOL_RECORDS) {
+            if ((modern ? World_FileCountry(selTeamByte) != World_FileCountry(*a0) : selTeamByte != *a0) &&
+                (!modern || ModernRuntime_Roster(ModernWorld_Active(), a0[0], a0[1]))) {
                 if (IsTeamEligibleForOfferByRefSkill((TeamFileEx *)a0, refSkill) == 0) {
-                    _offerCandidateTeamIndexBuffer[d5] = (uint8_t)d4;
+                    candidateIndices[d5] = (uint8_t)d4;
                     d5++;
                 }
             }
@@ -5717,7 +6681,7 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
     /* Pick a random team from candidates */
     rnd = Rand2();
     uint16_t idx = (uint16_t)((uint16_t)(rnd * teamCount) >> 8);
-    uint8_t teamIdx = _offerCandidateTeamIndexBuffer[idx];
+    uint8_t teamIdx = candidateIndices[idx];
     uint8_t *teamBlock = teamsBase + (uint32_t)teamIdx * 0x2AC;
 
     /* Check uniqueness. teamBlock[0..1] = {countryNumber, teamOrdinal}
@@ -5727,6 +6691,9 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
      * downstream offer record is then stored with the wrong country
      * byte at offset 0. */
     uint16_t offTeamId = PACK_BE_U16(teamBlock[0], teamBlock[1]);
+    if (modern && (offTeamId == _selTeamNumber ||
+                   !ModernRuntime_Roster(ModernWorld_Active(), teamBlock[0], teamBlock[1])))
+        return;
     if (IsOfferTeamPlayerPairUnique(offTeamId, _offerOrdinals.offerPrimaryPlayerOrdinal) == 0) {
         SWOS_AUTOSKIP_LOG("[bug2]   CreateOffer playerOrd=%u: BAILED — duplicate offer "
                           "(team=0x%04X already has offer)",
@@ -5754,7 +6721,7 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
     /* GetRemainingOfferSwapSlots returns the remaining count.
        But the asm bridge sets d2 = remaining count AND sets Z flag for ==0.
        Since I'm calling the C function directly, I get the count back. */
-    if (swapSlots >= 2) {
+    if (!modern && swapSlots >= 2) {
         rnd = Rand2();
         if (rnd < 0x19) {
             int16_t extraOrd = PickRandomEligibleExtraPlayerOrdinal(refSkill);
@@ -5765,7 +6732,7 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
                     _offerOrdinals.numExtraPlayersWanted = -1;
                 } else {
                     /* Add extra player's value */
-                    uint16_t extraVal = GetAvgTeamValueBaseForCurrentPlayer(_selTeamNumber, (uint16_t)extraOrd);
+                    uint16_t extraVal = marketPlayerValue(_selTeamNumber, (uint16_t)extraOrd);
                     _offerValueBaseSum += extraVal;
 
                     /* Get extra player entry and check injury + position */
@@ -5795,13 +6762,13 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
 
     /* Try to add a swap player */
     uint16_t poolSlots = GetRemainingTransferPoolSlots();
-    if (poolSlots != 0) {
+    if (!modern && poolSlots != 0) {
         rnd = Rand2();
         if (rnd < 0x19) {
             int16_t swapOrd = PickRandomEligibleSwapPlayerOrdinalFromTeam(
                 (TeamFileEx *)teamBlock, -1);
             if (swapOrd >= 0) {
-                uint16_t swapVal = GetAvgTeamValueBaseForCurrentPlayer(_offerOrdinals.teamOffering, (uint16_t)swapOrd);
+                uint16_t swapVal = marketPlayerValue(_offerOrdinals.teamOffering, (uint16_t)swapOrd);
                 if (swapVal <= _offerTargetValueBase) {
                     _offerSwapValueBaseSum = swapVal;
                     _offerOrdinals.offerSwapPlayerOrdinal = swapOrd;
@@ -5814,7 +6781,7 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
                             int16_t extraSwapOrd = PickRandomEligibleSwapPlayerOrdinalFromTeam(
                                 (TeamFileEx *)teamBlock, swapOrd);
                             if (extraSwapOrd >= 0) {
-                                uint16_t extraSwapVal = GetAvgTeamValueBaseForCurrentPlayer(
+                                uint16_t extraSwapVal = marketPlayerValue(
                                     _offerOrdinals.teamOffering, (uint16_t)extraSwapOrd);
                                 uint16_t combined = extraSwapVal + _offerSwapValueBaseSum;
                                 if (combined <= _offerTargetValueBase) {
@@ -5831,10 +6798,12 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
 
     /* Calculate offer amount = targetValue - swapValue, with 15% floor */
     uint16_t cashOffer = _offerTargetValueBase - _offerSwapValueBaseSum;
-    uint16_t floor15pct = (uint16_t)((uint16_t)(_offerTargetValueBase * 15) / 100);
+    uint16_t floor15pct = modern ? (uint16_t)((uint32_t)_offerTargetValueBase * 15 / 100)
+                                   : (uint16_t)((uint16_t)(_offerTargetValueBase * 15) / 100);
     if (cashOffer < floor15pct)
         cashOffer = 0;
-    cashOffer = SnapToNearestAvgTeamValueBase(cashOffer);
+    if (!modern) cashOffer = SnapToNearestAvgTeamValueBase(cashOffer);
+    if (modern && cashOffer == 0) return;
     _offerOrdinals.offerAmount = cashOffer;
 
     /* Generate negotiation steps */
@@ -5846,7 +6815,7 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
         /* Step 1: random 105-112% of offer amount */
         uint16_t step1pct = (uint16_t)((uint16_t)(rnd * 0x14) >> 8) + 0x69;
         uint16_t step1 = (uint16_t)((uint32_t)step1pct * (uint32_t)_offerOrdinals.offerAmount / 100);
-        step1 = SnapToNearestAvgTeamValueBase(step1);
+        step1 = modern ? (step1 > INT16_MAX ? INT16_MAX : step1) : SnapToNearestAvgTeamValueBase(step1);
         if (step1 != _offerOrdinals.offerAmount) {
             _offerOrdinals.offerNegotiationStep1Amount = step1;
 
@@ -5855,7 +6824,7 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
                 /* Step 2: random 105-112% of step1 */
                 uint16_t step2pct = (uint16_t)((uint16_t)(rnd * 0x14) >> 8) + 0x69;
                 uint16_t step2 = (uint16_t)((uint32_t)step2pct * (uint32_t)_offerOrdinals.offerNegotiationStep1Amount / 100);
-                step2 = SnapToNearestAvgTeamValueBase(step2);
+                step2 = modern ? (step2 > INT16_MAX ? INT16_MAX : step2) : SnapToNearestAvgTeamValueBase(step2);
                 if (step2 != _offerOrdinals.offerNegotiationStep1Amount) {
                     _offerNegotiationStep2Amount = step2;
                 }
@@ -5873,7 +6842,7 @@ void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal)
             rosterDelta++;  /* gaining extra swap player */
     }
     int16_t newTotal = rosterDelta + (int16_t)_careerNumPlayers;
-    if (newTotal > 30) {
+    if (!modern && newTotal > 30) {
         SWOS_AUTOSKIP_LOG("[bug2]   CreateOffer playerOrd=%u: BAILED — roster overflow "
                           "(newTotal=%d careerNumPlayers=%u)",
                           (unsigned)playerOrdinal,
@@ -5921,6 +6890,7 @@ extern uint8_t  _playerTransferMenu[];
 __attribute__((used, externally_visible))
 int16_t EvaluateTransferOfferNegotiation(void)
 {
+    const int modern = ModernRuntime_Enabled();
     /* Check roster size constraint */
     int16_t rosterDelta = 1;  /* gaining the primary player */
     if (_offerOrdinals.numExtraPlayersWanted >= 0)
@@ -5931,10 +6901,20 @@ int16_t EvaluateTransferOfferNegotiation(void)
         rosterDelta--;  /* giving away extra swap player */
 
     int16_t newTotal = rosterDelta + (int16_t)_careerNumPlayers;
-    if ((uint16_t)newTotal > 30) {
+    if (!ModernRuntime_Enabled() && (uint16_t)newTotal > 30) {
         _currentMessage = 2;
         ShowChairmanMessage();
         return 0;
+    }
+
+    uint16_t listedAsking = modern ? modernNegotiatedBuy.listed_asking : classicListedAsking;
+    if (listedAsking && _offerOrdinals.numExtraPlayersWanted < 0 &&
+        _offerOrdinals.offerSwapPlayerOrdinal < 0 && _offerOrdinals.offerExtraPlayerOrdinal < 0) {
+        uint16_t asking = listedAsking;
+        uint16_t bid = _offerOrdinals.offerAmount;
+        _teamWillingToSellOrExchange = bid >= asking ? 0 : -(int16_t)(asking - bid);
+        ShowMenu(_playerTransferMenu);
+        return (int16_t)_transferPlayerMenuResult;
     }
 
     /* Save random state, seed with player-specific random */
@@ -5958,7 +6938,7 @@ int16_t EvaluateTransferOfferNegotiation(void)
     Randomize2(_seed2);
 
     /* Check if swap players can be accepted */
-    if (_offerOrdinals.offerSwapPlayerOrdinal >= 0) {
+    if (!ModernRuntime_Enabled() && _offerOrdinals.offerSwapPlayerOrdinal >= 0) {
         uint16_t slots = GetRemainingOfferSwapSlots();
         if (slots == 0)
             goto reject;
@@ -5995,36 +6975,34 @@ int16_t EvaluateTransferOfferNegotiation(void)
     }
 
     /* Get primary player demand value */
-    uint16_t demandValue = GetAvgTeamValueBaseForCurrentPlayer(_offerOrdinals.teamOffering, _offerOrdinals.offerPrimaryPlayerOrdinal);
+    uint16_t demandValue = marketPlayerValue(_offerOrdinals.teamOffering, _offerOrdinals.offerPrimaryPlayerOrdinal);
     uint16_t d7demand = demandValue;
 
     /* Add extra player wanted demand */
     if (_offerOrdinals.numExtraPlayersWanted >= 0) {
-        uint16_t extraDemand = GetAvgTeamValueBaseForCurrentPlayer(_offerOrdinals.teamOffering, (uint16_t)_offerOrdinals.numExtraPlayersWanted);
+        uint16_t extraDemand = marketPlayerValue(_offerOrdinals.teamOffering, (uint16_t)_offerOrdinals.numExtraPlayersWanted);
         d7demand += extraDemand;
     }
 
     /* Calculate total offer value (cash + swap players) */
-    uint16_t totalOffer = _offerOrdinals.offerAmount;
+    uint32_t totalOffer = _offerOrdinals.offerAmount;
 
     if (_offerOrdinals.offerSwapPlayerOrdinal >= 0) {
         /* Swap player valuation with random multiplier */
-        uint16_t swapVal = GetAvgTeamValueBaseForCurrentPlayer(_selTeamNumber, (uint16_t)_offerOrdinals.offerSwapPlayerOrdinal);
+        uint16_t swapVal = marketPlayerValue(_selTeamNumber, (uint16_t)_offerOrdinals.offerSwapPlayerOrdinal);
         uint16_t swapRnd = _swapPlayerValueRandom;
         uint16_t swapPct = (uint16_t)((uint16_t)(swapRnd * 0x4B) >> 8) + 0x32;
         uint16_t adjustedSwap = (uint16_t)(((uint32_t)swapPct * swapVal) / 100);
-        adjustedSwap = SnapToNearestAvgTeamValueBase(adjustedSwap);
+        if (!modern) adjustedSwap = SnapToNearestAvgTeamValueBase(adjustedSwap);
         totalOffer += adjustedSwap;
 
-        if (_offerOrdinals.offerExtraPlayerOrdinal >= 0) {
-            /* Extra swap player valuation */
-            uint16_t extraSwapVal = GetAvgTeamValueBaseForCurrentPlayer(_selTeamNumber, (uint16_t)_offerOrdinals.offerExtraPlayerOrdinal);
-            uint16_t extraRnd = _extraPlayerValueRandom;
-            uint16_t extraPct = (uint16_t)((uint16_t)(extraRnd * 0x32) >> 8) + 0x32;
-            uint16_t adjustedExtra = (uint16_t)(((uint32_t)extraPct * extraSwapVal) / 100);
-            adjustedExtra = SnapToNearestAvgTeamValueBase(adjustedExtra);
-            totalOffer += adjustedExtra;
-        }
+    }
+    if (_offerOrdinals.offerExtraPlayerOrdinal >= 0) {
+        uint16_t extraSwapVal = marketPlayerValue(_selTeamNumber, (uint16_t)_offerOrdinals.offerExtraPlayerOrdinal);
+        uint16_t extraRnd = _extraPlayerValueRandom;
+        uint16_t extraPct = (uint16_t)((uint16_t)(extraRnd * 0x32) >> 8) + 0x32;
+        uint16_t adjustedExtra = (uint16_t)(((uint32_t)extraPct * extraSwapVal) / 100);
+        totalOffer += modern ? adjustedExtra : SnapToNearestAvgTeamValueBase(adjustedExtra);
     }
 
     /* Determine selling team's asking price (d5).
@@ -6040,7 +7018,7 @@ int16_t EvaluateTransferOfferNegotiation(void)
      * through. Reported as "buying expensive top players by offering shitty
      * players in an exchange deal" -- Newcastle accepting $1M + Edgar Davids
      * ($1.8M) for Alan Shearer ($16M). Keep these in 32-bit. */
-    uint16_t askingPrice;
+    uint32_t askingPrice;
 
     /* Check if offering team is from a different division than career team.
      * Both sides need the country byte (MSB). Pre-fix the right-hand side
@@ -6073,7 +7051,7 @@ int16_t EvaluateTransferOfferNegotiation(void)
         /* High-value player: 100-149% of demand */
         rnd = Rand2();
         uint16_t pct = (uint16_t)((uint16_t)(rnd * 0x32) >> 8) + 0x64;
-        askingPrice = (uint16_t)(((uint32_t)pct * d7demand) / 100);
+        askingPrice = (uint32_t)pct * d7demand / 100;
         /* nullsub_14 — no-op */
         goto compareOffer;
     }
@@ -6081,7 +7059,8 @@ int16_t EvaluateTransferOfferNegotiation(void)
 checkMarket:
     /* Check if player(s) are on the transfer market */
     {
-        int16_t primOnMarket = (FindPlayerInCareerOrForeignMarket(_offerOrdinals.teamOffering, _offerOrdinals.offerPrimaryPlayerOrdinal) == 0);
+        int16_t primOnMarket = modernListedOffer ||
+            FindPlayerInCareerOrForeignMarket(_offerOrdinals.teamOffering, _offerOrdinals.offerPrimaryPlayerOrdinal) == 0;
         int16_t allOnMarket = 0;
 
         if (primOnMarket) {
@@ -6100,7 +7079,7 @@ checkMarket:
             /* All requested players are on market → low demand (87-101%) */
             rnd = Rand2();
             uint16_t pct = (uint16_t)((uint16_t)(rnd * 0x26) >> 8) + 0x57;
-            askingPrice = (uint16_t)(((uint32_t)pct * d7demand) / 100);
+            askingPrice = (uint32_t)pct * d7demand / 100;
             goto compareOffer;
         }
 
@@ -6124,14 +7103,14 @@ checkMarket:
                 /* Rare low demand: 95-133% */
                 rnd = Rand2();
                 uint16_t pct = (uint16_t)((uint16_t)(rnd * 0x28) >> 8) + 0x5F;
-                askingPrice = (uint16_t)(((uint32_t)pct * d7demand) / 100);
+                askingPrice = (uint32_t)pct * d7demand / 100;
                 goto compareOffer;
             }
 
             /* Normal demand: 150-249% */
             rnd = Rand2();
             uint16_t pct = (uint16_t)((uint16_t)(rnd * 0x64) >> 8) + 0x96;
-            askingPrice = (uint16_t)(((uint32_t)pct * d7demand) / 100);
+            askingPrice = (uint32_t)pct * d7demand / 100;
             goto compareOffer;
 
         onTransferList:
@@ -6139,13 +7118,19 @@ checkMarket:
             rnd = Rand2();
             {
                 uint16_t pct = (uint16_t)((uint16_t)(rnd * 0x96) >> 8) + 0x96;
-                askingPrice = (uint16_t)(((uint32_t)pct * d7demand) / 100);
+                askingPrice = (uint32_t)pct * d7demand / 100;
             }
             goto compareOffer;
         }
     }
 
 compareOffer:
+    if (modern && askingPrice > 50000u)
+        askingPrice = 50000u;
+    if (!modern) {
+        askingPrice = (uint16_t)askingPrice;
+        totalOffer = (uint16_t)totalOffer;
+    }
     if (totalOffer >= askingPrice) {
         /* Offer meets asking price — willing to sell */
         _teamWillingToSellOrExchange = 0;
@@ -6162,8 +7147,12 @@ compareOffer:
         /* Close enough — counter-offer */
         rnd = Rand2();
         uint16_t counterPct = (uint16_t)((uint16_t)(rnd * 0xA) >> 8) + 0x64;
-        uint16_t counterVal = (uint16_t)(((uint32_t)counterPct * askingPrice) / 100);
-        counterVal = SnapUpToAvgTeamValueBase(counterVal);
+        uint32_t counterVal = (uint32_t)counterPct * askingPrice / 100;
+        if (modern) {
+            if (counterVal > 50000u) counterVal = 50000u;
+        } else {
+            counterVal = SnapUpToAvgTeamValueBase((uint16_t)counterVal);
+        }
         int16_t counterDiff = (int16_t)(counterVal - totalOffer);
         counterDiff = -counterDiff;
         _teamWillingToSellOrExchange = counterDiff;

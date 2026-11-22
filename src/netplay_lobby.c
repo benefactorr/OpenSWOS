@@ -29,6 +29,12 @@
  * OTHER player's team or tactic, or (for the joiner) the host's rules. A match only
  * starts from two ready flags set after the last change either of them could see.
  *
+ * THE CHAT has a channel too (CH_CHAT). Its message is the sender's last CHAT_WINDOW lines
+ * with the number of the first: the link keeps only the newest message, so each one carries
+ * what an earlier, replaced one may not have delivered, and the receiver takes the lines
+ * numbered past the last it has. Numbered per lobby, not per connection, so a rematch's
+ * reconnect re-sends the window and nothing is shown twice.
+ *
  * THE USER TACTICS. Six slots, USER A-F, shared by both teams. Each player's USER
  * tactic travels with their STATE, and the match puts player 1's in USER A and
  * player 2's in USER B -- SWOS 2020's convention -- so two players who both use
@@ -36,6 +42,7 @@
  * their six slots from before the match and put it back afterwards
  * (NetplayLobby_RestoreTactics): playing online never changes a player's library.
  */
+#include "mod_hooks.h"    /* lobbyKeepsReady */
 #include "netplay_lobby.h"
 
 #ifdef SWOS_SDL_BUILD
@@ -54,13 +61,15 @@
 #include "custom_team.h"   /* CustomTeam_Allowed: what a team from the other player may be */
 #include "team_proto.h"    /* the server's word on both teams */
 #include "test_rules.h"     /* the host's CARDS/INJURIES switch */
+#include "chat_style.h"     /* SWOS_CHAT_DYNAMIC_FONT */
+#include "match_chat.h"     /* MatchChat_Clean: what a chat line may hold */
 
 #include <SDL.h>                        /* SDL_GetPerformanceCounter: key entropy fallback */
 #include <time.h>
 
 #ifdef SWOS_NETPLAY
 
-extern TeamFileEx _selectedTeams[100];
+extern TeamFileEx _selectedTeams[SELECTED_TEAMS_MAX];
 extern uint16_t   _numSelectedTeams;
 extern uint8_t    _teamTacticsUSERA[], _teamTacticsUSERB[], _teamTacticsUSERC[];
 extern uint8_t    _teamTacticsUSERD[], _teamTacticsUSERE[], _teamTacticsUSERF[];
@@ -70,7 +79,7 @@ extern uint16_t   _gameType, _trainingGame, _isCareer;
 extern uint16_t   _extraTimeState, _penaltiesState, _secondLeg, _playing2ndGame;
 extern uint16_t   _team1GoalsFirstLeg, _team2GoalsFirstLeg;
 
-enum { CH_STATE = 0, CH_START = 1, CH_ANSWER = 2 };
+enum { CH_STATE = 0, CH_START = 1, CH_ANSWER = 2, CH_CHAT = 5 };   /* (3 and 4: the match report, PRED) */
 
 enum {
     TACTIC_BYTES   = 370,
@@ -81,18 +90,21 @@ enum {
 #define STATE_MAGIC   0x53554C42u       /* "SULB" */
 #define START_MAGIC   0x53555354u       /* "SUST" */
 #define ANSWER_MAGIC  0x5355414Eu       /* "SUAN" */
-#define LOBBY_VERSION 5     /* 2: START carries the match's packet key; 3: and the kick-off state;
-                               4: the cup rules; 5: the host's switches */
+#define LOBBY_VERSION 7     /* 2: START carries the match's packet key; 3: and the kick-off state;
+                               4: the cup rules; 5: the host's switches; 6: FRAME DELAY's extra
+                               frames (STATE) and the match's delay (START); 7: the match's
+                               mode and the service's match / leg ids (the rules) */
 
 /* STATE: magic, version, player, ready, activity, hasTeam, tactic, rulesGen, the ten
- * rules, the name, the team, the USER tactic. */
-enum { RULE_WORDS = 10 };
+ * rules, the name, the team, the USER tactic, the extra delay frames. */
+enum { RULE_WORDS = 15 };            /* (the last five: the mode, the match id and the leg id) */
+enum { CHAT_WINDOW = 8, CHAT_MAGIC = 0x43484154 /* "CHAT" */ };
 enum { STATE_BYTES = 4 + 2 + 4 + 2 + 2 + RULE_WORDS * 2 + LOBBY_NAME_MAX + NETPLAY_TEAM_BYTES +
-                     TACTIC_BYTES };
+                     TACTIC_BYTES + 1 };
 /* START: magic, version, the joiner STATE generation it was built on, rulesGen, the
- * packet key; then the setup's length and the setup; then the host's state to kick off
+ * packet key, the match's input delay; then the setup's length and the setup; then the host's state to kick off
  * from (a state_wire packet, the rest of the message -- see NetplayLobby_ApplyMatch). */
-enum { KEY_BYTES = 16, START_HEADER = 4 + 2 + 2 + 2 + KEY_BYTES };
+enum { KEY_BYTES = 16, START_HEADER = 4 + 2 + 2 + 2 + KEY_BYTES + 2 };
 /* ANSWER: magic, version, the START generation, accepted, pad. */
 enum { ANSWER_BYTES = 4 + 2 + 2 + 1 + 1 };
 
@@ -113,7 +125,8 @@ static struct {
 
     char        peerIp[24];
     uint16_t    peerPort, localPort;
-    int32_t     delay;
+    int32_t     delay;                  /* AUTO: the link's agreed delay */
+    int32_t     matchDelay;             /* the START's (0: none agreed yet) */
     int32_t     simWidth;               /* the simulation draw width both agreed */
 
     int32_t     tacticsSaved;
@@ -126,6 +139,18 @@ static struct {
     uint8_t     packetKey[KEY_BYTES];   /* ...and the key its GGPO packets are checksummed with */
 
     char        notice[64];
+
+    /* The chat (CH_CHAT). */
+    LobbyChatLine chat[LOBBY_CHAT_KEEP];
+    int32_t     chatCount;
+    uint32_t    chatSerial;
+    char        said[CHAT_WINDOW][LOBBY_CHAT_TEXT + 1];   /* our last lines, the oldest first */
+    uint16_t    saidNext;               /* the number our next line gets (1..) */
+    int32_t     saidCount;
+    int32_t     chatDirty;              /* our window needs sending */
+    uint16_t    heardUpTo;              /* the other player's last line we have */
+    uint16_t    chatGen;                /* their CH_CHAT message we last read */
+    int32_t     peerAnnounced;          /* the bot has said they are here */
 } s_lobby;
 
 static uint8_t *tactic_slot(int32_t i)
@@ -140,6 +165,7 @@ static uint8_t *tactic_slot(int32_t i)
     }
 }
 
+enum { kLegPlayers = 16 };
 static LobbyPlayer *mine(void)   { return &s_lobby.players[s_lobby.me - 1]; }
 static LobbyPlayer *theirs(void) { return &s_lobby.players[2 - s_lobby.me]; }
 
@@ -148,8 +174,190 @@ static void set_notice(const char *text)
     snprintf(s_lobby.notice, sizeof s_lobby.notice, "%s", text ? text : "");
 }
 
+/* ---- the chat ---- */
+
+#if SWOS_CHAT_DYNAMIC_FONT
+/* A line as the chat font draws it (MatchChat_Clean: no control characters, '?' for what the
+ * font lacks, trimmed, at most LOBBY_CHAT_TEXT bytes, cut on a character) -- what we say, and
+ * what the other player sends, which is theirs to make up. `len` bounds the input. */
+static void chat_clean(char *out, const char *in, uint32_t len)
+{
+    char tmp[4 * LOBBY_CHAT_TEXT + 1];
+    if (len > sizeof tmp - 1)
+        len = sizeof tmp - 1;
+    len = (uint32_t)strnlen(in, len);           /* (a string may end before len) */
+    memcpy(tmp, in, len);
+    tmp[len] = 0;
+    MatchChat_Clean(tmp, out, LOBBY_CHAT_TEXT + 1);
+}
+#else   /* the game's own font (chat_style.h) */
+/* A line as the menus draw it: printable, capitals, trimmed, at most LOBBY_CHAT_TEXT --
+ * what we say, and what the other player sends, which is theirs to make up. */
+static void chat_clean(char *out, const char *in, uint32_t len)
+{
+    uint32_t n = 0, i;
+    for (i = 0; i < len && in[i] && n < LOBBY_CHAT_TEXT; i++) {
+        char c = in[i];
+        if (c >= 'a' && c <= 'z')
+            c = (char)(c - 'a' + 'A');
+        if (c < ' ' || c > 'Z')
+            c = c == '_' ? '-' : '?';
+        if (c == ' ' && n == 0)
+            continue;
+        out[n++] = c;
+    }
+    while (n > 0 && out[n - 1] == ' ')
+        n--;
+    out[n] = 0;
+}
+#endif
+
+static void chat_add_cont(int32_t who, const char *text, int32_t cont);
+static void chat_add(int32_t who, const char *text) { chat_add_cont(who, text, 0); }
+static void chat_add_cont(int32_t who, const char *text, int32_t cont)
+{
+    LobbyChatLine *l;
+    if (s_lobby.chatCount == LOBBY_CHAT_KEEP) {
+        memmove(&s_lobby.chat[0], &s_lobby.chat[1], (LOBBY_CHAT_KEEP - 1) * sizeof s_lobby.chat[0]);
+        s_lobby.chatCount--;
+    }
+    l = &s_lobby.chat[s_lobby.chatCount++];
+    l->who = who;
+    l->cont = cont;
+    snprintf(l->text, sizeof l->text, "%s", text);
+    s_lobby.chatSerial++;
+    fprintf(stderr, "[chat] %s: %s\n", who == LOBBY_CHAT_ME ? "me" : who == LOBBY_CHAT_THEM ? "them" : "bot",
+            l->text);
+}
+
+/* CH_CHAT: "CHAT", the number of the first line, how many, then each line's length and
+ * characters. */
+static void send_chat(void)
+{
+    uint8_t buf[4 + 2 + 1 + CHAT_WINDOW * (1 + LOBBY_CHAT_TEXT)], *q = buf;
+    int32_t i;
+    BE_WRITE_U32(q, CHAT_MAGIC);                                        q += 4;
+    BE_WRITE_U16(q, (uint16_t)(s_lobby.saidNext - s_lobby.saidCount)); q += 2;
+    *q++ = (uint8_t)s_lobby.saidCount;
+    for (i = 0; i < s_lobby.saidCount; i++) {
+        const uint32_t n = (uint32_t)strlen(s_lobby.said[i]);
+        *q++ = (uint8_t)n;
+        memcpy(q, s_lobby.said[i], n);
+        q += n;
+    }
+    if (P2PLink_Send(CH_CHAT, buf, (uint32_t)(q - buf)) == 0)
+        s_lobby.chatDirty = 0;
+}
+
+static void read_chat(void)
+{
+    uint32_t len = 0;
+    uint16_t gen = 0, seq;
+    const uint8_t *m = P2PLink_Received(CH_CHAT, &len, &gen), *q, *end;
+    int32_t n, i;
+    if (!m || gen == s_lobby.chatGen)
+        return;
+    s_lobby.chatGen = gen;
+    if (len < 7 || BE_READ_U32(m) != CHAT_MAGIC)
+        return;
+    end = m + len;
+    seq = BE_READ_U16(m + 4);
+    n   = m[6];
+    q   = m + 7;
+    for (i = 0; i < n && q < end; i++, seq++) {
+        char line[LOBBY_CHAT_TEXT + 1];
+        uint32_t l = *q++;
+        if (l > (uint32_t)(end - q))
+            return;
+        if ((int16_t)(seq - s_lobby.heardUpTo) > 0) {   /* (numbers wrap: compared as a difference) */
+            chat_clean(line, (const char *)q, l);
+            if (line[0])
+                chat_add(LOBBY_CHAT_THEM, line);
+            s_lobby.heardUpTo = seq;
+        }
+        q += l;
+    }
+}
+
+int32_t NetplayLobby_Say(const char *text)
+{
+    char line[LOBBY_CHAT_TEXT + 1];
+    chat_clean(line, text ? text : "", 4 * LOBBY_CHAT_TEXT);
+    if (!line[0] || s_lobby.state == LOBBY_CLOSED)
+        return 1;
+    if (s_lobby.saidCount == CHAT_WINDOW) {
+        memmove(s_lobby.said[0], s_lobby.said[1], (CHAT_WINDOW - 1) * sizeof s_lobby.said[0]);
+        s_lobby.saidCount--;
+    }
+    snprintf(s_lobby.said[s_lobby.saidCount++], sizeof s_lobby.said[0], "%s", line);
+    s_lobby.saidNext++;
+    s_lobby.chatDirty = 1;
+    chat_add(LOBBY_CHAT_ME, line);
+    if (P2PLink_State() == P2P_CONNECTED && s_lobby.state != LOBBY_RECONNECTING)
+        send_chat();
+    return 0;
+}
+
+/* The bot's lines can be longer than a player's: wrapped at a space, a line each. */
+void NetplayLobby_ChatNotice(const char *text)
+{
+    const char *p = text ? text : "";
+    int32_t first = 1;
+    while (*p) {
+        char line[LOBBY_CHAT_TEXT + 1];
+        uint32_t n = (uint32_t)strlen(p), cut = n;
+        if (n > LOBBY_CHAT_TEXT) {
+            cut = LOBBY_CHAT_TEXT;
+            while (cut > 0 && p[cut] != ' ')
+                cut--;
+            if (cut == 0)
+                cut = LOBBY_CHAT_TEXT;
+        }
+        chat_clean(line, p, cut);
+        if (line[0]) {
+            chat_add_cont(LOBBY_CHAT_BOT, line, !first);
+            first = 0;
+        }
+        p += cut;
+        while (*p == ' ')
+            p++;
+    }
+}
+
+int32_t              NetplayLobby_ChatCount(void)  { return s_lobby.chatCount; }
+uint32_t             NetplayLobby_ChatSerial(void) { return s_lobby.chatSerial; }
+const LobbyChatLine *NetplayLobby_ChatLine(int32_t i)
+{
+    return i >= 0 && i < s_lobby.chatCount ? &s_lobby.chat[i] : NULL;
+}
+
+/* The lobby closes with a reason: the reason, in the chat too, where it stays. */
+static void fail_with(const char *text)
+{
+    s_lobby.state = LOBBY_FAILED;
+    set_notice(text);
+    NetplayLobby_ChatNotice(text);
+}
+
+/* Field by field: the struct has padding (before matchId), which a memcmp would read. */
+/* The terms a player agrees to by being ready: everything but the service's match and leg ids,
+ * which are its bookkeeping (a ranked match's ids arrive after it is played). */
+static int32_t same_terms(const LobbyRules *a, const LobbyRules *b)
+{
+    return a->gameLength == b->gameLength && a->pitchType == b->pitchType && a->minSubs == b->minSubs &&
+           a->maxSubs == b->maxSubs && a->legs == b->legs && a->tieBreak == b->tieBreak && a->leg == b->leg &&
+           a->firstLeg1 == b->firstLeg1 && a->firstLeg2 == b->firstLeg2 && a->switches == b->switches &&
+           a->mode == b->mode;
+}
+
+static int32_t rules_equal(const LobbyRules *a, const LobbyRules *b)
+{
+    return same_terms(a, b) && a->matchId == b->matchId && a->legId == b->legId;
+}
+
 static void clamp_rules(LobbyRules *r)
 {
+    r->switches &= NETPLAY_SW_ALL;      /* (an older host's CATCH UP / BALANCE: gone) */
     if (r->gameLength > 3)
         r->gameLength = 0;
     if (r->pitchType != RANDOM_PITCH && r->pitchType > 6)
@@ -174,6 +382,10 @@ static void clamp_rules(LobbyRules *r)
         r->firstLeg1 = 99;
     if (r->firstLeg2 > 99)
         r->firstLeg2 = 99;
+    if (r->mode > LOBBY_MODE_RANKED)
+        r->mode = LOBBY_MODE_FRIENDLY;
+    if (r->mode == LOBBY_MODE_FRIENDLY)
+        r->matchId = r->legId = 0;
     r->switches &= NETPLAY_SW_ALL;
 #ifndef SWOS_TEST_RULES
     /* A release has the no-cards rule compiled out: as the host it always plays with them.
@@ -228,10 +440,14 @@ static int32_t encode_state(uint8_t *out)
     BE_WRITE_U16(q, s_lobby.rules.firstLeg1);     q += 2;
     BE_WRITE_U16(q, s_lobby.rules.firstLeg2);     q += 2;
     BE_WRITE_U16(q, s_lobby.rules.switches);      q += 2;
+    BE_WRITE_U16(q, s_lobby.rules.mode);          q += 2;
+    BE_WRITE_U32(q, s_lobby.rules.matchId);       q += 4;
+    BE_WRITE_U32(q, s_lobby.rules.legId);         q += 4;
     memset(q, 0, LOBBY_NAME_MAX);
     memcpy(q, p->name, strnlen(p->name, LOBBY_NAME_MAX)); q += LOBBY_NAME_MAX;
     NetplaySetup_WriteTeam(q, &p->team);          q += NETPLAY_TEAM_BYTES;
     memcpy(q, &p->userTactic, TACTIC_BYTES);      q += TACTIC_BYTES;
+    *q++ = (uint8_t)p->extraDelay;
     return (int32_t)(q - out);
 }
 
@@ -247,7 +463,7 @@ static void send_state(void)
  * changes in any way that matters to the match. */
 static int32_t side_differs(const LobbyPlayer *a, const LobbyPlayer *b)
 {
-    if (a->hasTeam != b->hasTeam || a->tactic != b->tactic)
+    if (a->hasTeam != b->hasTeam || a->tactic != b->tactic || a->extraDelay != b->extraDelay)
         return 1;
     if (a->hasTeam && memcmp(&a->team, &b->team, sizeof a->team) != 0)
         return 1;
@@ -277,6 +493,8 @@ static void read_peer_state(void)
     LobbyRules rules;
     uint16_t rulesGen;
 
+    memset(&rules, 0, sizeof rules);
+
     if (!m || gen == s_lobby.peerStateGen)
         return;
     s_lobby.peerStateGen = gen;
@@ -302,10 +520,14 @@ static void read_peer_state(void)
     rules.firstLeg1  = BE_READ_U16(q);            q += 2;
     rules.firstLeg2  = BE_READ_U16(q);            q += 2;
     rules.switches   = BE_READ_U16(q);            q += 2;
+    rules.mode       = BE_READ_U16(q);            q += 2;
+    rules.matchId    = BE_READ_U32(q);            q += 4;
+    rules.legId      = BE_READ_U32(q);            q += 4;
     memcpy(got.name, q, LOBBY_NAME_MAX);          q += LOBBY_NAME_MAX;
     got.name[LOBBY_NAME_MAX] = '\0';
     NetplaySetup_ReadTeam(&got.team, q);          q += NETPLAY_TEAM_BYTES;
-    memcpy(&got.userTactic, q, TACTIC_BYTES);
+    memcpy(&got.userTactic, q, TACTIC_BYTES);     q += TACTIC_BYTES;
+    got.extraDelay = *q <= LOBBY_EXTRA_DELAY_MAX ? *q : LOBBY_EXTRA_DELAY_MAX;
     if (got.tactic < 0 || got.tactic > LOBBY_TACTIC_MAX)
         got.tactic = 0;
     /* A team is a team of the database, with at most its names, faces, kits and line-up
@@ -318,17 +540,23 @@ static void read_peer_state(void)
         got.refused = 1;
     }
 
-    if (theirs()->known && side_differs(theirs(), &got))
+    if (theirs()->known && side_differs(theirs(), &got) && !ModHooks_LobbyKeepsReady())
         drop_my_ready();
     got.verified = theirs()->verified;      /* the server's word stands until the team changes (team_check) */
     *theirs() = got;
+    if (!s_lobby.peerAnnounced && got.name[0]) {
+        char line[LOBBY_NAME_MAX + 16];
+        snprintf(line, sizeof line, "%s CONNECTED", got.name);
+        NetplayLobby_ChatNotice(line);
+        s_lobby.peerAnnounced = 1;
+    }
 
     if (s_lobby.me == 2) {
         /* The host's rules. A change after the first sighting means the joiner has
          * not agreed to these yet. */
         if (rulesGen != s_lobby.rulesGen) {
             clamp_rules(&rules);
-            if (s_lobby.rulesGen != 0 && memcmp(&rules, &s_lobby.rules, sizeof rules) != 0)
+            if (s_lobby.rulesGen != 0 && !same_terms(&rules, &s_lobby.rules))
                 drop_my_ready();
             s_lobby.rules    = rules;
             s_lobby.rulesGen = rulesGen;
@@ -373,10 +601,8 @@ static void apply_switches(uint16_t sw)
     /* CARDS/INJURIES off: the old tester builds' rule, for this match, on both machines,
      * from the kick-off on (test_rules.h; the recording says so -- netplay_match.c). */
     TestRules_Force((sw & NETPLAY_SW_CARDS_INJURIES) ? -1 : 1);
-    fprintf(stderr, "[lobby] the host's switches: short presses %s, catch up %s, kick-off sync %s, "
-            "balance %s, cards/injuries %s\n",
-            (sw & NETPLAY_SW_SHORT_PRESSES) ? "ON" : "OFF", (sw & NETPLAY_SW_CATCH_UP) ? "ON" : "OFF",
-            (sw & NETPLAY_SW_KICKOFF_SYNC) ? "ON" : "OFF", (sw & NETPLAY_SW_BALANCE) ? "ON" : "OFF",
+    fprintf(stderr, "[lobby] the host's switches: short presses %s, kick-off sync %s, cards/injuries %s\n",
+            (sw & NETPLAY_SW_SHORT_PRESSES) ? "ON" : "OFF", (sw & NETPLAY_SW_KICKOFF_SYNC) ? "ON" : "OFF",
             (sw & NETPLAY_SW_CARDS_INJURIES) ? "ON" : "OFF");
 }
 
@@ -446,6 +672,11 @@ static void assemble_match(void)
         }
         team.team.teamControls = TEAM_PLAYER_CONTROLLED;
         team.team.tactics      = (uint8_t)tactic;
+        if (!NetplayLobby_SecondLeg()) {        /* (the rules may have left the tie since) */
+            int32_t i;
+            for (i = 0; i < kLegPlayers; i++)
+                team.players[i].cardsInjuries = 0;
+        }
         _selectedTeams[p] = team;
     }
     /* THE SAME TEAM ON BOTH SIDES. A match finds a team by its NUMBER -- country and
@@ -579,6 +810,7 @@ static void read_start(void)
                 keep_setup(setup, setupLen);
                 keep_kickoff(kick, kickLen);
                 memcpy(s_lobby.packetKey, m + 10, KEY_BYTES);
+                s_lobby.matchDelay = BE_READ_U16(m + 10 + KEY_BYTES);
             }
         }
     }
@@ -612,6 +844,7 @@ static void read_answer(void)
     } else {
         NetplayLobby_RestoreTactics();
         s_lobby.state = LOBBY_OPEN;
+        s_lobby.matchDelay = 0;
         set_notice("THE OTHER PLAYER CHANGED THEIR SIDE - TRY AGAIN");
     }
 }
@@ -646,6 +879,7 @@ void NetplayLobby_Begin(int32_t localPlayer, const char *localName)
     memset(&s_lobby, 0, sizeof s_lobby);
     s_lobby.me    = localPlayer == 2 ? 2 : 1;
     s_lobby.state = LOBBY_OPEN;
+    s_lobby.saidNext = 1;
     mine()->known = 1;
     snprintf(mine()->name, sizeof mine()->name, "%s",
              (localName && localName[0]) ? localName : (s_lobby.me == 1 ? "PLAYER 1" : "PLAYER 2"));
@@ -663,15 +897,13 @@ void NetplayLobby_Begin(int32_t localPlayer, const char *localName)
         s_lobby.rules.pitchType  = _pitchType <= 6 ? _pitchType : RANDOM_PITCH;
         s_lobby.rules.minSubs    = 2;
         s_lobby.rules.maxSubs    = 5;
-        /* The switches as this build plays, with the host's own SHORT PRESSES and
-         * BALANCE settings: what the host played by before there were switches. */
+        /* The switches as this build plays, with the host's own SHORT PRESSES setting:
+         * what the host played by before there were switches. */
         {
             extern int InputSDL_PressLatch(void);
-            uint16_t sw = NETPLAY_SW_DEFAULT & ~(NETPLAY_SW_SHORT_PRESSES | NETPLAY_SW_BALANCE);
+            uint16_t sw = NETPLAY_SW_DEFAULT & ~NETPLAY_SW_SHORT_PRESSES;
             if (InputSDL_PressLatch())
                 sw |= NETPLAY_SW_SHORT_PRESSES;
-            if (NetplayMatch_BalanceSetting())
-                sw |= NETPLAY_SW_BALANCE;
             s_lobby.rules.switches = sw;
         }
         clamp_rules(&s_lobby.rules);
@@ -712,6 +944,9 @@ int32_t NetplayLobby_Rematch(const char *notice)
     s_lobby.answerHandled = 0;
     s_lobby.peerRulesSeen = 0;          /* the joiner echoes the rules again */
     s_lobby.accepted      = 0;
+    s_lobby.chatGen       = 0;
+    s_lobby.chatDirty     = 1;          /* the window again, on the new link */
+    s_lobby.matchDelay    = 0;          /* AUTO is measured again; the extras stay */
 
     /* Both sides stay; neither is ready for a match nobody has agreed to yet. */
     mine()->ready      = 0;
@@ -722,14 +957,13 @@ int32_t NetplayLobby_Rematch(const char *notice)
     set_notice(notice);
 
     if (!s_lobby.peerIp[0]) {
-        s_lobby.state = LOBBY_FAILED;
-        set_notice("THE OTHER PLAYER'S ADDRESS WAS LOST");
+        fail_with("THE OTHER PLAYER'S ADDRESS WAS LOST");
         return 1;
     }
     snprintf(addr, sizeof addr, "%s:%u", s_lobby.peerIp, (unsigned)s_lobby.peerPort);
+    P2PLink_SetPlayer(s_lobby.me);      /* the host stays the host: whose style is played */
     if (P2PLink_Punch(list, 1, s_lobby.localPort) != 0) {
-        s_lobby.state = LOBBY_FAILED;
-        set_notice("COULD NOT RECONNECT");
+        fail_with("COULD NOT RECONNECT");
         return 1;
     }
     s_lobby.state = LOBBY_RECONNECTING;
@@ -746,8 +980,7 @@ void NetplayLobby_Poll(void)
 
     if (st == LOBBY_RECONNECTING) {
         if (P2PLink_State() == P2P_FAILED) {
-            s_lobby.state = LOBBY_FAILED;
-            set_notice("YOUR OPPONENT DID NOT COME BACK");
+            fail_with("YOUR OPPONENT DID NOT COME BACK");
             return;
         }
         /* The same wait mpWaitingMenu makes before a first lobby: linked, and the
@@ -760,6 +993,7 @@ void NetplayLobby_Poll(void)
 
     /* Messages before the link state: they stay readable after the link goes. */
     read_peer_state();
+    read_chat();
     if (s_lobby.me == 2)
         read_start();
     else
@@ -788,10 +1022,9 @@ void NetplayLobby_Poll(void)
     if (P2PLink_State() != P2P_CONNECTED) {
         P2PLinkFailure why = P2PLink_State() == P2P_FAILED ? P2PLink_Failure() : P2PLink_Notice();
         NetplayLobby_RestoreTactics();          /* a start that was under way borrowed them */
-        s_lobby.state = LOBBY_FAILED;
-        set_notice(why == P2P_FAIL_PEER_LEFT ? "THE OTHER PLAYER LEFT" :
-                   why == P2P_FAIL_LOST      ? "LOST THE CONNECTION" :
-                                               "THE CONNECTION FAILED");
+        fail_with(why == P2P_FAIL_PEER_LEFT ? "THE OTHER PLAYER LEFT" :
+                  why == P2P_FAIL_LOST      ? "LOST THE CONNECTION" :
+                                              "THE CONNECTION FAILED");
         return;
     }
 
@@ -799,6 +1032,8 @@ void NetplayLobby_Poll(void)
         team_check();
     if (s_lobby.state == LOBBY_OPEN && s_lobby.dirty)
         send_state();
+    if (s_lobby.chatDirty && (s_lobby.state == LOBBY_OPEN || s_lobby.state == LOBBY_STARTING))
+        send_chat();
 }
 
 LobbyState         NetplayLobby_State(void)       { return s_lobby.state; }
@@ -849,6 +1084,10 @@ void NetplayLobby_SetReady(int32_t ready)
         set_notice(NOT_IN_YOUR_BUILD);
         return;
     }
+    if (ready && NetplayLobby_LegBlocked(&p->team)) {
+        set_notice("REPLACE YOUR INJURED OR SENT OFF PLAYERS");
+        return;
+    }
     if (p->ready != (ready ? 1 : 0)) {
         p->ready = ready ? 1 : 0;
         s_lobby.dirty = 1;
@@ -864,31 +1103,127 @@ void NetplayLobby_SetActivity(int32_t activity)
     s_lobby.dirty = 1;
 }
 
+/* ---- what a first leg leaves behind ----
+ *
+ * SWOS 2020 copies both teams back after a first leg, and the second is played with what it left
+ * on them (updateCardsInjuriesAndEtc). Here each game reads it off the match it has just played,
+ * and the two played the same match, so nothing has to be sent. In the player's cardsInjuries,
+ * as a friendly's init reads it: the injury in its top three bits; a sending-off as two cards,
+ * which is numYellowCards 2 again, so that he cannot come on from the bench. The same player
+ * is found through playerIndex: a substitution moves him in the match's order, not in the team's. */
+enum { CARDS_SENT_OFF = 2 << 2, CARDS_MASK = 0x1C, INJURY_MASK = 0xE0, INJURY_KNOCK = 0x20 };
+
+static void leg_carry(LobbyPlayer *side, const TeamGame *played)
+{
+    int32_t i;
+    for (i = 0; i < kLegPlayers; i++) {
+        const PlayerInfo *pi = &played->players[i];
+        const int32_t idx = pi->playerIndex;
+        uint8_t status = 0;
+        if (idx < 0 || idx >= kLegPlayers)
+            continue;
+        if (pi->isInjured)
+            status |= (uint8_t)pi->injuriesBitfield & INJURY_MASK;
+        if ((uint8_t)pi->numYellowCards >= 2)
+            status |= CARDS_SENT_OFF;
+        side->team.players[idx].cardsInjuries = status;
+        if (status)
+            fprintf(stderr, "[lobby] second leg: %.22s (%.16s) carries %s%s (level %d)\n",
+                    (const char *)side->team.players[idx].playerName, (const char *)side->team.team.teamName,
+                    status & CARDS_SENT_OFF ? "a sending-off " : "",
+                    status & INJURY_MASK ? "an injury" : "", (int)(status >> 5));
+    }
+}
+
+static void leg_clear(void)
+{
+    int32_t p, i;
+    for (p = 0; p < 2; p++)
+        for (i = 0; i < kLegPlayers; i++)
+            s_lobby.players[p].team.players[i].cardsInjuries = 0;
+}
+
+int32_t NetplayLobby_SecondLeg(void)
+{
+    return s_lobby.rules.legs == 2 && s_lobby.rules.leg == 2;
+}
+
+int32_t NetplayLobby_LegBlocked(const TeamFileEx *team)
+{
+    int32_t slot;
+    if (!NetplayLobby_SecondLeg())
+        return 0;
+    for (slot = 0; slot < 11; slot++) {
+        const int32_t idx = team->team.playerNumbers[slot];
+        uint8_t status;
+        if (idx >= kLegPlayers)
+            continue;
+        status = team->players[idx].cardsInjuries;
+        if ((status & CARDS_MASK) >= CARDS_SENT_OFF || (status & INJURY_MASK) > INJURY_KNOCK)
+            return 1;
+    }
+    return 0;
+}
+
 void NetplayLobby_MatchPlayed(int32_t completed, int32_t goals1, int32_t goals2)
 {
     LobbyRules *r = &s_lobby.rules;
+    {   /* the bot says how it ended */
+        char line[LOBBY_CHAT_TEXT + 1];
+        if (completed)
+            snprintf(line, sizeof line, "FULL TIME: %d-%d", (int)goals1, (int)goals2);
+        else
+            snprintf(line, sizeof line, "THE MATCH ENDED EARLY");
+        NetplayLobby_ChatNotice(line);
+    }
     /* Both machines, each on its copy: they played the same match, so the joiner has
      * the host's next rules before they arrive, and a GO pressed meanwhile stands
      * (read_peer_state takes ready down only for rules that differ). */
     if (r->legs != 2 || !completed)
         return;
     if (r->leg == 1) {
+        extern TeamGame _topTeamInGame, _bottomTeamInGame;
+        const char *test = getenv("SWOS_LOBBY_TEST_LEG");   /* <side 1|2>:<player>:<status>,... */
         r->leg = 2;
         r->firstLeg1 = (uint16_t)(goals1 < 0 ? 0 : goals1);
         r->firstLeg2 = (uint16_t)(goals2 < 0 ? 0 : goals2);
+        leg_carry(&s_lobby.players[0], &_topTeamInGame);    /* (player 1 is the top team) */
+        leg_carry(&s_lobby.players[1], &_bottomTeamInGame);
+        while (test && *test) {
+            int side, player, status;
+            if (sscanf(test, "%d:%d:%i", &side, &player, &status) == 3 && (side == 1 || side == 2) &&
+                player >= 0 && player < kLegPlayers)
+                s_lobby.players[side - 1].team.players[player].cardsInjuries = (uint8_t)status;
+            test = strchr(test, ',');
+            test = test ? test + 1 : NULL;
+        }
     } else {
         r->leg = 1;
+        leg_clear();
     }
     clamp_rules(r);
     if (s_lobby.me == 1)
         s_lobby.rulesGen++;
     s_lobby.dirty = 1;
+    NetplayLobby_ChatNotice(r->leg == 2 ? "THE SECOND LEG IS NEXT" : "THE TIE IS OVER");
     if (r->leg == 2)
         fprintf(stderr, "[lobby] cup: the second leg is next; the first ended %u-%u\n",
                 (unsigned)r->firstLeg1, (unsigned)r->firstLeg2);
     else
         fprintf(stderr, "[lobby] cup: the tie is over; the next match is a first leg\n");
 }
+
+void NetplayLobby_SetExtraDelay(int32_t frames)
+{
+    frames = frames < 0 ? 0 : frames > LOBBY_EXTRA_DELAY_MAX ? LOBBY_EXTRA_DELAY_MAX : frames;
+    if (frames == mine()->extraDelay || s_lobby.state != LOBBY_OPEN)
+        return;
+    mine()->extraDelay = frames;
+    mine()->ready = 0;                  /* (the other side's goes down when it reads this) */
+    s_lobby.dirty = 1;
+}
+
+int32_t NetplayLobby_AutoDelay(void) { return s_lobby.delay; }
 
 void NetplayLobby_SetRules(const LobbyRules *rules)
 {
@@ -900,7 +1235,7 @@ void NetplayLobby_SetRules(const LobbyRules *rules)
     if (r.legs != s_lobby.rules.legs || r.tieBreak != s_lobby.rules.tieBreak)
         r.leg = 1;
     clamp_rules(&r);
-    if (memcmp(&r, &s_lobby.rules, sizeof r) == 0)
+    if (rules_equal(&r, &s_lobby.rules))
         return;
     s_lobby.rules = r;
     s_lobby.rulesGen++;
@@ -1039,6 +1374,7 @@ int32_t NetplayLobby_CanStart(void)
     const LobbyPlayer *host = &s_lobby.players[0], *joiner = &s_lobby.players[1];
     return s_lobby.me == 1 && s_lobby.state == LOBBY_OPEN &&
            !team_blocks(host) && !team_blocks(joiner) &&     /* the server has vouched for both, or is not there */
+           !NetplayLobby_LegBlocked(&host->team) && !NetplayLobby_LegBlocked(&joiner->team) &&
            P2PLink_State() == P2P_CONNECTED &&
            host->hasTeam && host->ready && joiner->known && joiner->hasTeam && joiner->ready &&
            s_lobby.peerRulesSeen == s_lobby.rulesGen &&
@@ -1068,6 +1404,10 @@ int32_t NetplayLobby_Start(void)
     BE_WRITE_U16(buf + 6, s_lobby.peerStateGen);
     BE_WRITE_U16(buf + 8, s_lobby.rulesGen);
     memcpy(buf + 10, s_lobby.packetKey, KEY_BYTES);
+    /* The match's input delay: AUTO, and the larger of the two players' extra frames. */
+    s_lobby.matchDelay = s_lobby.delay + (mine()->extraDelay > theirs()->extraDelay ?
+                                          mine()->extraDelay : theirs()->extraDelay);
+    BE_WRITE_U16(buf + 10 + KEY_BYTES, (uint16_t)s_lobby.matchDelay);
     n = NetplaySetup_Encode(buf + START_HEADER + 4, NetplaySetup_MaxBytes());
     if (n <= 0) {
         free(buf);
@@ -1154,13 +1494,18 @@ void NetplayLobby_Peer(char *ip, uint32_t ipCap, uint16_t *peerPort, uint16_t *l
         snprintf(ip, ipCap, "%s", s_lobby.peerIp);
     if (peerPort)  *peerPort  = s_lobby.peerPort;
     if (localPort) *localPort = s_lobby.localPort;
-    if (delay)     *delay     = s_lobby.delay;
+    if (delay)
+        *delay = s_lobby.matchDelay ? s_lobby.matchDelay :
+                 s_lobby.delay + (mine()->extraDelay > theirs()->extraDelay ? mine()->extraDelay
+                                                                            : theirs()->extraDelay);
     if (simWidth)  *simWidth  = s_lobby.simWidth;
 }
 
 #else  /* !SWOS_NETPLAY -- no link to set a match up over */
 
 static LobbyRules  s_noRules;
+int32_t            NetplayLobby_SecondLeg(void) { return 0; }
+int32_t            NetplayLobby_LegBlocked(const TeamFileEx *team) { (void)team; return 0; }
 
 void               NetplayLobby_Begin(int32_t localPlayer, const char *localName) { (void)localPlayer; (void)localName; }
 void               NetplayLobby_Poll(void) {}
@@ -1191,6 +1536,13 @@ void               NetplayLobby_Peer(char *ip, uint32_t ipCap, uint16_t *peerPor
     if (simWidth) *simWidth = 0;
 }
 void               NetplayLobby_RestoreTactics(void) {}
+int32_t              NetplayLobby_Say(const char *text) { (void)text; return 1; }
+void                 NetplayLobby_SetExtraDelay(int32_t frames) { (void)frames; }
+int32_t              NetplayLobby_AutoDelay(void) { return 0; }
+void                 NetplayLobby_ChatNotice(const char *text) { (void)text; }
+int32_t              NetplayLobby_ChatCount(void) { return 0; }
+const LobbyChatLine *NetplayLobby_ChatLine(int32_t i) { (void)i; return NULL; }
+uint32_t             NetplayLobby_ChatSerial(void) { return 0; }
 int32_t            NetplayLobby_ApplyMatch(void) { return 1; }
 
 #endif /* SWOS_NETPLAY */

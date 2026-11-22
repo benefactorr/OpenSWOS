@@ -1,0 +1,313 @@
+#include "season_switch.h"
+#ifdef SWOS_SDL_BUILD
+#include "career_params.h"
+#include "mod_api.h"
+#include "modern_career_runtime.h"
+#include "tweaks.h"
+#endif
+/*
+ * Amiga SWOS RE Project
+ * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
+ * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
+ */
+#include "frontend.h"
+#include "game_utils.h"
+#include "audio.h"
+#include "menus.h"
+#include "world.h"           /* the football world, before the competition tables */
+#include "world_cups.h"      /* its cups into the country tables */
+#include "display.h"
+#ifdef SWOS_SDL_BUILD
+#include "mod_hooks.h"    /* a mod's true-colour menu backdrop */
+#include "platform_sdl.h" /* Platform_SetMenuBackdrop, MENU_BACKDROP_KEY */
+#endif
+#include <string.h>   /* memcpy/memset — used by both the SDL decode and the Amiga overlay re-stride */
+
+/* FrontEndMainLoop */
+extern uint16_t _quitToDos;
+
+/* ---- External asm functions (C-callable bridges in swos2_unit.s) ---- */
+extern void MenuProc(void);
+
+extern uint16_t _menuMusic;
+extern uint16_t _menuFade;
+extern uint8_t _frontbufferMaskBuffer[];
+extern volatile uint16_t _currentGameTick;
+extern int16_t LoadFileEx(uint8_t *filename, uint8_t *dest, uint32_t *outFileSize);
+extern uint8_t _rawAssetLoadBuffer[];   /* staging buffer for both builds' overlay load */
+
+/* ================================================================
+ * LoadOverlayToFrontbuffer  (SWOS2.s line 42675)
+ *
+ * Loads a raw image file into the frontbuffer mask buffer.
+ *
+ * Amiga: loads the bitplane-format file straight into
+ *   `frontbufferMaskBuffer`, which stays in bitplane form.
+ * SDL:   stages the bitplane file into `rawAssetLoadBuffer`, then
+ *   decodes the first SCREEN_HEIGHT scanlines into the chunky 8bpp
+ *   `frontbufferMaskBuffer`. Subsequent draw/blit code reads the
+ *   mask buffer expecting chunky palette indices.
+ * ================================================================ */
+__attribute__((used, externally_visible))
+void LoadOverlayToFrontbuffer(const uint8_t *path)
+{
+#ifdef SWOS_SDL_BUILD
+    uint32_t ovlSize = 0;
+    LoadFileEx((uint8_t *)path, _rawAssetLoadBuffer, &ovlSize);
+
+    /* Decode interleaved bitplane data → 8bpp chunky. Full-screen overlay
+     * images are stored at the *frontbuffer* stride: PLANE_STRIDE bytes per
+     * plane row, N planes per scanline. Detect N per-bank from the
+     * decompressed size (MENUBG.RAW = 47872 for 4bpp OCS, 95744 for 8bpp
+     * AGA) rather than assuming NUM_PLANES, so mixed-depth grafs_aga banks
+     * decode correctly. We decode SCREEN_WIDTH pixels (the visible portion
+     * of PLANE_STRIDE*8 = 352 source bits). Sprite-source images use a
+     * smaller stride and go through `blitDispatch`, not this path. */
+    uint16_t ovlPlanes    = DetectBankPlanes(ovlSize, PLANE_STRIDE, SCREEN_HEIGHT);
+    uint32_t ovlRowStride = (uint32_t)PLANE_STRIDE * ovlPlanes;
+    memset(_frontbufferMaskBuffer, 0, FRONTBUFFER_SIZE_TOTAL_BYTES);
+    for (int y = 0; y < SCREEN_HEIGHT; y++) {
+        const uint8_t *rowSrc = _rawAssetLoadBuffer + (size_t)y * ovlRowStride;
+        uint8_t       *rowDst = _frontbufferMaskBuffer + (size_t)y * FRONTBUFFER_ROW_STRIDE_BYTES + WIDE_MARGIN;
+        for (int px = 0; px < SCREEN_WIDTH; px++) {
+            int bit = 7 - (px & 7);
+            int byte = px >> 3;
+            uint8_t idx = 0;
+            for (int p = 0; p < ovlPlanes; p++) {
+                uint8_t planeByte = rowSrc[p * PLANE_STRIDE + byte];
+                idx |= (uint8_t)(((planeByte >> bit) & 1u) << p);
+            }
+            rowDst[px] = idx;
+        }
+    }
+    {   /* A mod's true-colour backdrop (ModDef menuBackdrop): the menus' backdrop becomes one key
+         * colour everywhere -- the wide margins too -- and the presenter shows the image wherever
+         * the frame has it (Platform_SetMenuBackdrop). Only the menus' own backdrops: the disks,
+         * the credits and the rest stay as they are. */
+        const char *name = strrchr((const char *)path, '/');
+        const uint8_t *rgba = NULL;
+        int32_t w = 0, h = 0;
+        name = name ? name + 1 : (const char *)path;
+        if ((SDL_strncasecmp(name, "menubg", 6) == 0) && ModHooks_MenuBackdrop(&rgba, &w, &h) && rgba) {
+            memset(_frontbufferMaskBuffer, MENU_BACKDROP_KEY, FRONTBUFFER_SIZE_TOTAL_BYTES);
+            Platform_SetMenuBackdrop(rgba, w, h);
+        } else {
+            Platform_SetMenuBackdrop(NULL, 0, 0);
+        }
+    }
+#else
+    /* Amiga: load the raw interleaved-bitplane overlay, then RE-STRIDE it into
+     * the mask buffer. The overlay FILES are authored at a 44-byte plane row
+     * (352px — the pre-FMODE frontbuffer width); the AGA FMODE widen made the
+     * runtime mask/frontbuffer PLANE_STRIDE 52, so the old verbatim
+     * `LoadFileEx(..., _frontbufferMaskBuffer, 0)` misaligned every plane row:
+     * BlitterCopyPanelToScreen2 reads the mask at PLANE_STRIDE, so a 44-byte
+     * source row bled 8 bytes into the next plane every row -> horizontal
+     * streaks across the whole menu backdrop. Copy each interleaved plane row
+     * into its PLANE_STRIDE slot instead. On OCS (PLANE_STRIDE == 44) the
+     * strides match and this is a straight copy. Plane count comes from the
+     * decompressed size so 4bpp and 8bpp grafs banks both load. docs/AGA.md §11. */
+    enum { OVERLAY_SRC_PLANE_STRIDE = 44 };
+    uint32_t ovlSize = 0;
+    LoadFileEx((uint8_t *)path, _rawAssetLoadBuffer, &ovlSize);
+    uint32_t filePlanes = ovlSize / ((uint32_t)OVERLAY_SRC_PLANE_STRIDE * SCREEN_HEIGHT);
+    if (filePlanes == 0 || filePlanes > (uint32_t)NUM_PLANES)
+        filePlanes = NUM_PLANES;
+    memset(_frontbufferMaskBuffer, 0, FRONTBUFFER_SIZE_TOTAL_BYTES);
+    for (int y = 0; y < SCREEN_HEIGHT; y++) {
+        const uint8_t *src = _rawAssetLoadBuffer +
+                             (size_t)y * OVERLAY_SRC_PLANE_STRIDE * filePlanes;
+        uint8_t *dst = _frontbufferMaskBuffer + (size_t)y * ROW_STRIDE_BYTES;
+        for (uint32_t p = 0; p < filePlanes; p++)
+            memcpy(dst + (size_t)p * PLANE_STRIDE,
+                   src + (size_t)p * OVERLAY_SRC_PLANE_STRIDE,
+                   OVERLAY_SRC_PLANE_STRIDE);
+    }
+#endif
+}
+
+/* ================================================================
+ * FrontEndPreLoopSetup  (SWOS2.s line 42642)
+ *
+ * Initializes menu music, prepares menu background, sets up menu
+ * data structures, optionally starts music playback, and enables
+ * the menu fade-in flag.
+ * ================================================================ */
+__attribute__((used, externally_visible, noinline))
+void FrontEndPreLoopSetup(void)
+{
+    /* The football world (include/world.h): the Amiga's drawer names it in data/WORLD;
+     * its baked competition records go over 96/97's on both targets, before the JSON. */
+#ifndef SWOS_SDL_BUILD
+    World_ReadFromData();
+#endif
+    World_InstallBaked();
+#ifndef SWOS_SDL_BUILD
+    WorldCups_Install();        /* its cups into the country tables (the SDL: after the JSON's) */
+#endif
+#ifdef SWOS_SDL_BUILD
+    /* SWOS_DATA_JSON: rebuild normal-country competition tables from data_json/
+       before any menu reads competitionsTable[]. No-op unless the env var is set. */
+    extern void DataJson_FitModTeamFiles(void);
+    DataJson_FitModTeamFiles();         /* (a mod's bigger team file: its country's team numbers) */
+    extern void DataJson_InstallCompetitionGraph(void);
+    DataJson_InstallCompetitionGraph();
+    WorldCups_Install();
+    /* career_params.json: override the compiled career-mode balance knobs (starting
+       balance, gate receipts, wages, board expectations) so testers can tune them
+       without a rebuild. Absent file -> compiled defaults. */
+    extern void DataJson_LoadCareerParams(void);
+    DataJson_LoadCareerParams();
+    if (ModernRuntime_Enabled()) {
+        if (ModApi_FindEntry(MODPOINT_BUY_PLAYER, "modernised-search") < 0)
+            ModApi_AddEntry(MODPOINT_BUY_PLAYER, "modernised-search", "WORLD PLAYER SEARCH", ModernSearch_Open);
+        if (ModApi_FindEntry(MODPOINT_TRANSFER_MARKET, "modernised-ai") < 0)
+            ModApi_AddEntry(MODPOINT_TRANSFER_MARKET, "modernised-ai", "AI TRANSFER MARKET", ModernAI_TransfersMenu);
+    } else {
+        extern void WorldPlayerSearch(void);
+        extern void ClassicCareer_RunTransfers(void);
+        if (ModApi_FindEntry(MODPOINT_BUY_PLAYER, "classic-search") < 0)
+            ModApi_AddEntry(MODPOINT_BUY_PLAYER, "classic-search", "WORLD PLAYER SEARCH", WorldPlayerSearch);
+        if (ModApi_FindEntry(MODPOINT_TRANSFER_MARKET, "classic-ai") < 0)
+            ModApi_AddEntry(MODPOINT_TRANSFER_MARKET, "classic-ai", "AI TRANSFER MARKET", ClassicCareer_RunTransfers);
+    }
+    {
+        _careerParams.num_seasons = CAREER_MAX_SEASONS;
+        CareerParams_ApplyModernFinances();
+        Tweaks_SetByMod(TWEAK_CPU_CARDS, 1, "Career+");
+        Tweaks_SetByMod(TWEAK_MORE_FOULS, 1, "Career+");
+        Tweaks_SetByMod(TWEAK_AI_INJURY_SUBS, 1, "Career+");
+        _careerParams.transfer_list_capacity = CAREER_MAX_TRANSFER_LIST;
+        _careerParams.foreign_pool_capacity = CAREER_MAX_FOREIGN_POOL;
+        _careerParams.foreign_listing_capacity = CAREER_MAX_FOREIGN_LISTING;
+        _careerParams.foreign_refill_mult = CAREER_MAX_FOREIGN_LISTING / CAREER_ORIG_FOREIGN_LISTING;
+        if (World_Current() == WORLD_9697)
+            _careerParams.transfer_quota_mode = 1;
+        _careerParams.listed_bid_chance = 36;
+        _careerParams.foreign_bid_chance = 64;
+        _careerParams.domestic_buyer_mode = 1;
+        _careerParams.job_offers_capacity = CAREER_MAX_JOB_OFFERS;
+        _careerParams.job_offer_expiry = 0;
+        _careerParams.job_offer_first_week = 20;
+        _careerParams.job_offer_waves = 1;
+        _careerParams.job_offer_stop_season7 = 0;
+        _careerParams.job_offer_phase_gate = 0;
+        _careerParams.job_offer_own_national = 0;
+        _careerParams.job_offer_pass = 220;
+        _careerParams.job_offer_rep_high_pct = 125;
+        _careerParams.job_offer_rep_low_pct = 55;
+        _careerParams.job_offer_selector_clubs = 96;
+        _careerParams.job_offer_national_chance = 192;
+        _careerParams.job_offer_abroad_chance = 192;
+    }
+    extern void DataJson_LoadNationalTeams(void);
+    DataJson_LoadNationalTeams();       /* (a mod's national teams: include/national_teams.h) */
+    if (World_Current() == WORLD_9697) {
+        extern void ClassicNational_Install(void);
+        ClassicNational_Install();
+    }
+    extern void TeamDb_Apply(void);
+    TeamDb_Apply();                     /* (a team database mod's leagues, cups, codes, season: src/teamdb.c) */
+    extern void TeamDb_ApplyLeagueTweaks(void);
+    TeamDb_ApplyLeagueTweaks();         /* ([tweaks] SWOS 2020's league rules, on by default: 96/97 only) */
+    /* SWOS_MENU_JSON: load every menu from bin/data_json/menus/*.json and overwrite
+       the compiled static menu bytes IN PLACE (docs/MENUS.md §2d), so editing the
+       JSON changes the running game. Bounded by each menu's compiled size; a menu
+       grown beyond it stays compiled and is flagged. Default-ON; SWOS_MENU_JSON=0
+       disables. */
+    { const char *v = getenv("SWOS_MENU_JSON");
+      if (!(v && v[0] == '0' && v[1] == '\0')) {
+        extern int MenuJson_InstallAll(void);
+        MenuJson_InstallAll();
+      } }
+    /* SWOS 2020's online menus (docs/MENUS.md §10) exist only as JSON and load on
+       first use; register their handlers with the loader before anything opens one. */
+    extern void OnlineMenus_Init(void);
+    OnlineMenus_Init();
+    /* SWOS_TACTICS_JSON: load the 12 built-in formations from
+       bin/data_json/tactics/*.json and overwrite the compiled TeamTactics
+       structs IN PLACE (src/tactics_load_json.c), so editing a formation's JSON
+       changes the running game. Default-ON; SWOS_TACTICS_JSON=0 disables. */
+    { const char *vt = getenv("SWOS_TACTICS_JSON");
+      if (!(vt && vt[0] == '0' && vt[1] == '\0')) {
+        extern int TacticsJson_InstallAll(void);
+        TacticsJson_InstallAll();
+      } }
+#else
+    /* Amiga: no runtime JSON parse, so install the BAKED Copa Libertadores
+       (competition_data_copa_baked.c) here — the analog of the SDL dynamic
+       DataJson_InstallCompetitionGraph above — so the CONMEBOL career qualifier
+       (career_copa.c) finds Copa by compId. See docs/COMPETITION_DYNAMIC_REFACTOR.md §8. */
+    extern void CopaBaked_Install(void);
+    CopaBaked_Install();
+#endif
+    /* Copa Libertadores is registered by compId above (dynamic on SDL, baked on
+       Amiga); splice its record into the South America region's preset-competition
+       list so it appears in "CHOOSE PRESET COMPETITION - SOUTH AMERICA". Inert if
+       Copa isn't installed. Shared code path (career_copa.c) — same on both ports. */
+    extern void Career_InstallCopaLibertadoresPresetEntry(void);
+    Career_InstallCopaLibertadoresPresetEntry();
+    InitMenuMusic();
+    PrepareMenuBackground();
+    InitMainMenuStuff();
+
+    if (_menuMusic != 0)
+    {
+        TryPlayMusic();
+    }
+
+    _menuFade = 1;
+}
+
+/* ================================================================
+ * FrontEndMainLoop  (SWOS2.s line 42901)
+ *
+ * Main front-end event loop. Initializes timer and menu system,
+ * then repeatedly calls MenuProc until _quitToDos is set.
+ * ================================================================ */
+__attribute__((used, externally_visible, noinline))
+void FrontEndMainLoop(void)
+{
+    ReadTimerDelta();
+    FrontEndPreLoopSetup();
+#ifdef SWOS_SDL_BUILD
+    /* --menu=<name>: open a JSON-only menu first; leaving it lands on the main menu --
+     * re-unpacked from its packed bytes, so put it back the way every main-menu button
+     * does (CommonMenuExit). Without it CONTINUE and SAVE came back as two blank, live
+     * rows under MULTIPLAYER. */
+    extern int32_t OnlineMenus_ShowStartMenu(void);
+    extern int32_t OnlineMenus_QuitAfterStartMenu(void);
+    /* The game data's or the world's notice (src/assets_check.c), once, before anything:
+     * its UPDATE NOW started OpenSWOS Setup, and the game closes for it. */
+    {
+        extern int32_t AssetsCheck_ShowNotice(void);
+        extern int32_t AssetsCheck_QuitForSetup(void);
+        if (AssetsCheck_ShowNotice()) {
+            if (AssetsCheck_QuitForSetup())
+                _quitToDos = 1;
+            CommonMenuExit();
+        }
+    }
+    if (OnlineMenus_ShowStartMenu()) {
+        if (OnlineMenus_QuitAfterStartMenu())
+            _quitToDos = 1;             /* the online client: leaving the log-in is leaving */
+        else
+            CommonMenuExit();
+    }
+#endif
+
+#ifdef CAREER_PLUS_SEASON_SWITCH
+    if (!_quitToDos && CareerPlus_BootAction == CAREER_PLUS_SETUP) {
+        extern void CareerMenu(void);
+        CareerMenu();
+    } else if (!_quitToDos && CareerPlus_BootAction == CAREER_PLUS_LOAD) {
+        extern void LoadOldCompetitionMenu(void);
+        LoadOldCompetitionMenu();
+    }
+#endif
+
+    do
+    {
+        MenuProc();
+    } while (_quitToDos == 0);
+}

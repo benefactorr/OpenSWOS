@@ -1,3 +1,6 @@
+#ifdef SWOS_SDL_BUILD
+#include "modern_career_runtime.h"
+#endif
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
@@ -16,14 +19,16 @@
  * TogglePlayerCoach, GetPlayerPosition.
  */
 
+#include "mod_hooks.h"        /* playerRowDrawn (SDL) */
 #include "play_match_menu.h"
 #include "endian_helpers.h"
 #include "menu_system.h"
 #include "game_types.h"
-#include <stdio.h>
+#include <string.h>
 #ifdef SWOS_SDL_BUILD
 #include "uniform.h"            /* the UNIFORM button (entry 68) */
 #include "custom_team.h"        /* (CUSTOM) where the country would be named */
+#include "world.h"
 #endif
 
 /* Prevent GCC from converting byte loops to memcpy/memset (no libc) */
@@ -42,12 +47,12 @@ extern uint8_t  _pl1Fire;
 extern uint8_t  _pl2Fire;
 extern uint16_t _numPlayers;
 extern uint16_t _careerNumPlayers;
-extern uint16_t _isNationalSelector;
 extern uint16_t _gameType;
 extern uint16_t _trainingGame;
 extern uint16_t _coachOrPlayer;
 extern uint16_t _currentTeamNumber;
 extern uint16_t _selTeamNumber;
+extern uint16_t _isNationalSelector;
 extern uint16_t _panicReasonCode;
 extern uint16_t _teamSkillCurrent;
 extern uint16_t _teamSkillSnapshot;
@@ -111,6 +116,8 @@ extern int16_t _togglePlayerCoachRedrawItemList[];
 /* ---- C-ported function externs ---- */
 extern void CheckIsTeamNational(void);
 extern void SetBenchPlayersNumbers(TeamFileEx *team);
+extern int32_t SquadNumbers_On(void);           /* (real squad numbers: teams.c) */
+extern void SquadNumbers_Free(uint16_t slot);
 extern void DrawMenu(void);
 extern void CallDrawMenuItem(MenuEntry *entry);
 extern void SetCurrentEntry(uint16_t index);
@@ -283,53 +290,48 @@ void ShowUseMatchTeamIfTraining(void) {
  *   loc_14876E  → hidePlayBtnPath
  *   loc_148780  → hidePlayBtn (set entry $1F8 invisible=1)
  * ================================================================ */
+#ifdef SWOS_SDL_BUILD
+/* The online lobby's second leg (src/online_menus.c): CONFIRM is not there while this says the
+ * eleven cannot play, as in SWOS 2020's PlayMatchMenu. */
+int32_t (*g_playMatchStartRefused)(const TeamFileEx *team);
+#endif
+
+static void showOrHidePlayMatchButton(void);
+
+/* National career selections must check injuries AND suspensions, irrespective
+ * of the menu's excludeFlags (mode 1 deliberately skips injury checks).
+ * Limit this safeguard to the human national team. Domestic and training
+ * matches retain their existing SWOS rules. */
+static int NationalCareerStartingXIUnavailable(void)
+{
+    TeamFileEx *team = _playMatchTeam1Ptr;
+    if (_gameType != GAME_TYPE_CAREER || !_isNationalSelector || _trainingGame ||
+        _viewingOpponentTeam || !team ||
+        PACK_BE_U16(team->team.countryNumber, team->team.teamOrdinal) != _selTeamNumber)
+        return 0;
+    /* A cup fixture can pass a copied team. The managed line-up actually uses
+     * _currentMatchPlayers, which belongs to _careerTeam, not the copy's
+     * playerNumbers. Check the authoritative injury/card status here. */
+    return (GetNumberOfAvailablePlayers((uint8_t *)&_careerTeam, -1, 11) >> 16) != 0;
+}
+
 __attribute__((used, externally_visible))
 void ShowOrHidePlayMatchButton(void) {
-    /* A live diagnostic of the eligibility decision.  The save only contains
-     * persisted cards/injuries, not every transient play-menu gate. */
-    if (_gameType == GAME_TYPE_CAREER) {
-        static unsigned snapshot_count = 0;
-        if (snapshot_count++ < 150) {
-            TeamFileEx *t = _playMatchTeam1Ptr;
-            FILE *f = fopen("swos_match_gate_debug.log", "a");
-            if (f) {
-                unsigned n = (t == &_careerTeam) ? _careerNumPlayers :
-                             (t == &_currentTeam ? _numPlayers : 16);
-                uint8_t *sel = (t == &_careerTeam) ? _currentMatchPlayers :
-                               (t == &_currentTeam ? _playerPositions : t->team.playerNumbers);
-                uint32_t a = GetNumberOfAvailablePlayers((uint8_t *)t, _playMatchExcludeFlags, 0);
-                uint32_t g = GetNumberOfAvailableSubstitutes((uint8_t *)t, _playMatchExcludeFlags);
-                unsigned starterGK = GetNumberOfSubstitutes((uint8_t *)t, 1);
-                fprintf(f,"MATCH_GATE_CHECK step=%u team=%.16s ptr=%s national=%u opp_view=%u "
-                          "count=%u max_subs=%u excl=%d avail=%u disabled=%u "
-                          "keepers=%u disabled_keepers=%u starter_gk=%u "
-                          "allow_changes=%u visibility=%u\n",
-                          snapshot_count, t->team.teamName,
-                          t == &_careerTeam ? "career" : t == &_currentTeam ? "current" : "other",
-                          (unsigned)_isNationalSelector, (unsigned)_viewingOpponentTeam,
-                          n, (unsigned)_maxSubstitutesEntries, (int)_playMatchExcludeFlags,
-                          (unsigned)(a & 0xffff), (unsigned)(a >> 16),
-                          (unsigned)(g & 0xffff), (unsigned)(g >> 16),
-                          starterGK, (unsigned)_squadChangesAllowed,
-                          (unsigned)_playMatchButtonVisibilityState);
-                for (unsigned i = 0; i < n && i < 32; i++) {
-                    unsigned j = sel[i];
-                    if (j >= (t == &_careerTeam || t == &_currentTeam ? 32u : 16u)) {
-                        fprintf(f,"MATCH_GATE_PLAYER pos=%u invalid_slot=%u\n",i,j);
-                        continue;
-                    }
-                    PlayerFile *pf = &t->players[j];
-                    fprintf(f,"MATCH_GATE_PLAYER pos=%u slot=%u name=%.22s "
-                              "status=%u injured=%u cards=%u bucket=%u\n",
-                              i,j,pf->playerName,(unsigned)pf->cardsInjuries,
-                              (unsigned)(pf->cardsInjuries & 0x1c),
-                              (unsigned)(pf->cardsInjuries & 3),
-                              (unsigned)(pf->cardsInjuries & 0xe0));
-                }
-                fclose(f);
-            }
-        }
+    showOrHidePlayMatchButton();
+    if (NationalCareerStartingXIUnavailable())
+        _menuEntries[9].isInvisible = 1;
+#ifdef SWOS_SDL_BUILD
+    if (g_playMatchStartRefused && !_viewingOpponentTeam && g_playMatchStartRefused(_playMatchTeam1Ptr)) {
+        extern uint8_t _currentMenu[];
+        Menu *menu = (Menu *)_currentMenu;
+        _menuEntries[9].isInvisible = 1;
+        if (menu->selectedEntry == &_menuEntries[9])    /* (SWOS 2020's: over to EXIT, entry 8) */
+            menu->selectedEntry = &_menuEntries[8];
     }
+#endif
+}
+
+static void showOrHidePlayMatchButton(void) {
     _menuEntries[8].isInvisible = 1;
 
     if (_viewingOpponentTeam) {
@@ -355,6 +357,14 @@ void ShowOrHidePlayMatchButton(void) {
 
     {
         TeamFileEx *team = _playMatchTeam1Ptr;
+        /* National cup screens can display a copied competition team, while
+         * swaps update _currentMatchPlayers in the managed career squad.
+         * Legality, goalkeeper and bench tests must all inspect that live
+         * selection, not the copy's stale team.playerNumbers array. */
+        if (_gameType == GAME_TYPE_CAREER && _isNationalSelector && !_trainingGame &&
+            !_viewingOpponentTeam && team &&
+            PACK_BE_U16(team->team.countryNumber, team->team.teamOrdinal) == _selTeamNumber)
+            team = &_careerTeam;
         uint32_t subsR = GetNumberOfAvailableSubstitutes((uint8_t *)team, _playMatchExcludeFlags);
         uint16_t d2 = (uint16_t)(subsR & 0xFFFF); /* d7→d2: available subs (goalkeepers) */
 
@@ -372,29 +382,29 @@ void ShowOrHidePlayMatchButton(void) {
                 if (careerSubs >= 2) goto checkMaxDisabled;
             }
             /* checkAvailSubs */
-            if (d2 < 1) { SWOS_DBG("[national-match] insufficient available goalkeepers: d2=%u\n", (unsigned)d2); goto cannotPlay; }
+            if (d2 < 1) goto cannotPlay;
         checkMaxDisabled:
-            if (d6_disabled > 4) { SWOS_DBG("[national-match] too many disabled squad players: %u\n", (unsigned)d6_disabled); goto cannotPlay; }
+            if (d6_disabled > 4) goto cannotPlay;
         } else {
-            if (d2 < 1) { SWOS_DBG("[national-match] insufficient available goalkeepers: d2=%u\n", (unsigned)d2); goto cannotPlay; }
+            if (d2 < 1) goto cannotPlay;
             if (d6_disabled > 2) goto cannotPlay;
         }
 
         /* checkSubstitutes */
         if (_gameType == GAME_TYPE_CAREER) {
             uint16_t ns = GetNumberOfSubstitutes((uint8_t *)team, 1);
-            if (ns != 1) { SWOS_DBG("[national-match] starting goalkeeper count=%u (expected 1)\n", (unsigned)ns); goto showPlayBtnPath; }
+            if (ns != 1) goto showPlayBtnPath;
 
             if (_maxSubstitutesEntries > 5) {
                 uint16_t nss = GetNumberOfSubstitutesInSelectionList((uint8_t *)team, 1);
-                if (nss != 1) { SWOS_DBG("[national-match] substitute goalkeeper count=%u (expected 1)\n", (unsigned)nss); goto showPlayBtnPath; }
+                if (nss != 1) goto showPlayBtnPath;
             }
 
             /* checkAvailPlayersLimit */
             uint32_t apR = GetNumberOfAvailablePlayers((uint8_t *)team, _playMatchExcludeFlags,
                                                          11 + _maxSubstitutesEntries);
             uint16_t disabled2 = (uint16_t)(apR >> 16);
-            if (disabled2 != 0) { SWOS_DBG("[national-match] unavailable player(s) in match selection=%u, selection size=%u\n", (unsigned)disabled2, (unsigned)(11 + _maxSubstitutesEntries)); goto showPlayBtnPath; }
+            if (disabled2 != 0) goto showPlayBtnPath;
 
             if (_trainingGame && team == &_careerTeam) {
                 uint16_t ns2 = GetNumberOfSubstitutes((uint8_t *)&_currentTeam, 1);
@@ -411,7 +421,7 @@ void ShowOrHidePlayMatchButton(void) {
         } else {
             /* nonCareerSubCheck */
             uint16_t ns = GetNumberOfSubstitutes((uint8_t *)team, 1);
-            if (ns != 1) { SWOS_DBG("[national-match] starting goalkeeper count=%u (expected 1)\n", (unsigned)ns); goto showPlayBtnPath; }
+            if (ns != 1) goto showPlayBtnPath;
 
             if (_maxSubstitutesEntries > 5) {
                 uint32_t sr3 = GetNumberOfAvailableSubstitutes((uint8_t *)team, _playMatchExcludeFlags);
@@ -440,7 +450,7 @@ cannotPlay:
 canPlay:
     /* loc_14874A */
     if (_playMatchTeam1Ptr == &_currentTeam) {
-        if (!_playMatchButtonVisibilityState) { SWOS_DBG("[national-match] visibility-state gate blocks PLAY; team pointer is currentTeam\n"); goto hidePlayBtn; }
+        if (!_playMatchButtonVisibilityState) goto hidePlayBtn;
         /* else fall through to showPlayBtn */
     } else {
         _playMatchButtonVisibilityState = 1;
@@ -448,10 +458,6 @@ canPlay:
 showPlayBtn:
     /* loc_148768 */
     _menuEntries[9].isInvisible = 0;
-    if (_gameType == GAME_TYPE_CAREER) {
-        FILE *f = fopen("swos_match_gate_debug.log", "a");
-        if (f) { fprintf(f, "MATCH_GATE_RESULT visible=1 button=9\n"); fclose(f); }
-    }
     return;
 
 showPlayBtnPath:
@@ -462,10 +468,6 @@ hidePlayBtnPath:
 hidePlayBtn:
     /* loc_148780 */
     _menuEntries[9].isInvisible = 1;
-    if (_gameType == GAME_TYPE_CAREER) {
-        FILE *f = fopen("swos_match_gate_debug.log", "a");
-        if (f) { fprintf(f, "MATCH_GATE_RESULT visible=0 button=9\n"); fclose(f); }
-    }
     return;
 }
 
@@ -995,8 +997,10 @@ void PlayMatchMenuSwapPlayers(TeamFileEx *team, int16_t d3, int16_t d4) {
         PlayerFile *pf1 = (PlayerFile *)(p1 + 76);
         PlayerFile *pf2 = (PlayerFile *)(p2 + 76);
         int8_t ts = pf2->shirtNumber;
-        pf2->shirtNumber = pf1->shirtNumber;
-        pf1->shirtNumber = ts;
+        if (!SquadNumbers_On()) {       /* (real squad numbers: not swapped, teams.c) */
+            pf2->shirtNumber = pf1->shirtNumber;
+            pf1->shirtNumber = ts;
+        }
     }
 
     /* Secondary swap: swap in _playerPositions/currentMatchPlayers/playerNumbers
@@ -1082,6 +1086,11 @@ void PlayMatchChangeTactics(MenuEntry *a5) {
     TeamFileEx *t = _playMatchTeam1Ptr;
     if ((int8_t)t->team.tactics == (int8_t)nt) return;
     t->team.tactics = (uint8_t)nt;
+#ifdef SWOS_SDL_BUILD
+    if (_gameType == GAME_TYPE_CAREER && !_trainingGame && ModernRuntime_Enabled() &&
+        PACK_BE_U16(t->team.countryNumber, t->team.teamOrdinal) == _selTeamNumber)
+        _careerTeam.team.tactics = (uint8_t)nt;
+#endif
     t->team.playerValuesDirty = TEAM_VALUES_DIRTY;
     SavePositionsAndUpdateLittleCheckmark();
     SetUpTacticsButtons();
@@ -1107,8 +1116,24 @@ void ExitPlayMatch(void) {
 /* ================================================================ */
 __attribute__((used, externally_visible))
 void PlayMatchSelected(void) {
+    /* The same check is required at activation, not only while drawing the
+     * PLAY button. An unavailable national starter must be replaced first. */
+    if (NationalCareerStartingXIUnavailable())
+        return;
     if (_careerTeam.team.teamControls == TEAM_COMPUTER)
         _careerTeamCoachOnly = 1;
+#ifdef SWOS_SDL_BUILD
+    /* A mod's turn as PLAY MATCH starts a match (ModApi_OnPlayMatch: SWOS 2020's SELECT PITCH), from
+     * the first player's screen -- not VIEW RESULT, not a training match. Its menu comes and goes
+     * here; who pressed PLAY is kept across it (the menu's own presses set the fire flags). */
+    if ((_pl1Fire || _pl2Fire) && _squadChangesAllowed && _isFirstPlayerChoosingTeam && !_trainingGame) {
+        extern void ModExtras_PlayMatchPressed(void);
+        const uint8_t p1 = _pl1Fire, p2 = _pl2Fire;
+        ModExtras_PlayMatchPressed();
+        _pl1Fire = p1;
+        _pl2Fire = p2;
+    }
+#endif
     if (_pl1Fire) {
         _playerNumThatStarted = 1;
         _player1ClearFlag = 0; _player2ClearFlag = 0;
@@ -1186,7 +1211,15 @@ void ReturnFromViewOpponent(void) {
 /* ================================================================ */
 __attribute__((used, externally_visible))
 void PlayMatchOnSelect30(void) {
-    RotatePlayersLeft((TeamFileEx *)_playMatchTeam1Ptr, _maxSubstitutesEntries);
+    TeamFileEx *team = (TeamFileEx *)_playMatchTeam1Ptr;
+    /* An international cup supplies a 16-player fixture copy, but all
+     * additional call-ups live in the managed 20-player career selection.
+     * Rotate the array which GetPlayerAtIndex actually displays. */
+    if (_gameType == GAME_TYPE_CAREER && _isNationalSelector && !_trainingGame &&
+        !_viewingOpponentTeam && team &&
+        PACK_BE_U16(team->team.countryNumber, team->team.teamOrdinal) == _selTeamNumber)
+        team = &_careerTeam;
+    RotatePlayersLeft(team, _maxSubstitutesEntries);
     DrawMenuItemsWaitForVSync(_playMatchRedrawList);
 }
 
@@ -1328,8 +1361,14 @@ void DrawPlayerEntries(MenuEntry *a5) {
 
     bgE->y = a5->y;
 
-    /* Status sprite */
-    SetSquadMenuEntryStatusSprite(bgE, (PlayerFile *)player, (uint16_t)_playMatchExcludeFlags);
+    /* The status sprite's flag is a DISPLAY selector, not an availability
+     * mask. Nonzero shows cards only; zero shows injury severity. Do not pass
+     * the strict eligibility mode (-1) to it: that hides injury icons. */
+    {
+        const PlayerFile *shown = &((const PlayerFile *)player)[2];
+        uint16_t iconMode = (shown->cardsInjuries & 0x03u) ? 1 : 0;
+        SetSquadMenuEntryStatusSprite(bgE, (PlayerFile *)player, iconMode);
+    }
 
     /* Position change arrows */
     if (!_viewingOpponentTeam && d4 < 11) {
@@ -1384,30 +1423,30 @@ void DrawPlayerEntries(MenuEntry *a5) {
         posE->y = a5->y;
     }
 
-    /* Attribute total (entry 35), matching the SQUAD screen's seven
-     * 0-7 ratings. Keep FormTopSkillsString unchanged for other menus.
-     * The existing text buffer holds four bytes, so use two digits (no
-     * parentheses). As in SQUAD, goalkeepers have no outfield total. */
+    /* The Career+ total uses the same seven 0–7 ratings as the squad screen. */
     MenuEntry *skE = posE + 1;
-    {
-        uint8_t *text = (uint8_t *)skE->fg;
-        if ((playerPf->positionAndFace & PF_POSITION_MASK) == 0) {
-            text[0] = '-';
-            text[1] = 0;
+#ifdef SWOS_SDL_BUILD
+    if (_gameType == GAME_TYPE_CAREER &&
+        (World_Current() == WORLD_9697 || ModernRuntime_Enabled())) {
+        uint8_t *label = (uint8_t *)skE->fg;
+        if (!(playerPf->positionAndFace & PF_POSITION_MASK)) {
+            label[0] = '-';
+            label[1] = 0;
         } else {
-            unsigned total =
-                ((uint8_t)playerPf->velocityHeading & 7u) +
+            unsigned total = ((uint8_t)playerPf->velocityHeading & 7u) +
+                (((uint8_t)playerPf->velocityHeading >> 4) & 7u) +
                 ((uint8_t)playerPf->speedFinishing & 7u) +
                 (((uint8_t)playerPf->speedFinishing >> 4) & 7u) +
                 ((uint8_t)playerPf->tacklingControl & 7u) +
                 (((uint8_t)playerPf->tacklingControl >> 4) & 7u) +
-                ((uint8_t)playerPf->passing & 7u) +
-                (((uint8_t)playerPf->velocityHeading >> 4) & 7u);
-            text[0] = (uint8_t)('0' + total / 10u);
-            text[1] = (uint8_t)('0' + total % 10u);
-            text[2] = 0;
+                ((uint8_t)playerPf->passing & 7u);
+            label[0] = (uint8_t)('0' + total / 10);
+            label[1] = (uint8_t)('0' + total % 10);
+            label[2] = 0;
         }
-    }
+    } else
+#endif
+        FormTopSkillsString((uint8_t *)skE->fg, (PlayerFile *)player);
     skE->y = a5->y;
 
     /* Value/status (entry 36) */
@@ -1437,6 +1476,8 @@ void DrawPlayerEntries(MenuEntry *a5) {
         valE->isInvisible = 0;
     }
 
+    ModHooks_PlayerRowDrawn(1 /* MODROWS_PLAY_MATCH */, PACK_BE_U16(team->team.countryNumber, team->team.teamOrdinal),
+                            (uint8_t)fIdx, d7, 31, 6, (const PlayerFile *)(player + sizeof(TeamFile)));
     DrawMultipleItems(6, &_menuEntries[31]);
 }
 
@@ -1544,51 +1585,36 @@ void FormTopSkillsString(uint8_t *dst, PlayerFile *playerFile)
 
 extern uint16_t _inEditTactics;
 extern uint8_t _playMatchMenu[];
-extern void TrainingMatch_AdjustSelectedTeamRosterForTrialists(uint16_t teamNum, uint16_t baseCount, TeamFileEx *teamPtr);
+extern void TrainingMatch_AdjustSelectedTeamRosterForTrialists(uint16_t excludeFlags, uint16_t baseCount, TeamFileEx *teamPtr);
 
-/* National career match roster copies can acquire a transient status bucket
- * while processing other fixtures, without that status being reflected in the
- * authoritative career squad. Reconcile bucket-only discrepancies by name.
- * Preserve real injuries/cards and statuses already present in the career squad.
- */
-extern uint16_t _isNationalSelector;
+/* Cup fixtures may contain a snapshot of the managed national squad.
+ * The real career squad is authoritative for injuries and card suspensions.
+ * Never clear a nonzero status from a match snapshot merely because it is
+ * absent from another snapshot; that discarded valid unavailability flags. */
 static void ReconcileNationalMatchStatus(TeamFileEx *matchTeam)
 {
-    if (_gameType != GAME_TYPE_CAREER || !_isNationalSelector ||
-        !matchTeam || !IsTeamNational(matchTeam) ||
-        matchTeam == &_careerTeam)
+    if (_gameType != GAME_TYPE_CAREER || !_isNationalSelector || !matchTeam ||
+        matchTeam == &_careerTeam ||
+        PACK_BE_U16(matchTeam->team.countryNumber, matchTeam->team.teamOrdinal) != _selTeamNumber)
         return;
 
     for (unsigned i = 0; i < 16; ++i) {
-        PlayerFile *dst = &matchTeam->players[i];
-        unsigned transient = (unsigned)dst->cardsInjuries & 0xE0u;
-        int matchedCareerPlayer = 0;
-        if (!transient || (dst->cardsInjuries & 0x1Fu))
-            continue;  /* Never erase cards or injuries from the match copy. */
-        for (unsigned j = 0; j < 16; ++j) {
-            const PlayerFile *src = &_careerTeam.players[j];
-            unsigned k = 0;
-            for (; k < sizeof(dst->playerName); ++k) {
-                if (dst->playerName[k] != src->playerName[k]) break;
-            }
-            if (k != sizeof(dst->playerName)) continue;
-            matchedCareerPlayer = 1;
-            if ((src->cardsInjuries & 0xFFu) == 0) {
-                SWOS_DBG("[national-match] clearing transient bucket=%02x on match copy index=%u (career player index=%u)\n",
-                    transient, i, j);
-                dst->cardsInjuries &= 0x1Fu;
-            }
+        PlayerFile *player = &matchTeam->players[i];
+        if (!player->playerName[0] || (uint8_t)player->playerName[0] == UINT8_MAX)
+            continue;
+        for (unsigned j = 0; j < 20; ++j) {
+            const PlayerFile *source = (const PlayerFile *)
+                ((const uint8_t *)&_careerTeam + sizeof(TeamFile) + j * sizeof(PlayerFile));
+            if (!source->playerName[0] || (uint8_t)source->playerName[0] == UINT8_MAX ||
+                source->nationality != player->nationality ||
+                strncmp((const char *)source->playerName, (const char *)player->playerName,
+                        sizeof player->playerName) != 0)
+                continue;
+            /* The managed squad is the source of truth between cup fixtures.
+             * OR-ing statuses resurrected a card after its one-match countdown
+             * expired in the persistent squad. Refresh, do not accumulate. */
+            player->cardsInjuries = source->cardsInjuries;
             break;
-        }
-        /* The tournament can retain an old national-team copy whose player no
-         * longer belongs to the human manager's selected squad. Such a player
-         * does not appear in the SQUAD screen, yet a leftover status bucket
-         * still makes the match menu reject the team. Only clear bucket-only
-         * states, and only in this stale national-team match copy. */
-        if (!matchedCareerPlayer) {
-            SWOS_DBG("[national-match] clearing orphan status bucket=%02x on stale national player index=%u\n",
-                transient, i);
-            dst->cardsInjuries &= 0x1Fu;
         }
     }
 }
@@ -1601,17 +1627,38 @@ int16_t ShowPlayMatchMenu(int16_t controlFlags, int16_t _maxSubstitutes,
                             int16_t excludeFlags, int16_t isFirstPlayer,
                             int16_t squadChanges, TeamFileEx *team1, TeamFileEx *team2)
 {
+#ifdef SWOS_SDL_BUILD
+    TeamFileEx *fixture_team = team1;
+    int modern_managed = _gameType == GAME_TYPE_CAREER && !_trainingGame &&
+        !_isNationalSelector && ModernRuntime_Enabled() &&
+        PACK_BE_U16(team1->team.countryNumber, team1->team.teamOrdinal) == _selTeamNumber;
+    if (modern_managed) team1 = &_careerTeam;
+#endif
+
     _isFirstPlayerChoosingTeam = (uint16_t)isFirstPlayer;
     _squadChangesAllowed = (uint16_t)squadChanges;
     _playMatchTeam1Ptr = team1;
     _playMatchTeam2Ptr = team2;
+    ReconcileNationalMatchStatus(team1);
+    ReconcileNationalMatchStatus(team2);
+#ifdef SWOS_SDL_BUILD
+    if (_gameType == GAME_TYPE_CAREER && ModernRuntime_Enabled() &&
+        (!_trainingGame || _maxSubstitutes > 5))
+        _maxSubstitutes = 5;
+#endif
     _maxSubstitutesEntries = (uint16_t)_maxSubstitutes;
     _playMatchControlFlags = (uint16_t)controlFlags;
     _playMatchExcludeFlags = (int16_t)excludeFlags;
+    if (_gameType == GAME_TYPE_CAREER && _isNationalSelector && !_trainingGame &&
+        PACK_BE_U16(team1->team.countryNumber, team1->team.teamOrdinal) == _selTeamNumber)
+        _playMatchExcludeFlags = -1; /* check injury and card bits */
     _inEditTactics = (uint16_t)excludeFlags;
 
-    if (_gameType == GAME_TYPE_CAREER) {
-        ReconcileNationalMatchStatus(team1);
+    if (_gameType == GAME_TYPE_CAREER
+#ifdef SWOS_SDL_BUILD
+        && (!ModernRuntime_Enabled() || !_trainingGame)
+#endif
+    ) {
         TrainingMatch_AdjustSelectedTeamRosterForTrialists(
             (uint16_t)_playMatchExcludeFlags,
             _maxSubstitutesEntries,
@@ -1619,5 +1666,21 @@ int16_t ShowPlayMatchMenu(int16_t controlFlags, int16_t _maxSubstitutes,
     }
 
     ShowMenu(_playMatchMenu);
+#ifdef SWOS_SDL_BUILD
+    if (modern_managed) {
+        ModernRuntime_CommitCareerSquad(ModernWorld_Active(), &_careerTeam);
+        if (fixture_team != &_careerTeam) {
+            fixture_team->team.tactics = _careerTeam.team.tactics;
+            fixture_team->team.teamControls = _careerTeam.team.teamControls;
+            for (unsigned i = 0; i < MODERN_MATCH_PLAYERS; ++i) {
+                const uint8_t *record = (const uint8_t *)&_careerTeam + sizeof(TeamFile) +
+                    _currentMatchPlayers[i] * sizeof(PlayerFile);
+                memcpy(&fixture_team->players[i], record, sizeof(PlayerFile));
+                fixture_team->team.playerNumbers[i] = (uint8_t)i;
+            }
+            fixture_team->team.playerValuesDirty = TEAM_VALUES_DIRTY;
+        }
+    }
+#endif
     return (int16_t)_playerNumThatStarted;
 }

@@ -8,10 +8,12 @@
  * Chunks 67-68: 2 exported functions ported from SWOS2.s.
  */
 
-#include <stdio.h>
-#define SEASON_STEP(...) do { FILE *sf = fopen("swos_division_debug.log", "a"); if (sf) { fputs("NEXTTRACE ", sf); fprintf(sf, __VA_ARGS__); fputc('\n', sf); fclose(sf); } } while (0)
-#include "swos_national_trace.h"
 #include "career_season.h"
+#include "swos_national_trace.h"
+#include "modern_career_runtime.h"
+#include "uefa_coef.h"
+#include "world_conti.h"
+#include "world.h"
 #include "career_eurocups.h"
 #include "career_init.h"
 #include "career_status.h"
@@ -24,124 +26,91 @@
                                Amiga Makefile doesn't, so include it explicitly */
 #include "job_offers.h"
 #include "panic.h"
+#include "league_phase.h"
 #include "random.h"
 #include "statistics.h"
 #include "transfer_market.h"
+#include "league_playoffs.h"
+#include "world_playoff.h"
+#include "world_winners.h"
+#include "world_cups.h"
+#include "states.h"
+#include "mod_hooks.h"       /* competitionFinished (docs/MODS.md §27): SDL builds */
+#include "mod_api.h"         /* (ModCompKind: SDL builds) */
 
-/* Diagnostic-only audit: checksum contribution from the 16 league-balance slots.
- * Does not mutate scratch data or relax original validation. */
-extern volatile uint8_t _diyLeagueScratchBuffer[];
-static void trace_league_balance(const char *stage, unsigned comp, unsigned div)
-{
-    FILE *f = fopen("swos_division_debug.log", "a");
-    if (!f) return;
-    unsigned sum = 0;
-    fprintf(f, "BALTRACE %s comp=%u div=%u values=", stage, comp, div);
-    for (unsigned i = 0; i < 16; ++i) {
-        uint8_t v = _diyLeagueScratchBuffer[928u + i];
-        sum = (sum + v) & 255u;
-        fprintf(f, "%s%d", i ? "," : "", (int)(int8_t)v);
-    }
-    fprintf(f, " checksum=%u\n", sum);
-    fclose(f);
-}
-#define BAL(stage, div) trace_league_balance(stage, (unsigned)_currentCompetitionIndex, (unsigned)(div))
+#ifdef SWOS_SDL_BUILD
+#include <stdio.h>
+#endif
 
-/* Expanded Yugoslavia uses team IDs that overlap the legacy Algeria
- * scratch-validation window [928, 944).  Capture only the contribution
- * introduced by Yugoslavia, so Algeria can still validate its own delta.
- * The scratch data and actual promotion/relegation rules are not modified. */
-uint8_t _yugoAlgeriaOverlapValid;
-uint8_t _yugoAlgeriaOverlapDelta;
-static uint8_t _yugoAlgeriaOverlapBefore[16];
-static void yugo_overlap_capture_begin(void)
+/* Diagnostic trace for the 2026/27 rollover crash. Every record is flushed
+ * immediately so the last entry survives an abnormal exit. */
+void UnifiedSeasonEndTrace(const char *stage, int index)
 {
-    for (unsigned i = 0; i < 16; ++i)
-        _yugoAlgeriaOverlapBefore[i] = _diyLeagueScratchBuffer[928 + i];
-}
-static void yugo_overlap_capture_end(void)
-{
-    uint8_t delta = 0;
-    for (unsigned i = 0; i < 16; ++i)
-        delta = (uint8_t)(delta + _diyLeagueScratchBuffer[928 + i]
-                          - _yugoAlgeriaOverlapBefore[i]);
-    _yugoAlgeriaOverlapDelta = delta;
-    _yugoAlgeriaOverlapValid = 1;
-    SEASON_STEP("OVERLAP Yugoslavia->Algeria contribution=%d",
-                (int)(int8_t)delta);
-}
-
-/* Career winners history is stored separately from the existing per-manager
- * season summaries and serialised into the .CAR JSON by save_format_json.c. */
-CareerWinnerRecord _careerWinners[CAREER_WINNER_SEASONS][CAREER_WINNERS_PER_SEASON];
-uint16_t _careerWinnerCounts[CAREER_WINNER_SEASONS];
-
-void CareerWinners_Clear(void)
-{
-    for (unsigned season = 0; season < CAREER_WINNER_SEASONS; ++season)
-        _careerWinnerCounts[season] = 0;
-}
-
-void CareerWinners_Record(uint16_t season, uint8_t competitionId,
-                          uint8_t kind, uint8_t division, uint16_t teamId)
-{
-    if (season >= CAREER_WINNER_SEASONS || competitionId == 0xFF ||
-        teamId == 0xFFFF || kind > 3)
-        return;
-    uint16_t count = _careerWinnerCounts[season];
-    if (count > CAREER_WINNERS_PER_SEASON) count = CAREER_WINNERS_PER_SEASON;
-    for (uint16_t i = 0; i < count; ++i) {
-        CareerWinnerRecord *r = &_careerWinners[season][i];
-        if (r->competitionId == competitionId && r->kind == kind &&
-            r->division == division) {
-            r->teamId = teamId;
-            return;
+#ifdef SWOS_SDL_BUILD
+    if (ModernRuntime_Enabled()) {
+        FILE *log = fopen("swos_season_end_trace.log", "a");
+        if (log) {
+            fprintf(log, "%s index=%d\n", stage, index);
+            fclose(log);
         }
     }
-    if (count >= CAREER_WINNERS_PER_SEASON) return;
-    _careerWinners[season][count] = (CareerWinnerRecord){ teamId, competitionId, division, kind };
-    _careerWinnerCounts[season] = count + 1;
+#else
+    (void)stage; (void)index;
+#endif
 }
 
-extern uint16_t _currentSeasonShowing;
-extern uint16_t _euroCupTitleHolderTeamId;
-extern uint16_t _cupWinnersCupTitleHolderTeamId;
-extern uint16_t _uefaCupTitleHolderTeamId;
-extern DIYCompetitionEx _diyCompetitionStart;
-extern uint8_t _currentCompetitionIndex;
+extern uint8_t _diyLeagueSeasonStateTable[];
+extern uint8_t _diyLeagueScratchBuffer[];
 
-extern DIYTournamentState _diyFileBufferCopy;
-
-/* Read the winner after the season-update routine has completed.  Cup
- * results can be copied back into the tournament buffer when leaving the
- * cup menu; looking only at the active slot loses these results. */
-static void recordFinishedWinner(const uint8_t *record, uint8_t kind, uint8_t division)
+/* Track the first stage that changes the two Algerian club slots implicated
+ * by the 2026/27 season-one scratch-balance panic (0x5555).
+ * Read-only instrumentation: never modifies competition or scratch state. */
+static void UnifiedTraceScratchOrigin(const char *stage, int country)
 {
-    if (!record)
+#ifdef SWOS_SDL_BUILD
+    static uint8_t previous[2000];
+    static int initialised = 0;
+    if (!ModernRuntime_Enabled())
         return;
-
-    uint16_t winner = (uint16_t)_diyCompetitionStart.base.resultCode;
-    /* Team ID 0x0000 is valid. Only 0xFFFF marks an unset result. */
-    if (kind != 0 && winner == 0xFFFFu) {
-        /* DIY_EditCompetitionSlot copies the last cup result into this
-         * persistent tournament header before returning. */
-        const DIYCompetition *finished = &_diyFileBufferCopy.header;
-        if (finished->competitionFinished != 0)
-            winner = (uint16_t)finished->resultCode;
+    if (!initialised) {
+        for (int i = 0; i < 2000; ++i)
+            previous[i] = _diyLeagueScratchBuffer[i];
+        initialised = 1;
+        FILE *f = fopen("swos_season_end_trace.log", "a");
+        if (f) {
+            fprintf(f, "SCRATCH_ORIGIN baseline stage=%s country=%d slot1062=%d slot1064=%d\n",
+                    stage, country, (int)(int8_t)previous[1062], (int)(int8_t)previous[1064]);
+            fclose(f);
+        }
+        return;
     }
-    if (winner == 0xFFFFu)
-        return;
-
-    /* Copa Libertadores has a dynamic, separate career cup record (128).
-     * The generic slot's last result may belong to the previous domestic
-     * league. Never archive that shared state as a Copa champion. */
-    if (comp_id(record) == COMPID_copaLibertadores)
-        return;
-
-    /* Cup identity is the competition ID, not primary/secondary slot rank.
-     * The View World selection only knows that this is a cup. */
-    CareerWinners_Record(_currentSeasonShowing, comp_id(record),
-                         kind == 0 ? 0 : 1, division, winner);
+    int changes = 0;
+    for (int i = 0; i < 2000; ++i)
+        if (previous[i] != _diyLeagueScratchBuffer[i])
+            ++changes;
+    if (changes) {
+        FILE *f = fopen("swos_season_end_trace.log", "a");
+        if (f) {
+            fprintf(f, "SCRATCH_ORIGIN stage=%s country=%d changed=%d slot1062=%d slot1064=%d\n",
+                    stage, country, changes,
+                    (int)(int8_t)_diyLeagueScratchBuffer[1062],
+                    (int)(int8_t)_diyLeagueScratchBuffer[1064]);
+            int shown = 0;
+            for (int i = 0; i < 2000 && shown < 12; ++i)
+                if (previous[i] != _diyLeagueScratchBuffer[i]) {
+                    fprintf(f, "SCRATCH_CHANGE index=%d old=%d new=%d stage=%s country=%d\n",
+                            i, (int)(int8_t)previous[i],
+                            (int)(int8_t)_diyLeagueScratchBuffer[i], stage, country);
+                    ++shown;
+                }
+            fclose(f);
+        }
+    }
+    for (int i = 0; i < 2000; ++i)
+        previous[i] = _diyLeagueScratchBuffer[i];
+#else
+    (void)stage; (void)country;
+#endif
 }
 
 /* ---- ASM externs ---- */
@@ -202,7 +171,7 @@ void Career_FillRandomTeamListExcludingSelected(uint16_t excludeCount,
                                                   uint8_t *table, uint8_t *compIndexs)
 {
     /* move.b (selTeamNumber).l,d0 — reads MSB on big-endian 68k */
-    uint8_t selTeam = (uint8_t)(_selTeamNumber >> 8);
+    uint8_t selTeam = World_FileCountry((uint8_t)(_selTeamNumber >> 8));     /* (a second team file: its country, include/world.h) */
     int16_t d7 = (int16_t)excludeCount;
     uint8_t *out = compIndexs;
 
@@ -376,7 +345,7 @@ void Career_PrepareEuropeanCupQualificationState(void)
         uint8_t *bucketData = *(uint8_t **)_euroCupQualGroupSeedBuckets_15_18_22;
         uint16_t excludeCount = 0;
         if (_isNationalSelector == 0) {
-            uint8_t teamByte = (uint8_t)(_selTeamNumber >> 8);
+            uint8_t teamByte = World_FileCountry((uint8_t)(_selTeamNumber >> 8));
             while (*bucketData != 0xFF) {
                 if (*bucketData == teamByte) {
                     excludeCount++;
@@ -386,6 +355,24 @@ void Career_PrepareEuropeanCupQualificationState(void)
         }
         Career_FillRandomTeamListExcludingSelected(excludeCount,
             _euroCupQualGroupSeedBuckets_15_18_22, _uefaCupEligibleCompetitionIds);
+    }
+
+    /* A world's league phases: each country's own places (include/league_phase.h), not 96/97's
+     * drawn ones -- the eligible lists one country a place, in the world's order. */
+    {
+        const uint8_t (*places)[4];
+        int32_t n;
+        if (World_LeaguePhaseCups(&places, &n)) {
+            uint8_t *lists[3] = { _euroCupEligibleCompetitionIds, _cupWinnersCupEligibleCompetitionIds,
+                                  _uefaCupEligibleCompetitionIds };
+            for (int32_t c = 0; c < 3; c++) {
+                int32_t k = 0;
+                for (int32_t i = 0; i < n; i++)
+                    for (int32_t j = 0; j < places[i][1 + c] && k < 39; j++)
+                        lists[c][k++] = places[i][0];
+                lists[c][k] = 0xFF;
+            }
+        }
     }
 
     /* Restore state — asm: move.w (sp)+,(isNationalSelector); move.w (sp)+,(selTeamNumber) */
@@ -521,7 +508,7 @@ uint16_t Career_UpdateLastNationalityCall(void)
 
     /* move.b (selTeamNumber).l,d0 — reads high byte on big-endian 68k.
      * This extracts the team file ID (country file index) from selTeamNumber. */
-    d0 = GetNationalTeamNumberFromTeamFileId(_selTeamNumber >> 8);
+    d0 = GetNationalTeamNumberFromTeamFileId(World_FileCountry((uint8_t)(_selTeamNumber >> 8)));
 
 check_self:
     /* If the national team IS the selected team, set to 0xFFFF (no call-up) */
@@ -807,7 +794,6 @@ void ShowChairmanOpinionAboutTheSeason(void)
 /* ---- Chunk 181: BeginContractNegotiationSequence ---- */
 
 extern uint16_t _contractNegotiationActive;
-extern uint16_t _timeToNegotiate;
 extern uint16_t _lastOfferPrimaryPlayerOrdinal;
 extern uint16_t _offerNegotiationAttemptCount;
 extern uint16_t _financeTotalsNeedResetFlag;
@@ -818,17 +804,18 @@ extern void Career_MaybeGenerateJobOffer(void);
  * Called after a career match to begin contract negotiation phase.
  * Sets up negotiation globals, commits finances, processes offer expiry,
  * and potentially generates a new job offer.
- * a0=comp (diyCompetitionStart), a1=team ptr passed through to UpdateCareerFinancesAfterMatch. */
+ * a0=comp (diyCompetitionStart), a1=team (the home side), a2=opponent: both passed through to
+ * UpdateCareerFinancesAfterMatch, whose gate factors weigh the two clubs (the original keeps
+ * a2 from the result code; the C used to pass the home team twice). */
 __attribute__((used, externally_visible))
-void BeginContractNegotiationSequence(DIYCompetitionEx *comp, TeamFileEx *team)
+void BeginContractNegotiationSequence(DIYCompetitionEx *comp, TeamFileEx *team, TeamFileEx *opponent)
 {
     _contractNegotiationActive = 1;
-    _timeToNegotiate = 2;
     _lastOfferPrimaryPlayerOrdinal = 0xFFFF;
     _offerNegotiationAttemptCount = 0;
     Career_CommitNewBalanceAndResetFinanceTotals();
     _financeTotalsNeedResetFlag = 1;
-    UpdateCareerFinancesAfterMatch(comp, team);
+    UpdateCareerFinancesAfterMatch(comp, team, opponent);
     ProcessOfferExpiryCountdown();
     JobOffers_MaybeExpireSomeNewOffers();
     Career_MaybeGenerateJobOffer();
@@ -847,53 +834,46 @@ extern uint8_t _currentCompetitionIndex;
 /* Forward declaration for static function defined in Chunk 186 below */
 static void processPrimaryCompetitionForNextSeason(uint8_t *competition);
 
+/* A competition of the season end has been played (interactively or auto-advanced): its winner
+ * to the career mods (ModHooks_CompetitionFinished; benefactorr's Career+, PAST WINNERS). The
+ * winner is the slot's result (_diyCompetitionStart), and for a cup whose result was copied back
+ * into the tournament buffer on leaving its menu, that one's. Team 0x0000 is a team; 0xFFFF none. */
+static void careerCompetitionFinished(const uint8_t *record, uint8_t kind, uint8_t division)
+{
+    extern DIYCompetitionEx _diyCompetitionStart;
+    extern DIYTournamentState _diyFileBufferCopy;
+    extern uint16_t _currentSeasonShowing;
+    uint16_t winner = (uint16_t)_diyCompetitionStart.base.resultCode;
+    if (kind != MODCOMP_LEAGUE && winner == 0xFFFFu && _diyFileBufferCopy.header.competitionFinished != 0)
+        winner = (uint16_t)_diyFileBufferCopy.header.resultCode;
+    if (winner != 0xFFFFu)
+        ModHooks_CompetitionFinished(_currentSeasonShowing, comp_id(record), kind, division, winner);
+}
+#define CAREER_COMPETITION_FINISHED(record, kind, division) careerCompetitionFinished((record), (kind), (division))
+
 /* Career_ProcessSecondaryCompetitionForNextSeason (SWOS2.s line 31973)
  * Process secondary competition for next season: if active, edit interactively;
  * otherwise auto-advance as cup and cache qualified grid. */
 __attribute__((used, externally_visible))
 void Career_ProcessSecondaryCompetitionForNextSeason(uint8_t *competition)
 {
-    SEASON_STEP("SECONDARY ENTER comp=%u ptr=%p active=%p", (unsigned)_currentCompetitionIndex,
-                (void *)competition, (void *)_secondaryCompetitionPtr);
-    if (!competition || competition == (uint8_t *)(uintptr_t)-1) {
-        SEASON_STEP("SECONDARY INVALID POINTER comp=%u", (unsigned)_currentCompetitionIndex);
-        _panicReasonCode = 0x3003;
-        PanicHaltLoop();
-        return;
-    }
-    SEASON_STEP("SECONDARY TYPE_BEGIN comp=%u", (unsigned)_currentCompetitionIndex);
-    int secondaryType = ((Competition *)competition)->type;
-    SEASON_STEP("SECONDARY TYPE_END comp=%u type=%d", (unsigned)_currentCompetitionIndex, secondaryType);
-    if (secondaryType != 1) {
-        SEASON_STEP("SECONDARY BAD_TYPE comp=%u type=%d", (unsigned)_currentCompetitionIndex, secondaryType);
+    if (((Competition *)competition)->type != 1) {
         _panicReasonCode = 0x3003;
         PanicHaltLoop();
         return;
     }
     if (competition == _secondaryCompetitionPtr) {
-        SEASON_STEP("SECONDARY ACTIVE RESTORE_BEGIN");
         RestoreSelectedTeams();
-        SEASON_STEP("SECONDARY ACTIVE RESTORE_END COPY_BEGIN");
         Career_CopyCompetitionContextToOrFromActive();
-        SEASON_STEP("SECONDARY ACTIVE COPY_END MENU_BEGIN");
         ShowDIYCupMenuWithParams(1, 1, 0);
-        SEASON_STEP("SECONDARY ACTIVE MENU_END CACHE_BEGIN");
         DIY_CacheSecondaryQualifiedTeamsGrid();
-        SEASON_STEP("SECONDARY ACTIVE CACHE_END WINNER_BEGIN");
-        recordFinishedWinner(competition, 2, 0);
-        SEASON_STEP("SECONDARY ACTIVE WINNER_END SAVE_BEGIN");
+        CAREER_COMPETITION_FINISHED(competition, MODCOMP_SECOND_CUP, 0);
         SaveSelectedTeams();
-        SEASON_STEP("SECONDARY ACTIVE SAVE_END");
     } else {
-        SEASON_STEP("SECONDARY AUTO ADVANCE_BEGIN comp=%u", (unsigned)_currentCompetitionIndex);
         Career_AutoAdvanceCupCompetitionFromRecord(competition);
-        SEASON_STEP("SECONDARY AUTO ADVANCE_END CACHE_BEGIN comp=%u", (unsigned)_currentCompetitionIndex);
         DIY_CacheSecondaryQualifiedTeamsGrid();
-        SEASON_STEP("SECONDARY AUTO CACHE_END WINNER_BEGIN comp=%u", (unsigned)_currentCompetitionIndex);
-        recordFinishedWinner(competition, 2, 0);
-        SEASON_STEP("SECONDARY AUTO WINNER_END comp=%u", (unsigned)_currentCompetitionIndex);
+        CAREER_COMPETITION_FINISHED(competition, MODCOMP_SECOND_CUP, 0);
     }
-    SEASON_STEP("SECONDARY EXIT comp=%u", (unsigned)_currentCompetitionIndex);
 }
 
 /* Career_ProcessTertiaryCompetitionForNextSeason (SWOS2.s line 32000)
@@ -911,13 +891,16 @@ void Career_ProcessTertiaryCompetitionForNextSeason(uint8_t *competition)
         Career_CopyTertiaryCompetitionContextToOrFromActive();
         ShowDIYCupMenuWithParams(1, 1, 0);
         DIY_CacheTertiaryQualifiedTeamGrid();
-        recordFinishedWinner(competition, 3, 0);
+        CAREER_COMPETITION_FINISHED(competition, MODCOMP_THIRD_CUP, 0);
         SaveSelectedTeams();
     } else {
         Career_AutoAdvanceCupCompetitionFromRecord(competition);
         DIY_CacheTertiaryQualifiedTeamGrid();
-        recordFinishedWinner(competition, 3, 0);
+        CAREER_COMPETITION_FINISHED(competition, MODCOMP_THIRD_CUP, 0);
     }
+    /* a world's league cup with no European place (world_cups.c): its winner takes none */
+    if (!WorldCups_LeagueCupEurope(competition))
+        _cachedTertiaryQualifiedTeamId = 0xFFFF;
 }
 
 /* Career_ProcessCompetitionForNextSeason (SWOS2.s line 31908)
@@ -926,10 +909,9 @@ void Career_ProcessTertiaryCompetitionForNextSeason(uint8_t *competition)
 __attribute__((used, externally_visible))
 void Career_ProcessCompetitionForNextSeason(uint16_t compIndex)
 {
-    SEASON_STEP("COMP BEGIN id=%u", (unsigned)compIndex);
-    trace_league_balance("COMP_BEGIN", (unsigned)compIndex, 0);
+    UnifiedSeasonEndTrace("competition BEGIN", compIndex);
+    UnifiedTraceScratchOrigin("competition BEGIN", compIndex);
     _currentCompetitionIndex = (uint8_t)compIndex;
-    if (compIndex == 41) yugo_overlap_capture_begin();
     _cachedTertiaryQualifiedTeamId = 0xFFFF;
 
     /* Walk competitionsTable[idx]'s sub-table as void** so each slot is
@@ -938,32 +920,479 @@ void Career_ProcessCompetitionForNextSeason(uint16_t compIndex)
 
     /* Entry layout: [0]=primary ptr, [1]=skip, [2]=secondary ptr, [3]=tertiary ptr */
     uint8_t *primary = (uint8_t *)tableEntry[0];
-    SEASON_STEP("COMP id=%u PRIMARY BEGIN", (unsigned)compIndex);
+    UnifiedSeasonEndTrace("primary BEGIN", compIndex);
     processPrimaryCompetitionForNextSeason(primary);
-    SEASON_STEP("COMP id=%u PRIMARY END", (unsigned)compIndex);
-    trace_league_balance("PRIMARY_END", (unsigned)compIndex, 0);
+    UnifiedSeasonEndTrace("primary END", compIndex);
+    UnifiedTraceScratchOrigin("primary END", compIndex);
 
     uint8_t *secondary = (uint8_t *)tableEntry[2];
     if (secondary != (uint8_t *)(uintptr_t)-1) {
-        SEASON_STEP("COMP id=%u SECONDARY BEGIN ptr=%p primary=%p active=%p", (unsigned)compIndex, (void *)secondary, (void *)primary, (void *)_secondaryCompetitionPtr);
+        UnifiedSeasonEndTrace("secondary BEGIN", compIndex);
         Career_ProcessSecondaryCompetitionForNextSeason(secondary);
-        SEASON_STEP("COMP id=%u SECONDARY END", (unsigned)compIndex);
-        trace_league_balance("SECONDARY_END", (unsigned)compIndex, 0);
+        UnifiedSeasonEndTrace("secondary END", compIndex);
+    UnifiedTraceScratchOrigin("secondary END", compIndex);
 
         uint8_t *tertiary = (uint8_t *)tableEntry[3];
         if (tertiary != (uint8_t *)(uintptr_t)-1) {
-            SEASON_STEP("COMP id=%u TERTIARY BEGIN", (unsigned)compIndex);
+            UnifiedSeasonEndTrace("tertiary BEGIN", compIndex);
             Career_ProcessTertiaryCompetitionForNextSeason(tertiary);
-            SEASON_STEP("COMP id=%u TERTIARY END", (unsigned)compIndex);
+            UnifiedSeasonEndTrace("tertiary END", compIndex);
+    UnifiedTraceScratchOrigin("tertiary END", compIndex);
         }
     }
 
-    if (compIndex == 41) yugo_overlap_capture_end();
-    SEASON_STEP("COMP id=%u VALIDATE BEGIN", (unsigned)compIndex);
-    trace_league_balance("VALIDATE_BEGIN", (unsigned)compIndex, 0);
+    UnifiedSeasonEndTrace("scratch validation BEGIN", compIndex);
+    UnifiedTraceScratchOrigin("before validation", compIndex);
     DIY_ValidateLeagueScratchBuffer();
-    SEASON_STEP("COMP id=%u END", (unsigned)compIndex);
+    UnifiedSeasonEndTrace("scratch validation END", compIndex);
+
+    /* A world's play-offs and play-outs: after the original's moves are checked, the
+     * places they decide (one-level moves, placed by InitializeNewSeason's groups pass). */
+    LeaguePlayoffs_Decide(compIndex & 0xFF, (const int8_t *)_diyLeagueSeasonStateTable,
+                          (int8_t *)_diyLeagueScratchBuffer);
+    UnifiedSeasonEndTrace("winners BEGIN", compIndex);
+    WorldWinners_SeasonDecided();
+    UnifiedSeasonEndTrace("winners END", compIndex);          /* (the SEASON WINNERS page's last season: world_winners.c) */
+    UnifiedSeasonEndTrace("states BEGIN", compIndex);
+    States_SeasonEnd((uint8_t)compIndex);
+    UnifiedSeasonEndTrace("competition END", compIndex);  /* (a world's state championships, Brazil's: states.c) */
 }
+
+/* Continental background results restored from the working 1996 Career+ path.
+ * Only invoked for modern mode in this Unified patch. */
+extern uint8_t _nationalTeams[];
+extern uint16_t _currentSeasonShowing;
+extern DIYTournamentState _diyFileBufferCopy;
+extern DIYCompetitionEx _diyCompetitionStart;
+
+static int v3_wc_valid_nation(uint16_t id)
+{
+    unsigned region = (unsigned)(id >> 8);
+    return id != 0xFFFFu && region >= 0x50u && region <= 0x55u;
+}
+
+/* V3 Phase 2D: independent continental competition draws and champions.
+ * The career winner archive already persists competition IDs 21 and 31..35.
+ * Never call SaveSelectedTeams() here. The enclosing season rollover has a
+ * single shared snapshot and restores it after all competitions finish. */
+extern uint16_t _numNationalTeams;
+extern uint8_t _ecQualifyingGroup2Copy[];
+extern uint8_t _ecQualifyingGroup3Copy[];
+extern uint8_t _ecQualifyingGroup4Copy[];
+extern uint8_t _ecQualifyingGroup5Copy[];
+extern uint8_t _ecQualifyingGroup6Copy[];
+extern uint8_t _ecQualifyingGroup7Copy[];
+extern void Career_AutoAdvanceCupCompetitionFromRecord(uint8_t *record);
+extern void Career_AutoAdvanceLeagueCompetitionFromRecord(uint8_t *record);
+extern void Career_UpdateEuropeanChampionshipCompetitions(void);
+
+typedef struct V3NationalSeed { uint16_t id; uint8_t strength; } V3NationalSeed;
+
+static unsigned v3_region_candidates(uint8_t region, V3NationalSeed *out,
+                                      unsigned limit)
+{
+    const NationalTeamRecord *records = (const NationalTeamRecord *)_nationalTeams;
+    unsigned n = 0;
+    for (unsigned i = 0; i < _numNationalTeams && i < 145u; ++i) {
+        if (records[i].countryNumber != region || n == limit) continue;
+        uint16_t id = PACK_BE_U16(records[i].countryNumber, records[i].teamOrdinal);
+        if (!v3_wc_valid_nation(id)) continue;
+        unsigned duplicate = 0;
+        for (unsigned j = 0; j < n; ++j) if (out[j].id == id) duplicate = 1;
+        if (duplicate) continue;
+        /* Historical national-team ratings are stored as a BE byte pair.
+         * Retaining their original order as a tiebreaker is deterministic. */
+        const uint8_t *rating = (const uint8_t *)&records[i].skillOrPrice;
+        V3NationalSeed item = { id, rating[1] };
+        unsigned pos = n;
+        while (pos > 0 && out[pos - 1].strength < item.strength) {
+            out[pos] = out[pos - 1];
+            --pos;
+        }
+        out[pos] = item;
+        ++n;
+    }
+    return n;
+}
+
+static int v3_continental_record(uint8_t id, uint8_t **record,
+                                  unsigned *count, uint8_t *region)
+{
+    switch (id) {
+    case COMPID_worldCup2:
+        *record = _worldCup2Copy; *count = 32; *region = 0; return 1;
+    case COMPID_europeanChampionships2:
+        *record = _europeanChampionships2Copy; *count = 16; *region = 0x50; return 1;
+    case COMPID_copaAmerica:
+        *record = _copaAmericaCopy; *count = 12; *region = 0x52; return 1;
+    case COMPID_africanNationsCup:
+        *record = _africanNationsCupCopy; *count = 32; *region = 0x51; return 1;
+    case COMPID_northAmericanCup:
+        *record = _northAmericanCupCopy; *count = 12; *region = 0x53; return 1;
+    case COMPID_asianCup:
+        *record = _asianCupCopy; *count = 30; *region = 0x54; return 1;
+    default: return 0;
+    }
+}
+
+static int v3_continental_draw_valid(uint8_t id)
+{
+    uint8_t *record = NULL, region = 0;
+    unsigned count = 0;
+    if (!v3_continental_record(id, &record, &count, &region)) return 0;
+    TeamId *seeds = comp_team_seed_list((Competition *)record);
+    if (!seeds) return 0;
+    for (unsigned i = 0; i < count; ++i) {
+        uint16_t candidate = TEAMID_PACK(seeds[i]);
+        if (!v3_wc_valid_nation(candidate)) return 0;
+        if (region && (candidate >> 8) != region &&
+            !(id == COMPID_copaAmerica && (candidate >> 8) == 0x53)) return 0;
+        for (unsigned j = 0; j < i; ++j)
+            if (candidate == TEAMID_PACK(seeds[j])) return 0;
+    }
+    return 1;
+}
+
+static void v3_write_continental_draw(uint8_t id)
+{
+    uint8_t *record = NULL, region = 0;
+    unsigned count = 0;
+    if (!v3_continental_record(id, &record, &count, &region)) return;
+    /* The original Copa America template contains its 10 CONMEBOL nations
+     * and two invited CONCACAF nations. Preserve it when present. */
+    if (v3_continental_draw_valid(id)) return;
+    V3NationalSeed candidates[145];
+    unsigned available = v3_region_candidates(region, candidates, 145);
+    if (id == COMPID_worldCup2) {
+        /* Background World Cup: choose a balanced, unique field from the
+         * classic national database. Do not change an already valid draw. */
+        static const struct { uint8_t region, places; } quotas[] = {
+            {0x50, 14}, {0x52, 5}, {0x51, 5},
+            {0x53, 3}, {0x54, 4}, {0x55, 1}
+        };
+        available = 0;
+        for (unsigned q = 0; q < sizeof(quotas) / sizeof(quotas[0]); ++q) {
+            V3NationalSeed regional[145];
+            unsigned n = v3_region_candidates(quotas[q].region, regional, 145);
+            if (n < quotas[q].places) {
+                SWOS_NationalTrace("WORLD_CUP_DRAW_SKIPPED",
+                    "season=%u region=%u required=%u available=%u",
+                    (unsigned)_currentSeasonShowing, (unsigned)quotas[q].region,
+                    (unsigned)quotas[q].places, n);
+                return;
+            }
+            for (unsigned i = 0; i < quotas[q].places; ++i)
+                candidates[available++] = regional[i];
+        }
+    }
+    if (id == COMPID_copaAmerica) {
+        V3NationalSeed invited[145];
+        unsigned m = v3_region_candidates(0x53, invited, 145);
+        for (unsigned i = 0; i < m && available < count; ++i)
+            candidates[available++] = invited[i];
+    }
+    if (available < count) {
+        SWOS_NationalTrace("CONTINENTAL_DRAW_SKIPPED",
+            "season=%u comp=%u required=%u found=%u",
+            (unsigned)_currentSeasonShowing, (unsigned)id, count, available);
+        return;
+    }
+    TeamId *seeds = comp_team_seed_list((Competition *)record);
+    if (!seeds) return;
+    for (unsigned i = 0; i < count; ++i)
+        BE_WRITE_U16((uint8_t *)seeds + 2u * i, candidates[i].id);
+    SWOS_NationalTrace("CONTINENTAL_DRAW_READY",
+        "season=%u comp=%u entrants=%u", (unsigned)_currentSeasonShowing,
+        (unsigned)id, count);
+}
+
+/* The Oceania cup is a type-0 CompetitionCup, not a type-2 tournament,
+ * and the original national database contains only four Oceania nations.
+ * A small deterministic knockout uses their historical team ratings and
+ * a local seed, without touching game RNG, competition slots or cup buffers. */
+static void v3_seed_oceania(void)
+{
+    V3NationalSeed teams[145];
+    unsigned count = v3_region_candidates(0x55, teams, 145);
+    if (count < 4) {
+        SWOS_NationalTrace("CONTINENTAL_DRAW_SKIPPED",
+            "season=%u comp=%u required=4 found=%u",
+            (unsigned)_currentSeasonShowing, (unsigned)COMPID_oceaniaCup, count);
+        return;
+    }
+    TeamId *list = ((CompetitionCup *)_oceaniaCupCopy)->teamSeedList;
+    for (unsigned i = 0; i < 4; ++i)
+        BE_WRITE_U16((uint8_t *)list + i * 2u, teams[i].id);
+    SWOS_NationalTrace("CONTINENTAL_DRAW_READY",
+        "season=%u comp=%u entrants=4", (unsigned)_currentSeasonShowing,
+        (unsigned)COMPID_oceaniaCup);
+}
+
+/* Keep the verified national draw in private storage. Legacy competition
+ * auto-advance reuses inactive competition buffers, so an early seed can be
+ * overwritten before its own cup starts. The snapshot is process-local and
+ * only valid for the exact season in which it was captured. Saved games still
+ * use the existing draw validator and deterministic rebuild fallback. */
+typedef struct V3ContinentalDrawSnapshot {
+    uint8_t competition;
+    uint8_t count;
+    uint16_t season;
+    uint8_t valid;
+    uint16_t entrants[32];
+} V3ContinentalDrawSnapshot;
+
+static V3ContinentalDrawSnapshot s_v3ContinentalDraws[6];
+
+static V3ContinentalDrawSnapshot *v3_continental_snapshot(uint8_t id)
+{
+    const uint8_t ids[] = { COMPID_worldCup2, COMPID_europeanChampionships2,
+        COMPID_copaAmerica, COMPID_africanNationsCup,
+        COMPID_northAmericanCup, COMPID_asianCup };
+    for (unsigned i = 0; i < sizeof(ids); ++i) {
+        if (ids[i] == id) {
+            s_v3ContinentalDraws[i].competition = id;
+            return &s_v3ContinentalDraws[i];
+        }
+    }
+    return NULL;
+}
+
+static void v3_capture_continental_draw(uint8_t id)
+{
+    V3ContinentalDrawSnapshot *snap = v3_continental_snapshot(id);
+    uint8_t *record = NULL, region = 0;
+    unsigned count = 0;
+    if (!snap || !v3_continental_record(id, &record, &count, &region) ||
+        count > 32u || !v3_continental_draw_valid(id)) return;
+    TeamId *seeds = comp_team_seed_list((Competition *)record);
+    if (!seeds) return;
+    for (unsigned i = 0; i < count; ++i)
+        snap->entrants[i] = BE_READ_U16((uint8_t *)seeds + 2u * i);
+    snap->count = (uint8_t)count;
+    snap->season = _currentSeasonShowing;
+    snap->valid = 1;
+    SWOS_NationalTrace("CONTINENTAL_DRAW_SNAPSHOT",
+        "season=%u comp=%u entrants=%u", (unsigned)_currentSeasonShowing,
+        (unsigned)id, count);
+}
+
+static int v3_restore_continental_draw(uint8_t id)
+{
+    V3ContinentalDrawSnapshot *snap = v3_continental_snapshot(id);
+    uint8_t *record = NULL, region = 0;
+    unsigned count = 0;
+    if (!snap || !snap->valid || snap->season != _currentSeasonShowing ||
+        !v3_continental_record(id, &record, &count, &region) ||
+        snap->count != count) return 0;
+    TeamId *seeds = comp_team_seed_list((Competition *)record);
+    if (!seeds) return 0;
+    /* The saved snapshot was validated at capture. Restore it only when the
+     * live draw is invalid, never replace a valid qualifier-derived draw. */
+    if (v3_continental_draw_valid(id)) return 1;
+    for (unsigned i = 0; i < count; ++i)
+        BE_WRITE_U16((uint8_t *)seeds + 2u * i, snap->entrants[i]);
+    if (!v3_continental_draw_valid(id)) return 0;
+    SWOS_NationalTrace("CONTINENTAL_DRAW_SNAPSHOT_RESTORED",
+        "season=%u comp=%u entrants=%u", (unsigned)_currentSeasonShowing,
+        (unsigned)id, count);
+    return 1;
+}
+
+static int v3_active_continental(uint8_t id)
+{
+    return _isNationalSelector && _currentCompetitionPtr &&
+           comp_id(_currentCompetitionPtr) == id;
+}
+
+/* Only called for actual new seasons, never while rebuilding a loaded save.
+ * Other continents are filled even if the user coaches a national team;
+ * the current human-controlled competition draw is not overwritten. */
+__attribute__((used, externally_visible))
+void Career_SeedIndependentContinentalCups(void)
+{
+    if (_currentSeasonShowing == 0xFFFFu) return;
+    unsigned phase = _currentSeasonShowing % 4u;
+    if (phase == 1u && World_Current() == WORLD_9697 &&
+        !v3_active_continental(COMPID_worldCup2)) {
+        v3_write_continental_draw(COMPID_worldCup2);
+        v3_capture_continental_draw(COMPID_worldCup2);
+    }
+    if (phase == 2u) {
+        const uint8_t cups[] = { COMPID_copaAmerica, COMPID_africanNationsCup,
+             COMPID_northAmericanCup, COMPID_asianCup };
+        for (unsigned i = 0; i < sizeof(cups); ++i)
+            if (!v3_active_continental(cups[i])) {
+                v3_write_continental_draw(cups[i]);
+                v3_capture_continental_draw(cups[i]);
+            }
+        if (!v3_active_continental(COMPID_oceaniaCup)) v3_seed_oceania();
+    } else if (phase == 3u &&
+               !v3_active_continental(COMPID_europeanChampionships2)) {
+        /* For club careers the EC finals draw is normally the result of
+         * phase-2 qualification. Only fall back to seeded entrants if the
+         * qualifiers were unavailable or the save predates this feature. */
+        v3_write_continental_draw(COMPID_europeanChampionships2);
+        v3_capture_continental_draw(COMPID_europeanChampionships2);
+    }
+}
+
+static void v3_record_continental(uint8_t id, uint16_t winner,
+                                  const char *origin)
+{
+    if (!v3_wc_valid_nation(winner)) {
+        SWOS_NationalTrace("CONTINENTAL_WINNER_REJECTED",
+            "season=%u comp=%u id=%04X origin=%s", (unsigned)_currentSeasonShowing,
+            (unsigned)id, (unsigned)winner, origin);
+        return;
+    }
+    CareerWinners_Record(_currentSeasonShowing, id, 1, 0, winner);
+    SWOS_NationalTrace("CONTINENTAL_WINNER_RECORDED",
+        "season=%u comp=%u id=%04X origin=%s", (unsigned)_currentSeasonShowing,
+        (unsigned)id, (unsigned)winner, origin);
+}
+
+static void v3_simulate_continental(uint8_t id)
+{
+    uint8_t *record = NULL, region = 0;
+    unsigned count = 0;
+    if (!v3_continental_record(id, &record, &count, &region)) {
+        SWOS_NationalTrace("CONTINENTAL_SIM_SKIPPED",
+            "season=%u comp=%u reason=no_competition_record",
+            (unsigned)_currentSeasonShowing, (unsigned)id);
+        return;
+    }
+    /* Prefer the already verified draw from season start. The inactive
+     * competition record may have been reused by another cup in between. */
+    if (!v3_continental_draw_valid(id))
+        (void)v3_restore_continental_draw(id);
+    if (!v3_continental_draw_valid(id)) {
+        /* The original competition engine can reuse/overwrite inactive cup
+         * draws while advancing an earlier cup in the same season.  A draw
+         * seeded at season start is therefore not necessarily still intact.
+         * Rebuild only an inactive, invalid draw immediately before use. */
+        TeamId *before = comp_team_seed_list((Competition *)record);
+        if (before) {
+            for (unsigned i = 0; i < count; ++i) {
+                uint16_t candidate = TEAMID_PACK(before[i]);
+                int reason = !v3_wc_valid_nation(candidate) ? 1 :
+                    (region && (candidate >> 8) != region &&
+                     !(id == COMPID_copaAmerica && (candidate >> 8) == 0x53)) ? 2 : 0;
+                if (!reason) for (unsigned j = 0; j < i; ++j)
+                    if (candidate == TEAMID_PACK(before[j])) { reason = 3; break; }
+                if (reason) {
+                    SWOS_NationalTrace("CONTINENTAL_DRAW_INVALID_SLOT",
+                        "season=%u comp=%u slot=%u id=%04X reason=%u",
+                        (unsigned)_currentSeasonShowing, (unsigned)id, i,
+                        (unsigned)candidate, reason);
+                    break;
+                }
+            }
+        } else {
+            SWOS_NationalTrace("CONTINENTAL_DRAW_INVALID_SLOT",
+                "season=%u comp=%u reason=no_seed_list",
+                (unsigned)_currentSeasonShowing, (unsigned)id);
+        }
+        v3_write_continental_draw(id);
+        if (v3_continental_draw_valid(id))
+            SWOS_NationalTrace("CONTINENTAL_DRAW_REPAIRED",
+                "season=%u comp=%u entrants=%u",
+                (unsigned)_currentSeasonShowing, (unsigned)id, count);
+        else {
+            SWOS_NationalTrace("CONTINENTAL_SIM_SKIPPED",
+                "season=%u comp=%u reason=invalid_draw_after_reseed",
+                (unsigned)_currentSeasonShowing, (unsigned)id);
+            return;
+        }
+    }
+    SWOS_NationalTrace("CONTINENTAL_SIM_BEGIN",
+        "season=%u comp=%u entrants=%u", (unsigned)_currentSeasonShowing,
+        (unsigned)id, count);
+    Career_AutoAdvanceLeagueCompetitionFromRecord(record);
+    uint16_t winner = (uint16_t)_diyFileBufferCopy.header.winnerTeam;
+    uint16_t finished = (uint16_t)_diyFileBufferCopy.header.competitionFinished;
+    uint16_t stageWinner = (uint16_t)_diyCompetitionStart.base.resultCode;
+    uint16_t stageFinished = (uint16_t)_diyCompetitionStart.base.competitionFinished;
+    if (!v3_wc_valid_nation(winner) && v3_wc_valid_nation(stageWinner))
+        winner = stageWinner;
+    SWOS_NationalTrace("CONTINENTAL_SIM_END",
+        "season=%u comp=%u winner=%04X finished=%u stage_finished=%u",
+        (unsigned)_currentSeasonShowing, (unsigned)id, (unsigned)winner,
+        (unsigned)finished, (unsigned)stageFinished);
+    if (finished || stageFinished) {
+        v3_record_continental(id, winner, "automatic");
+    } else {
+        SWOS_NationalTrace("CONTINENTAL_SIM_UNFINISHED",
+            "season=%u comp=%u group_stage_or_knockout_incomplete winner=%04X",
+            (unsigned)_currentSeasonShowing, (unsigned)id, (unsigned)winner);
+    }
+}
+
+static void v3_simulate_oceania(void)
+{
+    V3NationalSeed candidates[145];
+    unsigned n = v3_region_candidates(0x55, candidates, 145);
+    if (n < 4u) {
+        SWOS_NationalTrace("CONTINENTAL_SIM_SKIPPED",
+            "season=%u comp=%u reason=not_enough_oceania_teams found=%u",
+            (unsigned)_currentSeasonShowing, (unsigned)COMPID_oceaniaCup, n);
+        return;
+    }
+    /* Select four strongest distinct eligible Oceania teams. */
+    /* Deterministic two semi-finals and one final; rating-weighted outcomes.
+     * This is deliberately separate from the legacy type-0 Oceania cup.
+     * Human-managed Oceania is handled by the normal active slot. */
+    uint32_t rng = 0x5530u ^ ((uint32_t)_currentSeasonShowing * 1664525u);
+    unsigned semi[2];
+    for (unsigned m = 0; m < 2; ++m) {
+        unsigned a = m, b = 3u - m;
+        rng = rng * 1664525u + 1013904223u;
+        unsigned chance = 1u + candidates[a].strength + candidates[b].strength;
+        semi[m] = ((rng >> 16) % chance) <= candidates[a].strength ? a : b;
+    }
+    rng = rng * 1664525u + 1013904223u;
+    unsigned a = semi[0], b = semi[1];
+    unsigned chance = 1u + candidates[a].strength + candidates[b].strength;
+    unsigned winnerIndex = ((rng >> 16) % chance) <= candidates[a].strength ? a : b;
+    v3_record_continental(COMPID_oceaniaCup, candidates[winnerIndex].id,
+                          "oceania_four_team");
+}
+
+static void v3_finish_continental_season(void)
+{
+    unsigned phase = _currentSeasonShowing % 4u;
+    if (phase == 1u) {
+        if (World_Current() == WORLD_9697 &&
+            !v3_active_continental(COMPID_worldCup2))
+            v3_simulate_continental(COMPID_worldCup2);
+        return;
+    }
+    if (phase != 2u && phase != 3u) return;
+    const uint8_t phaseTwo[] = { COMPID_copaAmerica, COMPID_africanNationsCup,
+                                 COMPID_northAmericanCup, COMPID_asianCup,
+                                 COMPID_oceaniaCup };
+    const uint8_t phaseThree[] = { COMPID_europeanChampionships2 };
+    const uint8_t *ids = phase == 2u ? phaseTwo : phaseThree;
+    unsigned n = phase == 2u ? sizeof(phaseTwo) : sizeof(phaseThree);
+    for (unsigned i = 0; i < n; ++i) {
+        uint8_t id = ids[i];
+        if (v3_active_continental(id)) {
+            if (World_Current() == WORLD_9697) {
+                /* Classic national finals are recorded from the completed
+                 * stage, not from a stale parent group-stage leader. */
+                CareerWinners_RecordFinishedNationalSlots();
+            } else {
+                /* Keep the working modern-national recording path intact. */
+                uint16_t winner = (uint16_t)_primaryCompetitionBuf.tourn.header.winnerTeam;
+                v3_record_continental(id, winner, "human_national");
+            }
+        } else if (id == COMPID_oceaniaCup) {
+            v3_simulate_oceania();
+        } else {
+            v3_simulate_continental(id);
+        }
+    }
+}
+
 
 /* ================================================================
  * Chunk 185: Career Cup Pick List System (SWOS2.s lines 32019-33004)
@@ -1063,10 +1492,6 @@ extern char    *_tourStringTable[];
 
 /* Forward declarations */
 static void setupWorldCupQualifyingGroups(uint16_t **teamListPtr);
-extern void *_careerTeamFlagsByRegionTable[];
-extern uint16_t _seasonCycleNationalFlagsA[];
-extern uint16_t _worldCupQualifyingTeam;
-
 
 /* ---- pickRandomNationalTeamId (SWOS2.s line 32962) ----
  * Picks a random national team, optionally filtered by region and price.
@@ -1094,7 +1519,7 @@ static uint16_t pickRandomNationalTeamId(uint16_t minPrice, uint16_t maxPrice,
             continue;
 
         if (retries >= 0) {
-            uint16_t price = rec->skillOrPrice;
+            uint16_t price = BE_READ_U16(&rec->skillOrPrice);   /* (big-endian, as the table holds it) */
             if (price < minPrice || price > maxPrice) {
                 retries--;
                 continue;
@@ -1283,485 +1708,6 @@ wc_groups_done:
     fillWorldCupQualifyingGroupTeams(0x55, _oceaniaWorldCupQualificationCopy, teamListPtr);
 }
 
-/* V3 Phase 2A: draw World Cup qualification in an ordinary CLUB career.
- * Preserve the club's active competition and selected team. The original
- * national-team path does this inside Career_SetCupPickList_ForSelectedRegion.
- * Here only the 13 World Cup qualifier records are populated: no friendlies,
- * national menu pick list, Euro groups or club slots are touched.
- * Invoke exactly once at a new-season initialisation, never on save load. */
-__attribute__((used, externally_visible))
-void Career_SeedIndependentWorldCupQualifiers(void)
-{
-    extern uint16_t _isNationalSelector;
-    if (_isNationalSelector || _currentSeasonShowing == 0xFFFFu)
-        return;
-
-    const uint8_t *europeFlags = (const uint8_t *)_careerTeamFlagsByRegionTable[0];
-    if (!europeFlags)
-        return;
-    uint8_t flags = europeFlags[_currentSeasonShowing % 20u];
-    if (!(flags & 0x40u))
-        return;
-
-    uint16_t savedTeam = _selTeamNumber;
-    uint8_t savedFlags = _someTeamFlags;
-    uint16_t *sortedTeams = 0;
-
-    /* Neutral sentinel prevents the group filling routines from inserting
-     * the human club into any national-team group. */
-    _selTeamNumber = 0xFFFFu;
-    _someTeamFlags = flags;
-    _worldCupQualifyingTeam = _seasonCycleNationalFlagsA[(_currentSeasonShowing >> 2) % 5u];
-    setupWorldCupQualifyingGroups(&sortedTeams);
-    _someTeamFlags = savedFlags;
-    _selTeamNumber = savedTeam;
-    SWOS_NationalTrace("WC_CLUB_GROUPS_SEEDED", "season=%u flags=%02X host=%04X special=%04X",
-                       (unsigned)_currentSeasonShowing, (unsigned)flags,
-                       (unsigned)_worldCupHostTeam, (unsigned)_worldCupQualifyingTeam);
-}
-
-/* V3 Phase 2B: WC finals and historical results.  Clubs do not have a WC
- * competition slot.  Simulate the finals in scratch competition state only
- * after all 32 qualifiers have been determined by the existing WC engine. */
-static int v3_wc_valid_nation(uint16_t id)
-{
-    unsigned region = (unsigned)(id >> 8);
-    return id != 0xFFFFu && region >= 0x50u && region <= 0x55u;
-}
-
-static void v3_wc_record_champion(uint16_t winner, const char *origin)
-{
-    if (!v3_wc_valid_nation(winner)) {
-        SWOS_NationalTrace("WC_CHAMPION_REJECTED", "season=%u origin=%s id=%04X",
-                           (unsigned)_currentSeasonShowing, origin, (unsigned)winner);
-        return;
-    }
-    CareerWinners_Record(_currentSeasonShowing, COMPID_worldCup2, 1, 0, winner);
-    SWOS_NationalTrace("WC_CHAMPION_RECORDED", "season=%u origin=%s id=%04X",
-                       (unsigned)_currentSeasonShowing, origin, (unsigned)winner);
-}
-
-static void v3_wc_simulate_club_finals(void)
-{
-    TeamId *teams = comp_team_seed_list((Competition *)_worldCup2Copy);
-    if (!teams) {
-        SWOS_NationalTrace("WC_CLUB_FINALS_SKIPPED", "season=%u reason=no_seed_list",
-                           (unsigned)_currentSeasonShowing);
-        return;
-    }
-    /* BE-packed team IDs.  Reject stale, empty, repeated, or non-national
-     * entrants rather than running the 32-team finals on corrupt data. */
-    for (unsigned i = 0; i < 32; ++i) {
-        uint16_t id = BE_READ_U16((uint8_t *)teams + i * 2u);
-        if (!v3_wc_valid_nation(id)) {
-            SWOS_NationalTrace("WC_CLUB_FINALS_SKIPPED", "season=%u reason=invalid_team slot=%u id=%04X",
-                               (unsigned)_currentSeasonShowing, i, (unsigned)id);
-            return;
-        }
-        for (unsigned j = 0; j < i; ++j)
-            if (BE_READ_U16((uint8_t *)teams + j * 2u) == id) {
-                SWOS_NationalTrace("WC_CLUB_FINALS_SKIPPED", "season=%u reason=duplicate_team slot=%u id=%04X",
-                                   (unsigned)_currentSeasonShowing, i, (unsigned)id);
-                return;
-            }
-    }
-    SWOS_NationalTrace("WC_CLUB_FINALS_BEGIN", "season=%u entrants=32",
-                       (unsigned)_currentSeasonShowing);
-    /* The existing type-2 tournament auto-advance runs group and knockout
-     * stages; save and restore the club's selected-team cache around it. */
-    extern void Career_AutoAdvanceLeagueCompetitionFromRecord(uint8_t *record);
-    /* The enclosing season rollover has ALREADY called SaveSelectedTeams().
-     * Its backup is a single global buffer, not a stack. Saving again here
-     * replaces the club's selected-team snapshot with the scratch teams and
-     * makes the outer RestoreSelectedTeams() restore invalid state. The
-     * auto-advance routine initialises its own temporary team selection. */
-    Career_AutoAdvanceLeagueCompetitionFromRecord(_worldCup2Copy);
-    uint16_t winner = (uint16_t)_diyFileBufferCopy.header.winnerTeam;
-    uint16_t finished = (uint16_t)_diyFileBufferCopy.header.competitionFinished;
-    uint16_t stageWinner = (uint16_t)_diyCompetitionStart.base.resultCode;
-    uint16_t stageFinished = (uint16_t)_diyCompetitionStart.base.competitionFinished;
-    if (!v3_wc_valid_nation(winner) && v3_wc_valid_nation(stageWinner))
-        winner = stageWinner;
-    SWOS_NationalTrace("WC_CLUB_FINALS_END", "season=%u winner=%04X finished=%u stage_winner=%04X stage_finished=%u",
-                       (unsigned)_currentSeasonShowing, (unsigned)winner, (unsigned)finished,
-                       (unsigned)stageWinner, (unsigned)stageFinished);
-    if (finished || stageFinished) {
-        if (v3_wc_valid_nation(winner))
-            _worldCupHostTeam = winner; /* Mirror original national WC rollover. */
-        v3_wc_record_champion(winner, "club_auto");
-    }
-    /* The enclosing season rollover restores its saved teams at the end. */
-}
-
-/* V3 Phase 2D: independent continental competition draws and champions.
- * The career winner archive already persists competition IDs 21 and 31..35.
- * Never call SaveSelectedTeams() here. The enclosing season rollover has a
- * single shared snapshot and restores it after all competitions finish. */
-extern uint16_t _numNationalTeams;
-extern uint8_t _ecQualifyingGroup2Copy[];
-extern uint8_t _ecQualifyingGroup3Copy[];
-extern uint8_t _ecQualifyingGroup4Copy[];
-extern uint8_t _ecQualifyingGroup5Copy[];
-extern uint8_t _ecQualifyingGroup6Copy[];
-extern uint8_t _ecQualifyingGroup7Copy[];
-extern void Career_AutoAdvanceCupCompetitionFromRecord(uint8_t *record);
-extern void Career_AutoAdvanceLeagueCompetitionFromRecord(uint8_t *record);
-extern void Career_UpdateEuropeanChampionshipCompetitions(void);
-
-typedef struct V3NationalSeed { uint16_t id; uint8_t strength; } V3NationalSeed;
-
-static unsigned v3_region_candidates(uint8_t region, V3NationalSeed *out,
-                                      unsigned limit)
-{
-    const NationalTeamRecord *records = (const NationalTeamRecord *)_nationalTeams;
-    unsigned n = 0;
-    for (unsigned i = 0; i < _numNationalTeams && i < 145u; ++i) {
-        if (records[i].countryNumber != region || n == limit) continue;
-        uint16_t id = PACK_BE_U16(records[i].countryNumber, records[i].teamOrdinal);
-        if (!v3_wc_valid_nation(id)) continue;
-        unsigned duplicate = 0;
-        for (unsigned j = 0; j < n; ++j) if (out[j].id == id) duplicate = 1;
-        if (duplicate) continue;
-        /* Historical national-team ratings are stored as a BE byte pair.
-         * Retaining their original order as a tiebreaker is deterministic. */
-        const uint8_t *rating = (const uint8_t *)&records[i].skillOrPrice;
-        V3NationalSeed item = { id, rating[1] };
-        unsigned pos = n;
-        while (pos > 0 && out[pos - 1].strength < item.strength) {
-            out[pos] = out[pos - 1];
-            --pos;
-        }
-        out[pos] = item;
-        ++n;
-    }
-    return n;
-}
-
-static int v3_continental_record(uint8_t id, uint8_t **record,
-                                  unsigned *count, uint8_t *region)
-{
-    switch (id) {
-    case COMPID_europeanChampionships2:
-        *record = _europeanChampionships2Copy; *count = 16; *region = 0x50; return 1;
-    case COMPID_copaAmerica:
-        *record = _copaAmericaCopy; *count = 12; *region = 0x52; return 1;
-    case COMPID_africanNationsCup:
-        *record = _africanNationsCupCopy; *count = 32; *region = 0x51; return 1;
-    case COMPID_northAmericanCup:
-        *record = _northAmericanCupCopy; *count = 12; *region = 0x53; return 1;
-    case COMPID_asianCup:
-        *record = _asianCupCopy; *count = 30; *region = 0x54; return 1;
-    default: return 0;
-    }
-}
-
-static int v3_continental_draw_valid(uint8_t id)
-{
-    uint8_t *record = NULL, region = 0;
-    unsigned count = 0;
-    if (!v3_continental_record(id, &record, &count, &region)) return 0;
-    TeamId *seeds = comp_team_seed_list((Competition *)record);
-    if (!seeds) return 0;
-    for (unsigned i = 0; i < count; ++i) {
-        uint16_t candidate = TEAMID_PACK(seeds[i]);
-        if (!v3_wc_valid_nation(candidate)) return 0;
-        if ((candidate >> 8) != region &&
-            !(id == COMPID_copaAmerica && (candidate >> 8) == 0x53)) return 0;
-        for (unsigned j = 0; j < i; ++j)
-            if (candidate == TEAMID_PACK(seeds[j])) return 0;
-    }
-    return 1;
-}
-
-static void v3_write_continental_draw(uint8_t id)
-{
-    uint8_t *record = NULL, region = 0;
-    unsigned count = 0;
-    if (!v3_continental_record(id, &record, &count, &region)) return;
-    /* The original Copa America template contains its 10 CONMEBOL nations
-     * and two invited CONCACAF nations. Preserve it when present. */
-    if (v3_continental_draw_valid(id)) return;
-    V3NationalSeed candidates[145];
-    unsigned available = v3_region_candidates(region, candidates, 145);
-    if (id == COMPID_copaAmerica) {
-        V3NationalSeed invited[145];
-        unsigned m = v3_region_candidates(0x53, invited, 145);
-        for (unsigned i = 0; i < m && available < count; ++i)
-            candidates[available++] = invited[i];
-    }
-    if (available < count) {
-        SWOS_NationalTrace("CONTINENTAL_DRAW_SKIPPED",
-            "season=%u comp=%u required=%u found=%u",
-            (unsigned)_currentSeasonShowing, (unsigned)id, count, available);
-        return;
-    }
-    TeamId *seeds = comp_team_seed_list((Competition *)record);
-    if (!seeds) return;
-    for (unsigned i = 0; i < count; ++i)
-        BE_WRITE_U16((uint8_t *)seeds + 2u * i, candidates[i].id);
-    SWOS_NationalTrace("CONTINENTAL_DRAW_READY",
-        "season=%u comp=%u entrants=%u", (unsigned)_currentSeasonShowing,
-        (unsigned)id, count);
-}
-
-/* The Oceania cup is a type-0 CompetitionCup, not a type-2 tournament,
- * and the original national database contains only four Oceania nations.
- * A small deterministic knockout uses their historical team ratings and
- * a local seed, without touching game RNG, competition slots or cup buffers. */
-static void v3_seed_oceania(void)
-{
-    V3NationalSeed teams[145];
-    unsigned count = v3_region_candidates(0x55, teams, 145);
-    if (count != 4) {
-        SWOS_NationalTrace("CONTINENTAL_DRAW_SKIPPED",
-            "season=%u comp=%u required=4 found=%u",
-            (unsigned)_currentSeasonShowing, (unsigned)COMPID_oceaniaCup, count);
-        return;
-    }
-    TeamId *list = ((CompetitionCup *)_oceaniaCupCopy)->teamSeedList;
-    for (unsigned i = 0; i < 4; ++i)
-        BE_WRITE_U16((uint8_t *)list + i * 2u, teams[i].id);
-    SWOS_NationalTrace("CONTINENTAL_DRAW_READY",
-        "season=%u comp=%u entrants=4", (unsigned)_currentSeasonShowing,
-        (unsigned)COMPID_oceaniaCup);
-}
-
-/* Keep the verified national draw in private storage. Legacy competition
- * auto-advance reuses inactive competition buffers, so an early seed can be
- * overwritten before its own cup starts. The snapshot is process-local and
- * only valid for the exact season in which it was captured. Saved games still
- * use the existing draw validator and deterministic rebuild fallback. */
-typedef struct V3ContinentalDrawSnapshot {
-    uint8_t competition;
-    uint8_t count;
-    uint16_t season;
-    uint8_t valid;
-    uint16_t entrants[32];
-} V3ContinentalDrawSnapshot;
-
-static V3ContinentalDrawSnapshot s_v3ContinentalDraws[5];
-
-static V3ContinentalDrawSnapshot *v3_continental_snapshot(uint8_t id)
-{
-    const uint8_t ids[] = { COMPID_europeanChampionships2,
-        COMPID_copaAmerica, COMPID_africanNationsCup,
-        COMPID_northAmericanCup, COMPID_asianCup };
-    for (unsigned i = 0; i < sizeof(ids); ++i) {
-        if (ids[i] == id) {
-            s_v3ContinentalDraws[i].competition = id;
-            return &s_v3ContinentalDraws[i];
-        }
-    }
-    return NULL;
-}
-
-static void v3_capture_continental_draw(uint8_t id)
-{
-    V3ContinentalDrawSnapshot *snap = v3_continental_snapshot(id);
-    uint8_t *record = NULL, region = 0;
-    unsigned count = 0;
-    if (!snap || !v3_continental_record(id, &record, &count, &region) ||
-        count > 32u || !v3_continental_draw_valid(id)) return;
-    TeamId *seeds = comp_team_seed_list((Competition *)record);
-    if (!seeds) return;
-    for (unsigned i = 0; i < count; ++i)
-        snap->entrants[i] = BE_READ_U16((uint8_t *)seeds + 2u * i);
-    snap->count = (uint8_t)count;
-    snap->season = _currentSeasonShowing;
-    snap->valid = 1;
-    SWOS_NationalTrace("CONTINENTAL_DRAW_SNAPSHOT",
-        "season=%u comp=%u entrants=%u", (unsigned)_currentSeasonShowing,
-        (unsigned)id, count);
-}
-
-static int v3_restore_continental_draw(uint8_t id)
-{
-    V3ContinentalDrawSnapshot *snap = v3_continental_snapshot(id);
-    uint8_t *record = NULL, region = 0;
-    unsigned count = 0;
-    if (!snap || !snap->valid || snap->season != _currentSeasonShowing ||
-        !v3_continental_record(id, &record, &count, &region) ||
-        snap->count != count) return 0;
-    TeamId *seeds = comp_team_seed_list((Competition *)record);
-    if (!seeds) return 0;
-    /* The saved snapshot was validated at capture. Restore it only when the
-     * live draw is invalid, never replace a valid qualifier-derived draw. */
-    if (v3_continental_draw_valid(id)) return 1;
-    for (unsigned i = 0; i < count; ++i)
-        BE_WRITE_U16((uint8_t *)seeds + 2u * i, snap->entrants[i]);
-    if (!v3_continental_draw_valid(id)) return 0;
-    SWOS_NationalTrace("CONTINENTAL_DRAW_SNAPSHOT_RESTORED",
-        "season=%u comp=%u entrants=%u", (unsigned)_currentSeasonShowing,
-        (unsigned)id, count);
-    return 1;
-}
-
-static int v3_active_continental(uint8_t id)
-{
-    return _isNationalSelector && _currentCompetitionPtr &&
-           comp_id(_currentCompetitionPtr) == id;
-}
-
-/* Only called for actual new seasons, never while rebuilding a loaded save.
- * Other continents are filled even if the user coaches a national team;
- * the current human-controlled competition draw is not overwritten. */
-__attribute__((used, externally_visible))
-void Career_SeedIndependentContinentalCups(void)
-{
-    if (_currentSeasonShowing == 0xFFFFu) return;
-    unsigned phase = _currentSeasonShowing % 4u;
-    if (phase == 2u) {
-        const uint8_t cups[] = { COMPID_copaAmerica, COMPID_africanNationsCup,
-             COMPID_northAmericanCup, COMPID_asianCup };
-        for (unsigned i = 0; i < sizeof(cups); ++i)
-            if (!v3_active_continental(cups[i])) {
-                v3_write_continental_draw(cups[i]);
-                v3_capture_continental_draw(cups[i]);
-            }
-        if (!v3_active_continental(COMPID_oceaniaCup)) v3_seed_oceania();
-    } else if (phase == 3u &&
-               !v3_active_continental(COMPID_europeanChampionships2)) {
-        /* For club careers the EC finals draw is normally the result of
-         * phase-2 qualification. Only fall back to seeded entrants if the
-         * qualifiers were unavailable or the save predates this feature. */
-        v3_write_continental_draw(COMPID_europeanChampionships2);
-        v3_capture_continental_draw(COMPID_europeanChampionships2);
-    }
-}
-
-static void v3_record_continental(uint8_t id, uint16_t winner,
-                                  const char *origin)
-{
-    if (!v3_wc_valid_nation(winner)) {
-        SWOS_NationalTrace("CONTINENTAL_WINNER_REJECTED",
-            "season=%u comp=%u id=%04X origin=%s", (unsigned)_currentSeasonShowing,
-            (unsigned)id, (unsigned)winner, origin);
-        return;
-    }
-    CareerWinners_Record(_currentSeasonShowing, id, 1, 0, winner);
-    SWOS_NationalTrace("CONTINENTAL_WINNER_RECORDED",
-        "season=%u comp=%u id=%04X origin=%s", (unsigned)_currentSeasonShowing,
-        (unsigned)id, (unsigned)winner, origin);
-}
-
-static void v3_simulate_continental(uint8_t id)
-{
-    uint8_t *record = NULL, region = 0;
-    unsigned count = 0;
-    if (!v3_continental_record(id, &record, &count, &region)) return;
-    /* Prefer the already verified draw from season start. The inactive
-     * competition record may have been reused by another cup in between. */
-    if (!v3_continental_draw_valid(id))
-        (void)v3_restore_continental_draw(id);
-    if (!v3_continental_draw_valid(id)) {
-        /* The original competition engine can reuse/overwrite inactive cup
-         * draws while advancing an earlier cup in the same season.  A draw
-         * seeded at season start is therefore not necessarily still intact.
-         * Rebuild only an inactive, invalid draw immediately before use. */
-        TeamId *before = comp_team_seed_list((Competition *)record);
-        if (before) {
-            for (unsigned i = 0; i < count; ++i) {
-                uint16_t candidate = TEAMID_PACK(before[i]);
-                int reason = !v3_wc_valid_nation(candidate) ? 1 :
-                    ((candidate >> 8) != region &&
-                     !(id == COMPID_copaAmerica && (candidate >> 8) == 0x53)) ? 2 : 0;
-                if (!reason) for (unsigned j = 0; j < i; ++j)
-                    if (candidate == TEAMID_PACK(before[j])) { reason = 3; break; }
-                if (reason) {
-                    SWOS_NationalTrace("CONTINENTAL_DRAW_INVALID_SLOT",
-                        "season=%u comp=%u slot=%u id=%04X reason=%u",
-                        (unsigned)_currentSeasonShowing, (unsigned)id, i,
-                        (unsigned)candidate, reason);
-                    break;
-                }
-            }
-        } else {
-            SWOS_NationalTrace("CONTINENTAL_DRAW_INVALID_SLOT",
-                "season=%u comp=%u reason=no_seed_list",
-                (unsigned)_currentSeasonShowing, (unsigned)id);
-        }
-        v3_write_continental_draw(id);
-        if (v3_continental_draw_valid(id))
-            SWOS_NationalTrace("CONTINENTAL_DRAW_REPAIRED",
-                "season=%u comp=%u entrants=%u",
-                (unsigned)_currentSeasonShowing, (unsigned)id, count);
-        else {
-            SWOS_NationalTrace("CONTINENTAL_SIM_SKIPPED",
-                "season=%u comp=%u reason=invalid_draw_after_reseed",
-                (unsigned)_currentSeasonShowing, (unsigned)id);
-            return;
-        }
-    }
-    SWOS_NationalTrace("CONTINENTAL_SIM_BEGIN",
-        "season=%u comp=%u entrants=%u", (unsigned)_currentSeasonShowing,
-        (unsigned)id, count);
-    Career_AutoAdvanceLeagueCompetitionFromRecord(record);
-    uint16_t winner = (uint16_t)_diyFileBufferCopy.header.winnerTeam;
-    uint16_t finished = (uint16_t)_diyFileBufferCopy.header.competitionFinished;
-    uint16_t stageWinner = (uint16_t)_diyCompetitionStart.base.resultCode;
-    uint16_t stageFinished = (uint16_t)_diyCompetitionStart.base.competitionFinished;
-    if (!v3_wc_valid_nation(winner) && v3_wc_valid_nation(stageWinner))
-        winner = stageWinner;
-    SWOS_NationalTrace("CONTINENTAL_SIM_END",
-        "season=%u comp=%u winner=%04X finished=%u stage_finished=%u",
-        (unsigned)_currentSeasonShowing, (unsigned)id, (unsigned)winner,
-        (unsigned)finished, (unsigned)stageFinished);
-    if (finished || stageFinished) v3_record_continental(id, winner, "automatic");
-}
-
-static void v3_simulate_oceania(void)
-{
-    V3NationalSeed candidates[145];
-    unsigned n = v3_region_candidates(0x55, candidates, 145);
-    if (n != 4u) return;
-    /* Deterministic two semi-finals and one final; rating-weighted outcomes.
-     * This is deliberately separate from the legacy type-0 Oceania cup.
-     * Human-managed Oceania is handled by the normal active slot. */
-    uint32_t rng = 0x5530u ^ ((uint32_t)_currentSeasonShowing * 1664525u);
-    unsigned semi[2];
-    for (unsigned m = 0; m < 2; ++m) {
-        unsigned a = m, b = 3u - m;
-        rng = rng * 1664525u + 1013904223u;
-        unsigned chance = 1u + candidates[a].strength + candidates[b].strength;
-        semi[m] = ((rng >> 16) % chance) <= candidates[a].strength ? a : b;
-    }
-    rng = rng * 1664525u + 1013904223u;
-    unsigned a = semi[0], b = semi[1];
-    unsigned chance = 1u + candidates[a].strength + candidates[b].strength;
-    unsigned winnerIndex = ((rng >> 16) % chance) <= candidates[a].strength ? a : b;
-    v3_record_continental(COMPID_oceaniaCup, candidates[winnerIndex].id,
-                          "oceania_four_team");
-}
-
-static void v3_finish_continental_season(void)
-{
-    unsigned phase = _currentSeasonShowing % 4u;
-    if (phase != 2u && phase != 3u) return;
-    const uint8_t phaseTwo[] = { COMPID_copaAmerica, COMPID_africanNationsCup,
-                                 COMPID_northAmericanCup, COMPID_asianCup,
-                                 COMPID_oceaniaCup };
-    const uint8_t phaseThree[] = { COMPID_europeanChampionships2 };
-    const uint8_t *ids = phase == 2u ? phaseTwo : phaseThree;
-    unsigned n = phase == 2u ? sizeof(phaseTwo) : sizeof(phaseThree);
-    for (unsigned i = 0; i < n; ++i) {
-        uint8_t id = ids[i];
-        if (v3_active_continental(id)) {
-            uint16_t winner = (uint16_t)_primaryCompetitionBuf.tourn.header.winnerTeam;
-            v3_record_continental(id, winner, "human_national");
-        } else if (id == COMPID_oceaniaCup) {
-            v3_simulate_oceania();
-        } else {
-            v3_simulate_continental(id);
-        }
-    }
-}
-
-/* Loading a career must reconstruct the competition pointers without drawing
- * NEW national opponents. The saved competition-copy team lists and active
- * tournament brackets already contain the real fixtures. Reseeding them here
- * changes the opponent shown by the competition and the career match cache. */
-static int _rebuildNationalCupPointersOnly = 0;
-
 /* ---- setCupPickListCommon (helper for 5 simple regional functions) ----
  * Implements the identical cup pick list selection logic used by Oceania,
  * NorthAmerica, Asia, Africa, and SouthAmerica. */
@@ -1796,8 +1742,6 @@ static void setCupPickListCommon(void **worldCupFriendly, void **worldCupInvite,
     _careerCupPickList[3] = src[3];
     _careerCupPickList[4] = src[4];
 
-    if (_rebuildNationalCupPointersOnly)
-        return;  /* preserve the saved national-team draw on load */
     Career_RandomizeInvitationTournamentCup();
     setupWorldCupQualifyingGroups(teamListPtr);
 }
@@ -1835,8 +1779,6 @@ static void setCupPickList_Europe(uint16_t **teamListPtr)
     _careerCupPickList[3] = src[3];
     _careerCupPickList[4] = src[4];
 
-    if (_rebuildNationalCupPointersOnly)
-        return;  /* preserve the saved national-team draw on load */
     Career_RandomizeInvitationTournamentCup();
     setupWorldCupQualifyingGroups(teamListPtr);
 
@@ -2028,21 +1970,9 @@ void Career_SetCupPickList_ForSelectedRegion(uint16_t *teamList)
         return;
     }
 
-    if (!_rebuildNationalCupPointersOnly) {
-        setupFriendlyCupTeams();
-        setupInvitationTournamentTeams();
-        setupTourCupTeams();
-    }
-}
-
-/* Used ONLY by Rebuild_CompetitionSlotPointers after loading a save.
- * Do not consume RNG or regenerate the teams of any active competition. */
-__attribute__((used, externally_visible))
-void Career_RebuildNationalCupPointersAfterLoad(void)
-{
-    _rebuildNationalCupPointersOnly = 1;
-    Career_SetCupPickList_ForSelectedRegion(0);
-    _rebuildNationalCupPointersOnly = 0;
+    setupFriendlyCupTeams();
+    setupInvitationTournamentTeams();
+    setupTourCupTeams();
 }
 
 /* ====================================================================
@@ -2232,7 +2162,6 @@ static void processDiyLeagueQualificationEntry(uint16_t index, uint8_t *competit
 static void processPrimaryCompetitionForNextSeason(uint8_t *competition)
 {
     int8_t compType = ((Competition *)competition)->type;
-    SEASON_STEP("PRIMARY BEGIN id=%u type=%d", (unsigned)_currentCompetitionIndex, (int)compType);
 
     if (compType == 2) {
         /* Cup competition */
@@ -2246,7 +2175,7 @@ static void processPrimaryCompetitionForNextSeason(uint8_t *competition)
              * (asm calls Career_AutoAdvanceLeagueCompetitionFromRecord even for cups) */
             Career_AutoAdvanceLeagueCompetitionFromRecord(competition);
         }
-        recordFinishedWinner(competition, 1, 0);
+        CAREER_COMPETITION_FINISHED(competition, MODCOMP_CUP, 0);
         return;
     }
 
@@ -2274,8 +2203,9 @@ static void processPrimaryCompetitionForNextSeason(uint8_t *competition)
     uint16_t d7;
     uint8_t *qualCursor = (uint8_t *)_diyQualifiedTeamIndices;
 
+    LeaguePlayoffs_Begin();     /* a world's play-offs: the final tables (league_playoffs.c) */
+
     for (d7 = 0; d7 < numDivisions; d7++) {
-        SEASON_STEP("DIV id=%u division=%u/%u BEGIN", (unsigned)_currentCompetitionIndex, (unsigned)d7, (unsigned)numDivisions);
         if (competition == _currentCompetitionPtr &&
             d7 == _currentDivisionIndex) {
             /* Player's current division — interactive */
@@ -2287,33 +2217,35 @@ static void processPrimaryCompetitionForNextSeason(uint8_t *competition)
             SaveSelectedTeams();
         } else {
             /* Other division — auto-advance */
-            SEASON_STEP("DIV id=%u division=%u SIM BEGIN", (unsigned)_currentCompetitionIndex, (unsigned)d7);
             Career_AutoAdvanceInternationalCompetitionFixtures(competition, d7);
-            SEASON_STEP("DIV id=%u division=%u SIM END", (unsigned)_currentCompetitionIndex, (unsigned)d7);
+            if (competition == _currentCompetitionPtr)   /* (the career's league, not one the */
+                WorldPlayoff_RestoreEarlyTable(d7);      /* European places simulate: world_playoff.c) */
             if (d7 == 0)
                 DIY_CachePrimaryQualifiedTeamsGrid();
         }
-        SEASON_STEP("DIV id=%u division=%u WINNER BEGIN", (unsigned)_currentCompetitionIndex, (unsigned)d7);
-        recordFinishedWinner(competition, 0, (uint8_t)d7);
-        SEASON_STEP("DIV id=%u division=%u WINNER END", (unsigned)_currentCompetitionIndex, (unsigned)d7);
-        SEASON_STEP("DIV id=%u division=%u SCRATCH BEGIN", (unsigned)_currentCompetitionIndex, (unsigned)d7);
-        BAL("SCRATCH_BEGIN", d7);
-        DIY_UpdatePromotionRelegationScratchCounts();
-        SEASON_STEP("DIV id=%u division=%u SCRATCH END", (unsigned)_currentCompetitionIndex, (unsigned)d7);
-        BAL("SCRATCH_END", d7);
-        SEASON_STEP("DIV id=%u division=%u COPY BEGIN", (unsigned)_currentCompetitionIndex, (unsigned)d7);
+        CAREER_COMPETITION_FINISHED(competition, MODCOMP_LEAGUE, (uint8_t)d7);   /* (its table settled) */
+        /* A modern single-division league with no configured movement cannot
+         * promote or relegate anyone. The legacy auto-advance can leave stale
+         * roundComplete/currentRoundIndex values in the temporary DIY league
+         * buffer, causing phantom moves (2026/27 Albania wrote -1 into two
+         * Algerian club slots, triggering scratch panic 0x5555).
+         * Honour the actual division rules, not the temporary counters. */
+        const Division *divisionRules = &((const CompetitionLeague *)competition)->divisions[d7];
+        const int hasMovement = divisionRules->promoted || divisionRules->promotedPo ||
+                                divisionRules->relegated || divisionRules->relegatedPo;
+        if (!ModernRuntime_Enabled() || hasMovement) {
+            DIY_UpdatePromotionRelegationScratchCounts();
+        } else {
+            UnifiedSeasonEndTrace("scratch movement skipped (no promotion/relegation)",
+                                  (int)_currentCompetitionIndex);
+        }
+        LeaguePlayoffs_KeepTable(competition, d7);
         qualCursor = DIY_CopyCompetitionTeamIndexTable(qualCursor);
-        SEASON_STEP("DIV id=%u division=%u COPY END", (unsigned)_currentCompetitionIndex, (unsigned)d7);
-        BAL("COPY_END", d7);
     }
 
     /* Process qualification entries for all divisions */
     for (d7 = 0; d7 < numDivisions; d7++) {
-        SEASON_STEP("QUAL id=%u division=%u BEGIN", (unsigned)_currentCompetitionIndex, (unsigned)d7);
-        BAL("QUAL_BEGIN", d7);
         processDiyLeagueQualificationEntry(d7, competition);
-        SEASON_STEP("QUAL id=%u division=%u END", (unsigned)_currentCompetitionIndex, (unsigned)d7);
-        BAL("QUAL_END", d7);
     }
 }
 
@@ -2339,14 +2271,7 @@ extern void Career_UpdateCopaLibertadoresCompetitionSlot(void);
 __attribute__((used, externally_visible))
 void Career_AdvanceToNextSeason_UpdateCompetitions(void)
 {
-    SWOS_NationalTrace("SEASON_END_BEGIN", "season=%u selected=%04X national=%u flags=%02X euro_update=%u wc_update=%u",
-        (unsigned)_currentSeasonShowing, (unsigned)_selTeamNumber,
-        (unsigned)_isNationalSelector, (unsigned)_someTeamFlags,
-        (unsigned)(_isNationalSelector && ((_selTeamNumber >> 8) == 0x50)),
-        (unsigned)(_isNationalSelector != 0));
-    SEASON_STEP("SEASON BEGIN");
-    _yugoAlgeriaOverlapValid = 0;
-    _yugoAlgeriaOverlapDelta = 0;
+    UnifiedSeasonEndTrace("rollover BEGIN", -1);
     DIY_LoadLeagueScratchFromTable();
 
     _playPromotedAnimation = 0;
@@ -2355,142 +2280,116 @@ void Career_AdvanceToNextSeason_UpdateCompetitions(void)
     Career_PrepareEuropeanCupQualificationState();
     Career_PrepareCopaLibertadoresQualificationState();   /* Inc3: build next season's CONMEBOL field */
     SaveSelectedTeams();
+    /* Capture completed national final after committing active state. */
+    CareerWinners_RecordFinishedNationalSlots();
 
     _seasonUpdateInProgress = 1;
+#ifdef SWOS_SDL_BUILD
+    {
+        extern void MenuSystem_LatchSeasonSkip(void);
+        MenuSystem_LatchSeasonSkip();
+    }
+#endif
 
     if (_isNationalSelector) {
         if ((uint8_t)(_selTeamNumber >> 8) == 0x50)
             Career_UpdateEuropeanChampionshipCompetitions();
-        /* Only the actual World Cup finals may produce a World Cup winner.
-         * The original WC updater also reads the primary buffer to set the
-         * next host, so capture its champion before any state changes. */
-        if ((_someTeamFlags & 0x80u) && _currentCompetitionPtr &&
-            comp_id(_currentCompetitionPtr) == COMPID_worldCup2) {
-            uint16_t winner = (uint16_t)_primaryCompetitionBuf.tourn.header.winnerTeam;
-            v3_wc_record_champion(winner, "human_national");
-        }
         Career_UpdateWorldCupCompetitions();
-    } else {
-        /* V3 Phase 2A: automatically conclude WC qualifiers in a club career.
-         * Only qualifying (0x40) is activated. Never run the WC winner/host
-         * (0x80) path against the club's primary competition buffer, because
-         * its winner is a CLUB and must not become a World Cup host. */
-        const uint8_t *europeFlags = (const uint8_t *)_careerTeamFlagsByRegionTable[0];
-        uint8_t wcFlags = europeFlags ? europeFlags[_currentSeasonShowing % 20u] : 0;
-        /* A year containing WC finals uses the 32 entrants retained from
-         * the preceding qualifying cycle. The draw is already part of the
-         * save format's comp_copy_teamlists block. Never overwrite the
-         * club's primary competition slot with the World Cup. */
-        if (wcFlags & 0x80u)
-            v3_wc_simulate_club_finals();
-        if (wcFlags & 0x40u) {
-            uint8_t savedFlags = _someTeamFlags;
-            _someTeamFlags = wcFlags;
-            SWOS_NationalTrace("WC_CLUB_QUALIFY_BEGIN", "season=%u flags=%02X", (unsigned)_currentSeasonShowing, (unsigned)wcFlags);
-            Career_UpdateWorldCupCompetitions();
-            _someTeamFlags = savedFlags;
-            SWOS_NationalTrace("WC_CLUB_QUALIFY_END", "season=%u", (unsigned)_currentSeasonShowing);
-        }
     }
+
+#ifdef SWOS_SDL_BUILD
+    /* Both eras require background international results for Past Winners.
+     * The active human-managed national competition is never simulated. */
     v3_finish_continental_season();
-    SWOS_NationalTrace("NATIONAL_UPDATE_DONE", "season=%u selected=%04X national=%u",
-        (unsigned)_currentSeasonShowing, (unsigned)_selTeamNumber,
-        (unsigned)_isNationalSelector);
+#endif
 
-    SEASON_STEP("EURO CLUB CUP BEGIN selected=%04X national=%u qptr=%p", (unsigned)_selTeamNumber,
-                (unsigned)_isNationalSelector, (void *)_quaternaryCompetitionPtr);
-    SEASON_STEP("EURO CLUB CUP CHAMPIONS BEGIN");
+    UnifiedSeasonEndTrace("euro cups BEGIN", -1);
     Career_UpdateEuroCupCompetitionSlot();
-    SEASON_STEP("EURO CLUB CUP CHAMPIONS END holder=%04X", (unsigned)_euroCupTitleHolderTeamId);
-    SEASON_STEP("EURO CLUB CUP CWC BEGIN");
     Career_UpdateCupWinnersCupCompetitionSlot();
-    SEASON_STEP("EURO CLUB CUP CWC END holder=%04X", (unsigned)_cupWinnersCupTitleHolderTeamId);
-    SEASON_STEP("EURO CLUB CUP UEFA BEGIN");
     Career_UpdateUefaCupCompetitionSlot();
-    SEASON_STEP("EURO CLUB CUP UEFA END holder=%04X", (unsigned)_uefaCupTitleHolderTeamId);
-
-    /* Record completed European titles before the next-season draw changes
-     * the competition slots. The update functions above populate these
-     * title-holder IDs from the final standings/knockout grids, for both
-     * manager-controlled and automatically simulated competitions.
-     * European IDs 0/1/2 are the actual View World competition IDs.
-     * Use cup kind=1, matching how PastWinnersPopulate filters cups. */
-    /* Preserve a legitimate 0x0000 title-holder ID in all cup archives. */
-    if (_euroCupTitleHolderTeamId != 0xFFFFu)
-        CareerWinners_Record(_currentSeasonShowing, COMPID_euroCup, 1, 0,
-                             _euroCupTitleHolderTeamId);
-    if (_cupWinnersCupTitleHolderTeamId != 0xFFFFu)
-        CareerWinners_Record(_currentSeasonShowing, COMPID_cupWinnersCup, 1, 0,
-                             _cupWinnersCupTitleHolderTeamId);
-    if (_uefaCupTitleHolderTeamId != 0xFFFFu)
-        CareerWinners_Record(_currentSeasonShowing, COMPID_uefaCup, 1, 0,
-                             _uefaCupTitleHolderTeamId);
-    SEASON_STEP("EURO CLUB CUP RECORD_WINNERS END");
-    Career_UpdateCopaLibertadoresCompetitionSlot();   /* Inc3b-part-2: auto-advance Copa */
-    /* The Copa copy is dynamic and is NOT the current country's league.
-     * Verify the completed winner against its actual 20-team seed list,
-     * before the next qualifying field is prepared. */
+    {   /* the European holders, before the next season's draw changes the slots (career mods) */
+        extern uint16_t _euroCupTitleHolderTeamId, _cupWinnersCupTitleHolderTeamId, _uefaCupTitleHolderTeamId;
+        extern uint16_t _currentSeasonShowing;
+        const struct { uint8_t id; uint16_t holder; } euro[3] = {
+            { COMPID_euroCup, _euroCupTitleHolderTeamId },
+            { COMPID_cupWinnersCup, _cupWinnersCupTitleHolderTeamId },
+            { COMPID_uefaCup, _uefaCupTitleHolderTeamId },
+        };
+        for (int32_t k = 0; k < 3; k++)
+            if (euro[k].holder != 0xFFFFu)
+                ModHooks_CompetitionFinished(_currentSeasonShowing, euro[k].id, MODCOMP_CONTINENTAL, 0,
+                                             euro[k].holder);
+    }
+    Career_UpdateCopaLibertadoresCompetitionSlot();
+#ifdef SWOS_SDL_BUILD
     {
+        /* Verify the reported champion against the just-played field. It must
+         * be a real 20-club Copa finalist, not the league's next seed. */
         extern Competition *Career_CopaWorkingCopy(void);
-        Competition *copa = Career_CopaWorkingCopy();
-        if (copa) {
-            TeamId *draw = comp_team_seed_list(copa);
-            uint16_t stageWinner = (uint16_t)_diyCompetitionStart.base.resultCode;
-            uint16_t cachedWinner = (uint16_t)_diyFileBufferCopy.header.winnerTeam;
-            uint16_t candidates[2] = { cachedWinner, stageWinner };
-            unsigned valid = 0;
-            unsigned count = (unsigned)Career_CopaLibertadoresExpectedTeamCount();
+        Competition *copy = Career_CopaWorkingCopy();
+        if (copy) {
+            TeamId *draw = comp_team_seed_list(copy);
+            uint16_t candidates[2] = {
+                (uint16_t)_diyFileBufferCopy.header.winnerTeam,
+                (uint16_t)_diyCompetitionStart.base.resultCode
+            };
+            int finished = _diyFileBufferCopy.header.competitionFinished ||
+                           _diyCompetitionStart.base.competitionFinished;
+            unsigned count = Career_CopaLibertadoresExpectedTeamCount();
             if (count > 32u) count = 32u;
-            if (draw && count) for (unsigned c = 0; c < 2 && !valid; ++c) {
-                uint16_t candidate = candidates[c];
-                if (candidate == 0xFFFFu) continue;
-                for (unsigned i = 0; i < count; ++i)
-                    if (TEAMID_PACK(draw[i]) == candidate) {
-                        valid = 1;
-                        /* An incomplete tournament has no champion. */
-                        if (_diyFileBufferCopy.header.competitionFinished ||
-                            _diyCompetitionStart.base.competitionFinished) {
+            SWOS_NationalTrace("COPA_HISTORY_CHECK",
+                "season=%u comp=%u finished=%d entrants=%u draw=%d candidate0=%04X candidate1=%04X",
+                (unsigned)_currentSeasonShowing, (unsigned)COMPID_copaLibertadores,
+                finished, count, draw != NULL, (unsigned)candidates[0],
+                (unsigned)candidates[1]);
+            if (finished && draw && count) {
+                int recorded = 0;
+                for (unsigned c = 0; c < 2 && !recorded; ++c) {
+                    uint16_t winner = candidates[c];
+                    if (winner == 0xFFFFu) continue;
+                    for (unsigned j = 0; j < count; ++j)
+                        if (TEAMID_PACK(draw[j]) == winner) {
                             CareerWinners_Record(_currentSeasonShowing,
-                                COMPID_copaLibertadores, 1, 0, candidate);
-                            SWOS_NationalTrace("COPA_CHAMPION_RECORDED",
-                                "season=%u winner=%04X source=%u",
-                                (unsigned)_currentSeasonShowing, (unsigned)candidate, c);
-                        } else {
-                            SWOS_NationalTrace("COPA_CHAMPION_SKIPPED",
-                                "season=%u reason=unfinished winner=%04X",
-                                (unsigned)_currentSeasonShowing, (unsigned)candidate);
+                                COMPID_copaLibertadores, 1, 0, winner);
+                            SWOS_NationalTrace("COPA_HISTORY_RECORDED",
+                                "season=%u winner=%04X", (unsigned)_currentSeasonShowing,
+                                (unsigned)winner);
+                            recorded = 1;
+                            break;
                         }
-                        break;
-                    }
+                }
+                if (!recorded)
+                    SWOS_NationalTrace("COPA_HISTORY_SKIPPED",
+                        "season=%u reason=invalid_winner_or_not_in_draw",
+                        (unsigned)_currentSeasonShowing);
             }
-            if (!valid) SWOS_NationalTrace("COPA_CHAMPION_SKIPPED",
-                "season=%u reason=winner_not_in_draw cached=%04X stage=%04X count=%u",
-                (unsigned)_currentSeasonShowing, (unsigned)cachedWinner,
-                (unsigned)stageWinner, count);
+        } else {
+            SWOS_NationalTrace("COPA_HISTORY_SKIPPED",
+                "season=%u reason=no_working_copy", (unsigned)_currentSeasonShowing);
         }
     }
-    SEASON_STEP("EURO CLUB CUP COPA END");
+#endif
+    UnifiedSeasonEndTrace("continental cups END", -1);   /* Inc3b-part-2: auto-advance Copa */
 
     _careerFileBuffer = 0;
 
     if (!_isNationalSelector) {
-        uint16_t compIndex = (uint8_t)(_selTeamNumber >> 8);
+        uint16_t compIndex = World_FileCountry((uint8_t)(_selTeamNumber >> 8));   /* (include/world.h) */
         Career_ProcessCompetitionForNextSeason(compIndex);
         Career_ProcessCompetitionForEuropeanCupQualification();
         Career_ProcessCompetitionForCopaLibertadoresQualification();   /* Inc3 */
     }
 
     /* Loop through all competition IDs in the remap table */
-    uint8_t *remapPtr = _careerCompetitionIdRemapTable;
+    const uint8_t *remapPtr = World_SeasonCountries() ? World_SeasonCountries()    /* (a world's: */
+                                                      : _careerCompetitionIdRemapTable; /* its new ones too) */
     for (;;) {
         uint8_t compByte = *remapPtr++;
         if (compByte == 0xFF)
             break;
-        if (!_isNationalSelector && compByte == (uint8_t)(_selTeamNumber >> 8))
+        if (!_isNationalSelector && compByte == World_FileCountry((uint8_t)(_selTeamNumber >> 8)))
             continue;
-        SEASON_STEP("REMAP id=%u BEGIN", (unsigned)compByte);
         Career_ProcessCompetitionForNextSeason((uint16_t)compByte);
-        SEASON_STEP("REMAP id=%u END", (unsigned)compByte);
         Career_ProcessCompetitionForEuropeanCupQualification();
         Career_ProcessCompetitionForCopaLibertadoresQualification();   /* Inc3 */
     }
@@ -2501,21 +2400,30 @@ void Career_AdvanceToNextSeason_UpdateCompetitions(void)
      * so the expected total is 0x50 + the Copa count (0 on a build without the
      * Copa data). Without this the gate would miss (e.g. 100 != 0x50) and fall
      * through to panic 0x8999. */
-    if (_careerFileBuffer == 0x50 + Career_CopaLibertadoresQualifiedTeamCount()) {
-        SEASON_STEP("EURO CLUB CUP DRAW BEGIN field=%u champs=%u cwc=%u uefa=%u", (unsigned)_careerFileBuffer,
-                    (unsigned)_euroCupQualifiedTeamCount, (unsigned)_cupWinnersCupQualifiedTeamCount,
-                    (unsigned)_uefaCupQualifiedTeamCount);
+    /* (a world's league phases: the qualifying rounds' clubs before the holders, 36 each after) */
+    const uint8_t (*lpPlaces)[4];
+    int32_t lpN;
+    const int32_t lp = World_LeaguePhaseCups(&lpPlaces, &lpN) != 0;
+    if (lp)
+        UefaQual_Fill();
+    UnifiedSeasonEndTrace("confederation cups BEGIN", -1);
+    Conti_SeasonEnd();
+    UnifiedSeasonEndTrace("confederation cups END", -1);      /* (a world's other confederations' cups: the next editions) */
+    const uint16_t euroBefore = lp ? UefaQual_Listed() : 0x50, euroAfter = lp ? 108 : 0x50;
+    if (_careerFileBuffer == euroBefore + Career_CopaLibertadoresQualifiedTeamCount()) {
         Career_DrawEuropeanCupTeamsAndCopyGrids();
-        SEASON_STEP("EURO CLUB CUP DRAW END");
         _seasonUpdateInProgress = 0;
         RestoreSelectedTeams();
 
-        if (_euroCupQualifiedTeamCount == 16 &&
-            _cupWinnersCupQualifiedTeamCount == 32 &&
-            _uefaCupQualifiedTeamCount == 32 &&
+        if (_euroCupQualifiedTeamCount == (lp ? 36 : 16) &&
+            _cupWinnersCupQualifiedTeamCount == (lp ? 36 : 32) &&
+            _uefaCupQualifiedTeamCount == (lp ? 36 : 32) &&
             Career_CopaLibertadoresQualifiedTeamCount() == Career_CopaLibertadoresExpectedTeamCount() &&
-            _careerFileBuffer == 0x50 + Career_CopaLibertadoresQualifiedTeamCount()) {
+            _careerFileBuffer == euroAfter + Career_CopaLibertadoresQualifiedTeamCount()) {
             Career_StorePromotionRelegationInSeasonInfo();
+            WorldCups_SeasonEnded();    /* (the next season plays its cups' own draw) */
+            if (lp)
+                UefaQual_Post();        /* (the career club's qualifying opponents' records) */
             return;
         }
         _panicReasonCode = 0x8998;

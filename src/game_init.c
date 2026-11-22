@@ -1,16 +1,21 @@
-#include "swos_fixed_team_name.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
+#ifdef SWOS_SDL_BUILD
+#include <stdlib.h>
+#endif
+#include "swos_fixed_team_name.h"   /* SWOS_CopyTeamName17 */
 #include "game_init.h"
+#include "league_phase.h"
 #include "dos_gameplay.h"   /* ApplyGameStyle — DOS/Amiga match tuning */
 #include "endian_helpers.h"
 #include "game_types.h"
 #include "play_match_menu.h"
 #include "string_utils.h"
 #ifdef SWOS_SDL_BUILD
+#include "modern_career_runtime.h"
 #include "uniform.h"        /* a kit chosen for this match (UNIFORM screen) */
 #endif
 
@@ -266,6 +271,15 @@ void InitGameSaveTeams(TeamGame *leftTeam, TeamGame *rightTeam)
     /* Load pitch map (high byte of pitchNumberAndType is the index) */
     LoadPitchMap(_pitchNumberAndType >> 8);
     FixupAndColorPitchFile();
+#ifdef SWOS_SDL_BUILD
+    {   /* A live match: the host's crowd over this pitch's own (include/pitch.h). */
+        extern const uint16_t *NetplaySetup_TakeCrowd(uint16_t mapIndex);
+        extern void Pitch_ApplyCrowdLayout(const uint16_t *in);
+        const uint16_t *crowd = NetplaySetup_TakeCrowd((uint16_t)(_pitchNumberAndType >> 8));
+        if (crowd)
+            Pitch_ApplyCrowdLayout(crowd);
+    }
+#endif
     ConvertColorsAndTextSprites(leftTeam, rightTeam);
 
     /* Wait for both fire buttons released.
@@ -313,6 +327,23 @@ void InitGameSaveTeams(TeamGame *leftTeam, TeamGame *rightTeam)
 
     FadeOutToBlack();
     _paletteIndex = 2;
+}
+
+/* [general] no_load_pause (SWOS 2020's --no-load-pause, launcher options agent A): the stadium
+ * screen's 3 seconds before a match left out -- off line only, so the screens before an online
+ * match run as the other player's do, and never in a test rig. Set from SWOS.ini on SDL builds. */
+int _gNoLoadPause = 0;
+
+static int32_t NoLoadPause(void)
+{
+#ifdef SWOS_SDL_BUILD
+    extern int32_t NetplayMatch_Enabled(void), SrpResim_Armed(void), CareerAutopilot_Active(void);
+    extern int ReplayTest_Running(void), Rollback_Enabled(void);
+    return _gNoLoadPause && !NetplayMatch_Enabled() && !ReplayTest_Running() && !SrpResim_Armed() &&
+           !Rollback_Enabled() && !CareerAutopilot_Active();
+#else
+    return 0;
+#endif
 }
 
 /* ================================================================
@@ -432,7 +463,12 @@ void InitInGamePlayer(uint16_t playerIndex, uint16_t playerSlot,
 
     /* Face from positionAndFace: bits 3-4 → 0-3 */
     uint16_t face = (uint16_t)(pf->positionAndFace & PF_FACE_MASK) >> 3;
-    pi->face = (int8_t)face;
+#ifdef SWOS_SDL_BUILD
+    if (getenv("SWOS_TEST_FACE3"))      /* test: every player face 3 -- to look at it */
+        face = 3;
+#endif
+    pi->blond = face == 3;              /* (face 3: a black player, blond: player_face3.c) */
+    pi->face = (int8_t)(face == 3 ? 2 : face);
 
     /* Position: bits 5-7 of positionAndFace */
     uint16_t pos = (uint16_t)(pf->positionAndFace & PF_POSITION_MASK) >> 5;
@@ -683,7 +719,7 @@ void InitInGameTeamStructure(TeamFileEx *teamFileBase, TeamGame *tg,
     } else {
         nameSource = (uint8_t *)tf->teamName;
     }
-    SWOS_CopyTeamName17(tg->teamName, nameSource);
+    SWOS_CopyTeamName17(tg->teamName, nameSource);    /* (17 bytes: a 17-letter name, no NUL, stays inside) */
 }
 
 /* ========================================================================
@@ -722,8 +758,9 @@ extern uint8_t  _aFriendly_1[];
 extern uint16_t ShouldSetupPlayers(void);
 extern void InitPlayerRemapTableForTeam(TeamFileEx *team, uint8_t *remapTable);
 
-/* Use the selected career club ID as well as pointer identity: some cup
- * fixtures use a COPY of _careerTeam, which must never be auto-substituted. */
+/* The ai_injury_subs tweak (bench_subs.c): which sides are the computer's. The managed career
+ * club never is, even when its controls are zero (a coach-only career match), and some cup
+ * fixtures use a COPY of _careerTeam: its id is checked as well as the pointer. */
 static int aiInjurySubsIsManagedCareerTeam(const TeamFileEx *team)
 {
     extern uint16_t _selTeamNumber;
@@ -732,17 +769,15 @@ static int aiInjurySubsIsManagedCareerTeam(const TeamFileEx *team)
             PACK_BE_U16(team->team.countryNumber, team->team.teamOrdinal) == _selTeamNumber);
 }
 
-static void aiInjurySubsSetEligibility(const TeamFileEx *team1, const TeamFileEx *team2)
+static void aiInjurySubsSetEligibility(const TeamFileEx *top, const TeamFileEx *bottom)
 {
     extern uint8_t _aiInjurySubsTeam1Allowed, _aiInjurySubsTeam2Allowed;
-    _aiInjurySubsTeam1Allowed =
-        team1->team.teamControls == TEAM_COMPUTER &&
-        !aiInjurySubsIsManagedCareerTeam(team1) &&
-        _topTeamPlayerNo == 0 && _topTeamCoachNo == 0;
-    _aiInjurySubsTeam2Allowed =
-        team2->team.teamControls == TEAM_COMPUTER &&
-        !aiInjurySubsIsManagedCareerTeam(team2) &&
-        _bottomTeamPlayerNo == 0 && _bottomTeamCoachNo == 0;
+    _aiInjurySubsTeam1Allowed = top->team.teamControls == TEAM_COMPUTER &&
+                                !aiInjurySubsIsManagedCareerTeam(top) &&
+                                _topTeamPlayerNo == 0 && _topTeamCoachNo == 0;
+    _aiInjurySubsTeam2Allowed = bottom->team.teamControls == TEAM_COMPUTER &&
+                                !aiInjurySubsIsManagedCareerTeam(bottom) &&
+                                _bottomTeamPlayerNo == 0 && _bottomTeamCoachNo == 0;
 }
 
 /* SetupPlayers
@@ -761,14 +796,10 @@ __attribute__((used, externally_visible))
 void SetupPlayers(TeamFileEx *team1, TeamFileEx *team2, int16_t maxSubs,
                    int16_t excludeFlags, int16_t allowSquadChanges, int16_t mode) {
     uint16_t d0 = 0;
-
-    /* Reset eligibility at the beginning of every match.  Team selection and
-     * coach controls are finalised later in SetupPlayers. */
-    extern uint8_t _aiInjurySubsTeam1Allowed;
-    extern uint8_t _aiInjurySubsTeam2Allowed;
-    _aiInjurySubsTeam1Allowed = 0;
-    _aiInjurySubsTeam2Allowed = 0;
-
+    {   /* (the ai_injury_subs tweak: decided below, when the sides are) */
+        extern uint8_t _aiInjurySubsTeam1Allowed, _aiInjurySubsTeam2Allowed;
+        _aiInjurySubsTeam1Allowed = _aiInjurySubsTeam2Allowed = 0;
+    }
     _careerTeamCoachOnly = 0;
 
 #ifdef SWOS_SDL_BUILD
@@ -819,6 +850,17 @@ void SetupPlayers(TeamFileEx *team1, TeamFileEx *team2, int16_t maxSubs,
             return;
         }
     }
+#endif
+    {
+        /* A mod's match (include/mod_api.h ModApi_PlayMatch): its sides, no prompts. */
+        extern int32_t ModMatch_SetupPlayers(TeamFileEx *t1, TeamFileEx *t2);
+        if (ModMatch_SetupPlayers(team1, team2)) {
+            aiInjurySubsSetEligibility(team1, team2);
+            (void)maxSubs; (void)excludeFlags; (void)allowSquadChanges; (void)mode; (void)d0;
+            return;
+        }
+    }
+#ifdef SWOS_SDL_BUILD
     {
         extern int _gArcadeMode;
         if (_gArcadeMode) {
@@ -842,6 +884,7 @@ void SetupPlayers(TeamFileEx *team1, TeamFileEx *team2, int16_t maxSubs,
             _bottomTeamCoachNo  = 0;
             _pl1Tactics = (int16_t)(int8_t)team1->team.tactics;
             _pl2Tactics = (int16_t)(int8_t)team2->team.tactics;
+            aiInjurySubsSetEligibility(team1, team2);
             (void)maxSubs; (void)excludeFlags; (void)allowSquadChanges; (void)mode; (void)d0;
             return;
         }
@@ -946,7 +989,7 @@ set_tactics_swapped:
     /* When mode != 0, teams stay swapped (exg a1,a2 not undone) */
     _pl1Tactics = (int16_t)(int8_t)team2->team.tactics;
     _pl2Tactics = (int16_t)(int8_t)team1->team.tactics;
-    aiInjurySubsSetEligibility(team1, team2);
+    aiInjurySubsSetEligibility(team2, team1);
     return;
 
 cancelled:
@@ -978,13 +1021,18 @@ void InitAndPlayGame(TeamFileEx *team1, TeamFileEx *team2) {
     if (_trainingGame != 0) {
         StringCopy(_aTraining, _gameName);
     } else {
+        extern const char *ModMatch_Name(void);  /* a mod's match's own (mod_match.c) */
 #ifdef SWOS_SDL_BUILD
         extern int _gArcadeMode;
         extern uint8_t _aArcadeMatchName[];   /* "GOLDEN GOAL" (arcade.c) */
-        if (_gArcadeMode)
-            StringCopy(_aArcadeMatchName, _gameName);
-        else
 #endif
+        if (ModMatch_Name())
+            StringCopy((uint8_t *)ModMatch_Name(), _gameName);
+#ifdef SWOS_SDL_BUILD
+        else if (_gArcadeMode)
+            StringCopy(_aArcadeMatchName, _gameName);
+#endif
+        else
         StringCopy(_aFriendly_1, _gameName);
     }
     _gameRound = 0;
@@ -1007,6 +1055,7 @@ void InitAndPlayGame(TeamFileEx *team1, TeamFileEx *team2) {
         NetplaySetup_TakeTieRules();
     }
 #endif
+    { extern void ModMatch_TieRules(void); ModMatch_TieRules(); }   /* a mod's match's (mod_match.c) */
 
     /* d0=1, d1=minSubs, d2=maxSubs, d3=0, d7=-1, a1=team1, a2=team2 */
     InitializeInGameTeamsAndStartGame(1, (int16_t)_minSubstitutes,
@@ -1102,11 +1151,16 @@ void InitializeInGameTeamsAndStartGame(int16_t randomizePitch, int16_t minSubs,
     { extern uint8_t _savedRandState[]; extern uint8_t *_savedRandStatePtr;
       _savedRandStatePtr = _savedRandState; }
     _plgD0Param = (uint16_t)randomizePitch;
+#ifdef SWOS_SDL_BUILD
+    if (_gameType == GAME_TYPE_CAREER && !_trainingGame && ModernRuntime_Enabled())
+        minSubs = maxSubs = 5;
+#endif
     _maxSubsPerTeam = (uint16_t)minSubs;
     _gameMaxSubstitutes = (uint16_t)maxSubs;
     _plgD3Param = (uint16_t)paramD3;
     _gameTeam1 = team1;
     _gameTeam2 = team2;
+    LeaguePhase_GameStarting(team1, team2);     /* (a world's league phase: its cards, league_phase.c) */
 
     /* Compute old player skill for view result (for both teams) */
     ComputeOldPlayerSkillForViewResult((TeamFileEx *)team1, (uint16_t)maxSubs);
@@ -1247,7 +1301,8 @@ void InitializeInGameTeamsAndStartGame(int16_t randomizePitch, int16_t minSubs,
      * events / audio. */
     {
         int16_t i;
-        for (i = 0x95; i >= 0; i--) {
+        extern int32_t ModMatch_SkipStadium(void);  /* a mod's match that wants none (mod_match.c) */
+        for (i = ModMatch_SkipStadium() || NoLoadPause() ? -1 : 0x95; i >= 0; i--) {
             WaitForVSync();
         }
     }

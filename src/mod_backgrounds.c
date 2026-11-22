@@ -1,0 +1,168 @@
+/*
+ * mod_backgrounds.c -- the backgrounds mod (bin/mods/backgrounds; canonical): a true-colour picture
+ * behind every menu instead of the game's own backdrop (docs/MODS.md, "Menu backgrounds"). SDL
+ * only.
+ *
+ * WHICH PICTURE: [mod.backgrounds] image -- a file in the mod's images/ folder, in an enabled
+ * mod's images/ (a gallery DLC: pictures only, no code), or in the player's
+ * game folder's backgrounds/ (Documents\SWOS\backgrounds on Windows), PNG, BMP or JPEG; "off" the
+ * game's own backdrop. Not set: the first picture in the mod's own images/ (a fork ships its
+ * own there -- SWOS United its SWOS_United.png -- OpenSWOS ships none, so nothing changes).
+ * The MODS page offers "off" and every picture it finds (mod.json "choices_from"), and "auto" (not
+ * set: the mod's own first) and "random" (one of every picture it would list, picked once a start)
+ * -- the SWOS United Launcher's Auto / Random (launcher options, agent A). Its "PC DOS" and "Amiga"
+ * were SWOS 2020's own bg-images, which OpenSWOS does not ship: a player who has them puts them in
+ * backgrounds/ and picks them by name.
+ *
+ * HOW IT SHOWS: the engine asks at each menu backdrop it loads (ModDef menuBackdrop); with a
+ * picture, the backdrop becomes one key colour and the presenter draws the picture under the menus,
+ * covering the window: cropped to the window's aspect, centred. Best made 1920 x 1080 (16:9),
+ * with what matters inside the centre 1440 x 1080, which a 4:3 window keeps.
+ */
+#ifdef SWOS_SDL_BUILD
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <SDL.h>
+
+#include "mod_api.h"
+#include "mods.h"          /* Mods_Count / Mods_Dir: a gallery mod's images/ */
+#include "swos_io.h"            /* swos_user_dir */
+#include "../third_party/stb_image/stb_image.h"
+
+#define SLUG "backgrounds"
+
+static struct {
+    char     path[1200];        /* the picture loaded, "" none */
+    uint8_t *rgba;
+    int      w, h;
+} s_bg;
+
+static int32_t first_image(const char *name, void *ctx)
+{
+    const char *dot = strrchr(name, '.');
+    char *best = (char *)ctx;
+    if (!dot || !(SDL_strcasecmp(dot, ".png") == 0 || SDL_strcasecmp(dot, ".bmp") == 0 ||
+                  SDL_strcasecmp(dot, ".jpg") == 0 || SDL_strcasecmp(dot, ".jpeg") == 0))
+        return 0;
+    if (!best[0] || SDL_strcasecmp(name, best) < 0)     /* (the first by name, whatever the order) */
+        snprintf(best, 256, "%s", name);
+    return 0;
+}
+
+static int file_exists(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (f)
+        fclose(f);
+    return f != NULL;
+}
+
+/* "random": every picture the page would list, by name (each once), and one of them -- kept for the
+ * rest of the run, so the menus do not change picture on every screen. */
+typedef struct { char names[64][256]; int32_t n; } Pictures;
+
+static int32_t collect(const char *name, void *ctx)
+{
+    Pictures *p = (Pictures *)ctx;
+    char dummy[256] = "";
+    first_image(name, dummy);                       /* (an image file: the same test as auto's) */
+    if (!dummy[0] || p->n == 64)
+        return 0;
+    for (int32_t i = 0; i < p->n; i++)
+        if (SDL_strcasecmp(p->names[i], name) == 0)
+            return 0;
+    snprintf(p->names[p->n++], sizeof p->names[0], "%s", name);
+    return 0;
+}
+
+static const char *random_picture(void)
+{
+    static char chosen[256];
+    static int32_t picked;
+    if (!picked) {
+        static Pictures p;
+        char dir[1100];
+        p.n = 0;
+        snprintf(dir, sizeof dir, "%s/images", ModApi_ModDir(SLUG));
+        ModApi_ListFiles(dir, collect, &p);
+        for (int32_t i = 0; i < Mods_Count(); i++) {
+            snprintf(dir, sizeof dir, "%s/images", Mods_Dir(i));
+            ModApi_ListFiles(dir, collect, &p);
+        }
+        snprintf(dir, sizeof dir, "%s/backgrounds", swos_user_dir());
+        ModApi_ListFiles(dir, collect, &p);
+        chosen[0] = '\0';
+        if (p.n)
+            snprintf(chosen, sizeof chosen, "%s", p.names[(SDL_GetTicks() ^ (uint32_t)SDL_GetPerformanceCounter()) % (uint32_t)p.n]);
+        fprintf(stderr, "[backgrounds] random: %s (of %d)\n", chosen[0] ? chosen : "none", (int)p.n);
+        picked = 1;
+    }
+    return chosen[0] ? chosen : "off";
+}
+
+/* The picture's path, "" none. */
+static void picture_path(char *out, size_t cap)
+{
+    const char *setting = ModApi_Setting(SLUG, "image", "");
+    char own[1100], name[256] = "";
+    out[0] = '\0';
+    if (SDL_strcasecmp(setting, "random") == 0)
+        setting = random_picture();
+    if (SDL_strcasecmp(setting, "off") == 0)
+        return;
+    snprintf(own, sizeof own, "%s/images", ModApi_ModDir(SLUG));
+    if (!setting[0] || SDL_strcasecmp(setting, "auto") == 0) {
+        ModApi_ListFiles(own, first_image, name);
+        if (name[0])
+            snprintf(out, cap, "%s/%s", own, name);
+        return;
+    }
+    snprintf(out, cap, "%s/%s", own, setting);
+    if (file_exists(out))
+        return;
+    for (int32_t i = 0; i < Mods_Count(); i++) {   /* (a gallery mod's images/: docs/MODS.md §25b) */
+        snprintf(out, cap, "%s/images/%s", Mods_Dir(i), setting);
+        if (file_exists(out))
+            return;
+    }
+    snprintf(out, cap, "%s/backgrounds/%s", swos_user_dir(), setting);
+    if (!file_exists(out)) {
+        fprintf(stderr, "[backgrounds] %s: not in %s, an enabled mod's images/ nor %s/backgrounds -- the "
+                        "game's own backdrop\n", setting, own, swos_user_dir());
+        out[0] = '\0';
+    }
+}
+
+static int32_t menu_backdrop(const uint8_t **rgba, int32_t *w, int32_t *h)
+{
+    char path[1200];
+    picture_path(path, sizeof path);
+    if (!path[0])
+        return 0;
+    if (strcmp(path, s_bg.path) != 0) {
+        int n = 0;
+        stbi_image_free(s_bg.rgba);
+        s_bg.rgba = stbi_load(path, &s_bg.w, &s_bg.h, &n, 4);
+        snprintf(s_bg.path, sizeof s_bg.path, "%s", path);
+        if (!s_bg.rgba)
+            fprintf(stderr, "[backgrounds] %s: could not be read (%s)\n", path, stbi_failure_reason());
+        else
+            fprintf(stderr, "[backgrounds] the menus' backdrop: %s (%d x %d)\n", path, s_bg.w, s_bg.h);
+    }
+    if (!s_bg.rgba)
+        return 0;
+    *rgba = s_bg.rgba;
+    *w = s_bg.w;
+    *h = s_bg.h;
+    return 1;
+}
+
+const ModDef ModDef_backgrounds = {
+    .slug         = SLUG,
+    .menuBackdrop = menu_backdrop,
+};
+
+#endif /* SWOS_SDL_BUILD */

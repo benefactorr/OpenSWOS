@@ -9,8 +9,8 @@
 #include "swos_types.h"
 
 /* The JSON-only menu behind OPTIONS' CONTROLS row (docs/MENUS.md §10). */
-#define CONTROLS_MENU_NAME     "openswos/controlsMenu"
-#define CONTROLS_MENU_ENTRIES  17
+#define CONTROLS_MENU_NAME     "openswos/careerPlusControlsMenu"
+#define CONTROLS_MENU_ENTRIES  25   /* (the self-test's count: one per item of the JSON) */
 
 /* Register the menu's handlers with the JSON loader. Idempotent; Show calls it. */
 void ControlsMenu_Init(void);

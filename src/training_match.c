@@ -1,3 +1,4 @@
+#include "modern_career_runtime.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
@@ -19,7 +20,7 @@
 extern uint8_t _trainingMatchSavedPlayers[];     /* 32 bytes — player file indices */
 extern uint16_t _trainingMatchSavedPlayerPos;
 extern uint8_t _trainingMatchSavedShirtNums[];   /* 32 bytes */
-extern uint8_t _trainingMatchSavedTactics;
+extern uint8_t _trainingMatchSavedTactics[2];   /* (its byte, then the original's pad) */
 extern uint8_t _lastMatchSavedShirtNums[];       /* 32 bytes */
 extern uint8_t _lastMatchPlayers[];              /* 32 bytes */
 extern uint8_t _currentMatchPlayers[];           /* 32 bytes */
@@ -202,7 +203,7 @@ void TrainingMatch_RestoreSavedTeamSelectionState(void)
     }
 
     /* Restore tactics and player position */
-    _careerTeam.team.tactics = _trainingMatchSavedTactics;
+    _careerTeam.team.tactics = _trainingMatchSavedTactics[0];
     _selTeamSelectedPlayerPosition = _trainingMatchSavedPlayerPos;
 
     /* Restore shirt numbers via GetPlayer for all 32 indices */
@@ -226,7 +227,7 @@ void TrainingMatch_SaveTeamSelectionState(void)
     }
 
     /* Save tactics and player position */
-    _trainingMatchSavedTactics = _careerTeam.team.tactics;
+    _trainingMatchSavedTactics[0] = _careerTeam.team.tactics;
     _trainingMatchSavedPlayerPos = _selTeamSelectedPlayerPosition;
 
     /* Save shirt numbers via GetPlayer for all 32 indices */
@@ -430,6 +431,7 @@ __attribute__((used, externally_visible))
 void TrainingMatch_TryAddTrialPlayerAtPosition(uint16_t position)
 {
     uint8_t *player = TrainingMatch_AddTrialPlayerAtPosition(position);
+    if (!player) return;
     uint16_t r = Rand2();
     if (r < 0x99)
         return;
@@ -491,7 +493,7 @@ extern uint16_t _friendlyPitchType;
 extern uint16_t _friendlySeason;
 extern uint16_t _minSubstitutes;
 extern uint16_t _maxSubstitutes;
-extern void TrainingMatch_AdjustSelectedTeamRosterForTrialists(uint16_t teamNum, uint16_t baseCount, TeamFileEx *teamPtr);
+extern void TrainingMatch_AdjustSelectedTeamRosterForTrialists(uint16_t excludeFlags, uint16_t baseCount, TeamFileEx *teamPtr);
 extern void InitAndPlayGame(TeamFileEx *team1, TeamFileEx *team2);
 extern uint8_t *GetPlayerAtIndex(uint16_t teamNumber, uint16_t ordinal);
 extern uint16_t IsPlayerInjured(PlayerFile *playerFile, int16_t mode);
@@ -700,8 +702,13 @@ void PlayTrainingGame(void)
     _trainingGame = 1;
 
     TrainingMatch_AdjustSelectedTeamRosterForTrialists(1, 2, &_careerTeam);
-    TrainingMatch_SaveLastMatchState();
-    TrainingMatch_RestoreSavedTeamSelectionState();
+#ifdef SWOS_SDL_BUILD
+    if (!ModernRuntime_Enabled())
+#endif
+    {
+        TrainingMatch_SaveLastMatchState();
+        TrainingMatch_RestoreSavedTeamSelectionState();
+    }
     TrainingMatch_BuildCurrentTeamFromCareerTeam();
 
     _pitchTypeOrSeason = 0;

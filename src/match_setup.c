@@ -422,6 +422,7 @@ void InitPlayersBeforeEnteringPitch(void)
             spritesTableA = _team2SpritesTable;
         }
     }
+    { extern void ModMatch_PlayersEntered(void); ModMatch_PlayersEntered(); }   /* a mod's lines left out */
 }
 
 /* ================================================================
@@ -459,6 +460,11 @@ void StartingMatch(void)
     _hideBall = 0;
     InitTeamsData();
     _stoppageEventTimer = 100;
+    {   /* SWOS 2020's challenges (g_ExtraGame): 1 (mod_match.c, shortStops) */
+        extern int32_t ModMatch_ShortStops(void);
+        if (ModMatch_ShortStops())
+            _stoppageEventTimer = 1;
+    }
     _gameState = ST_STARTING_GAME;
     _breakCameraMode = 0xFFFF;
     _gameStatePl = 101;
@@ -479,6 +485,8 @@ void StartingMatch(void)
 __attribute__((used, externally_visible))
 void SetCameraMovingToShowerState(void)
 {
+    { extern void ModMatch_Event(int32_t kind, int32_t team, int32_t player, int32_t arg);
+      ModMatch_Event(10 /* MODEVENT_SECOND_HALF */, 0, -1, 0); }     /* the mods' match event (src/mod_match.c) */
     _halfNumber = 2;
     /* Invert teamPlayingUp: neg + add 3 (1->2, 2->1) */
     _teamPlayingUp = (uint16_t)(3 - _teamPlayingUp);
@@ -514,6 +522,8 @@ void SetCameraMovingToShowerState(void)
 __attribute__((used, externally_visible))
 void EndFirstHalf(void)
 {
+    { extern void ModMatch_Event(int32_t kind, int32_t team, int32_t player, int32_t arg);
+      ModMatch_Event(9 /* MODEVENT_HALF_TIME */, 0, -1, 0); }     /* the mods' match event (src/mod_match.c) */
     setBreakState(ST_FIRST_HALF_ENDED, ST_STOPPED, 100);
     ResetBothTeamsPlayerPassingKicking();
     clearCameraVelocity();
@@ -654,6 +664,8 @@ void GameOver(void)
 __attribute__((used, externally_visible))
 void StartFirstExtraTime(void)
 {
+    { extern void ModMatch_Event(int32_t kind, int32_t team, int32_t player, int32_t arg);
+      ModMatch_Event(12 /* MODEVENT_EXTRA_TIME */, 0, -1, 0); }     /* the mods' match event (src/mod_match.c) */
     _halfNumber = 1;
 
     /* Random teamPlayingUp and teamStarting */
@@ -688,6 +700,8 @@ void StartFirstExtraTime(void)
 __attribute__((used, externally_visible))
 void EndFirstExtraTime(void)
 {
+    { extern void ModMatch_Event(int32_t kind, int32_t team, int32_t player, int32_t arg);
+      ModMatch_Event(16 /* MODEVENT_EXTRA_TIME_HALF */, 0, -1, 0); }     /* the mods' match event (src/mod_match.c) */
     _halfNumber = 2;
     _teamPlayingUp = (uint16_t)(3 - _teamPlayingUp);
     _teamStarting = (uint16_t)(3 - _teamStarting);
@@ -719,6 +733,13 @@ void EndFirstExtraTime(void)
 __attribute__((used, externally_visible))
 void PrepareForInitialKick(void)
 {
+    {
+        /* A mod's match whose team takes every kick-off (mod_match.c, H1). */
+        extern int16_t ModMatch_KickOffTeam(void);
+        const int16_t forced = ModMatch_KickOffTeam();
+        if (forced)
+            _teamStarting = (uint16_t)forced;
+    }
     SetBallPosition(336, 449);
 
     TeamGeneralInfo *kickoffTeam = &_topTeamData;
@@ -744,6 +765,7 @@ void PrepareForInitialKick(void)
     _stoppageTimerActive = 0;
     StopAllPlayers();
     clearCameraVelocity();
+    { extern void ModMatch_InitialKick(void); ModMatch_InitialKick(); }   /* a mod's match's own break (H6) */
 }
 
 /* ================================================================
@@ -752,6 +774,8 @@ void PrepareForInitialKick(void)
 __attribute__((used, externally_visible))
 void StartPenalties(void)
 {
+    { extern void ModMatch_Event(int32_t kind, int32_t team, int32_t player, int32_t arg);
+      ModMatch_Event(13 /* MODEVENT_SHOOTOUT */, 0, -1, 0); }     /* the mods' match event (src/mod_match.c) */
     _penaltiesState = 0xFFFF;
     _savedTeam1Goals = _statsTeam1Goals;
     _savedTeam2Goals = _statsTeam2Goals;
@@ -790,6 +814,15 @@ void StartPenalties(void)
     NextPenalty();
 }
 
+/* ---- launcher options (agent B): SWOS 2020's --improved-pitch-palette ----
+ * The wet and soft pitches' grass has two stripes of the same colour in the original (the pitch
+ * table's first and third entries: DOS 24,72,0 twice on wet, 24,56,0 twice on soft), so their
+ * stripes do not show. SWOS 2020 lightens the third (its options.cpp setImprovedPitchPalette:
+ * pitchWetColorTable[7] 72 -> 79, pitchSoftColorTable[7] 56 -> 62): here the same green, the DOS
+ * palette's six bits 36 -> 39 and 28 -> 31, the Amiga's four 9 -> 10 and 7 -> 8. Only the palette:
+ * no pitch factor or match state changes. [video] improved_pitch_palette (SDL); 0 on the Amiga. */
+uint8_t _gImprovedPitchPalette;
+
 /* ================================================================
  * ApplyPitchPaletteAndFactors
  *
@@ -817,6 +850,8 @@ void ApplyPitchPaletteAndFactors(void)
                 uint16_t idx = _paletteIndices[pi];
                 ((uint16_t *)_gamePalette)[idx] = palPtr[pi];
             }
+            if (_gImprovedPitchPalette && (pitchIdx == 2 || pitchIdx == 3))   /* (launcher options, agent B) */
+                ((uint16_t *)_gamePalette)[_paletteIndices[2]] = pitchIdx == 2 ? 0x03A0 : 0x0380;
         }
 #else
         {
@@ -825,6 +860,8 @@ void ApplyPitchPaletteAndFactors(void)
             *(uint16_t *)(_gamePalette) = palPtr[0];
             *(uint16_t *)(_gamePalette + 0xE) = palPtr[1];
             *(uint16_t *)(_gamePalette + 0x12) = palPtr[2];
+            if (_gImprovedPitchPalette && (pitchIdx == 2 || pitchIdx == 3))   /* (launcher options, agent B) */
+                *(uint16_t *)(_gamePalette + 0x12) = pitchIdx == 2 ? 0x03A0 : 0x0380;
         }
 #endif
 
@@ -915,6 +952,7 @@ void InitGameRestoreTeams(void)
     /* Random teamPlayingUp and teamStarting */
     _teamPlayingUp = (uint16_t)((Rand() & 1) + 1);
     _teamStarting = (uint16_t)((Rand() & 1) + 1);
+    { extern void ModMatch_Sides(void); ModMatch_Sides(); }   /* a mod's match's own sides (mod_match.c) */
 
     /* Set time delta from game length table */
     _timeDelta = *(uint16_t *)((uint8_t *)_gameLenSecondsTable + (_gameLengthInGame << 1));
@@ -987,6 +1025,7 @@ apply_palette_and_pitch:
     ResetGoalAttempt();
     InitAnimatedPatterns();
     StartingMatch();
+    { extern void ModMatch_KickOff(void); ModMatch_KickOff(); }  /* a mod's starting score/clock; the mods told */
     PlaySample1IfNotTraining();
 
     if (_playGame != 0) {

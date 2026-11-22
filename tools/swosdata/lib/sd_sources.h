@@ -1,7 +1,7 @@
 /*
  * sd_sources.h -- the player's own copy of the game, wherever it is.
  *
- * Four kinds of source, any combination:
+ * Five kinds of source, any combination:
  *   - the Amiga version: its two floppy images (.adf), told apart by their volume
  *     names, "SWOS" (disk 1) and "SWOS2" (disk 2), never by file name -- or a hard
  *     disk image (.hdf) with the game installed on it (ASWOS's, sensiblesoccer.de's,
@@ -10,6 +10,9 @@
  *   - the PC version: the installed game folder (GOG's, or any copy of one) --
  *     found by SPRITE.DAT, any case.
  *   - the Atari Jaguar version: the cartridge image (.jag, .j64, .rom or .bin, 2 MB).
+ *   - a world's data (the game's include/world.h): OpenSWOS-World-<tag>.zip, the package
+ *     scripts/make_world_package.sh makes (hosted apart from OpenSWOS: World 2026-27's squads
+ *     are its authors'), or the folder it was unpacked to -- found by its WORLD.ini.
  *   - SWOS 2020: its install folder, for the pitches its launcher has put in the
  *     game's own folder (swos/) -- whichever set the player picked. Found by the
  *     program in that folder, swos-port-Release.exe; that folder also looks like
@@ -24,6 +27,7 @@
 #include <stdint.h>
 #include "adf.h"
 #include "lha.h"
+#include "cd_image.h"
 #include "sg_util.h"
 
 typedef struct {
@@ -35,11 +39,18 @@ typedef struct {
     char  lha[1024];        /* a WHDLoad install packed .lha with the game in it */
     char  lhaDir[256];      /* the game's folder in it ("SWOS2425/data/") */
     char  dosDir[1024];     /* the PC game folder */
+    char  dosFloppy1[1024]; /* the PC game's floppy release, disk 1 of 2 (.img: SWOS_1.RNC) */
+    char  dosFloppy2[1024]; /* ... and disk 2 (SWOS_2.RNC): with both, the game is unpacked off
+                             * them (one RNC archive split in two) and that folder is dosDir */
+    char  dosCd[1024];      /* the PC game's CD, for the sounds an install leaves on it (SFX/):
+                             * the drive, a copy of the disc, or its image (.iso, .bin, .cue) */
     char  jagRom[1024];     /* the Jaguar cartridge image */
     char  s2020Dir[1024];   /* SWOS 2020's game folder: <install>/swos */
+    char  world[1024];      /* a world's package (.zip) or the folder with its WORLD.ini */
     Adf  *disk1, *disk2;    /* open while SdSources_Open .. Close */
     Adf  *hdfDisk;
     LhaArchive *lhaArc;
+    CdImage *cdImage;       /* dosCd when it is an image, open while SdSources_Open .. Close */
 } SdSources;
 
 /* Look through `dir` and every folder inside it, however deep, for any of the
@@ -59,10 +70,35 @@ int32_t SdSources_ScanEx(SdSources *s, const char *dir, SdScanProgress progress,
  * folder, its swos/ folder or a file in either). 0 when recognised. */
 int32_t SdSources_AddFile(SdSources *s, const char *path);
 
+/* The PC game's CD, for its commentary and effects: a folder with SFX/PIERCE or SFX/FX (the
+ * drive, a copy of the disc, the SFX folder itself or a file in it), or an image of the disc
+ * (.iso, .img, .bin, .cue) with them on it. Taken as dosCd -- even when it is a PC game folder
+ * as well. 0 when it is one. */
+int32_t SdSources_AddDosCd(SdSources *s, const char *path);
+int32_t SdSources_HaveDosCd(const SdSources *s);
+/* With both of the PC floppies and no PC game folder: the game unpacked off them (once, to the
+ * setup's temporary folder) as dosDir. 0 when it is there. Done by SdSources_AddFile itself;
+ * for a caller putting the disks together from two lookups. */
+int32_t SdSources_DosFloppies(SdSources *s);
+/* Why the last SdSources_DosFloppies made no game folder ("these floppies are the 96/97 upgrade
+ * ..."), "" when it did. */
+const char *SdSources_DosProblem(void);
+/* The PC game's CD in one of the computer's drives (Windows: its CD drives, a mounted image too;
+ * a Mac: /Volumes; Linux: /media, /run/media, /mnt/cdrom) -- each drive's top folder looked at,
+ * nothing searched, so it can be called every few seconds. Taken as dosCd (and as the PC game
+ * when there is none). 0 when found. */
+int32_t SdSources_FindCdDrive(SdSources *s);
+/* Whether the PC sources have the commentary (SFX/PIERCE): the game folder (GOG's has it) or the CD. */
+int32_t SdSources_HaveCommentary(const SdSources *s);
+
 /* The Amiga program, SWOS-Amiga.zip, unpacked whole to a folder of the setup's own under
  * the system's temporary folder; that folder (the one with SWOS.info and the SWOS drawer)
  * in `dir`. 0 when it holds SWOS/SWOS2. */
 int32_t SdSources_UnpackAmigaProgram(const char *zip, char *dir, uint32_t cap);
+/* A zip unpacked into dir (made), none of its entries outside it: 0, or -1. */
+int32_t SdSources_Unzip(const char *zip, const char *dir);
+/* Whether a zip holds an entry of that name. */
+int32_t SdSources_ZipHas(const char *zip, const char *name);
 
 int32_t SdSources_HaveAmiga(const SdSources *s);   /* both disks, a hard disk image or a WHDLoad .lha */
 
@@ -76,6 +112,14 @@ const char *SdSources_AmigaProblem(void);
 int32_t SdSources_HaveDos(const SdSources *s);
 int32_t SdSources_HaveJaguar(const SdSources *s);
 int32_t SdSources_HaveSwos2020(const SdSources *s);
+int32_t SdSources_HaveWorld(const SdSources *s);
+
+/* A world's package or folder: its WORLD.ini read -- the world's tag ("2627"), its name, the
+ * fingerprint of its data (scripts/world_import.py) -- and, for a .zip, unpacked to a folder of
+ * the setup's own under the system's temporary folder; that folder (with WORLD.ini) in `dir`.
+ * 0 when it is one. */
+typedef struct { char tag[16], name[64], fingerprint[24]; } SdWorldInfo;
+int32_t SdSources_OpenWorld(const char *path, SdWorldInfo *info, char *dir, uint32_t cap);
 
 /* Open the disks for reading. 0 on success. */
 int32_t SdSources_Open(SdSources *s, char *err);
@@ -85,7 +129,7 @@ void    SdSources_Close(SdSources *s);
  * disk 1 is tried first, then disk 2 -- or the hard disk image's game folder. */
 int32_t SdSources_ReadAmiga(SdSources *s, const char *rel, SgBuf *out, char *err);
 
-/* Read a file from the PC game folder, any case. */
+/* Read a file from the PC game folder, any case -- or, for a sound it does not have, off the CD. */
 int32_t SdSources_ReadDos(SdSources *s, const char *rel, SgBuf *out, char *err);
 
 #endif

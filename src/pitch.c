@@ -12,7 +12,9 @@
 #ifdef SWOS_SDL_BUILD
 #include "dos_graphics.h"
 #include "jag_graphics.h"   /* DosGfx_ParsePitchMap, DOS_TILE_BYTES */
-#include "pitch_map.h"      /* [graphics] pitch_maps: the picture from a .tmj */
+#include "mod_api.h"        /* ModPitchTileFn */
+#include "mod_hooks.h"      /* the pitch's picture from a mod (the pitchmaps mod's .tmj) */
+#include "animated_patterns.h"   /* AnimatedPatterns_*OwnCell* */
 #include <stdio.h>          /* snprintf for the DOS pitch filenames */
 #include <string.h>
 #include <stdlib.h>         /* getenv */
@@ -206,20 +208,24 @@ extern int16_t CAssetSys_DispatchGetSize(uint16_t opcode, uint16_t param,
 /* pitchChunkyBuffer capacity in whole 16x16 tiles. */
 #define DOS_PITCH_BANK_MAX_TILES    PITCH_POINTER_COUNT   /* 2310 → 591360 B */
 
+/* DOS PITCH1..PITCH6 for LoadPitchMap's index. SWOS_PITCH_NUMBER=1..6 pins the pitch drawn,
+ * beside SWOS_PITCH_TYPE's condition (highlight.c): a test can then look at every one. */
+static int dos_pitch_number(uint16_t mapIndex)
+{
+    int pitchNum = (int)mapIndex + 1;
+    const char *pin = getenv("SWOS_PITCH_NUMBER");
+    if (pin && pin[0] >= '1' && pin[0] <= '6' && !pin[1])
+        pitchNum = pin[0] - '0';
+    if (pitchNum < 1) pitchNum = 1;
+    if (pitchNum > 6) pitchNum = 6;
+    return pitchNum;
+}
+
 static void dos_load_pitch(uint16_t mapIndex)
 {
     char name[320];
     uint32_t blkSize = 0, datSize = 0;
-    int pitchNum = (int)mapIndex + 1;          /* DOS PITCH1..PITCH6 */
-    /* SWOS_PITCH_NUMBER=1..6 pins the pitch drawn, beside SWOS_PITCH_TYPE's
-     * condition (highlight.c): a test can then look at every one. */
-    {
-        const char *pin = getenv("SWOS_PITCH_NUMBER");
-        if (pin && pin[0] >= '1' && pin[0] <= '6' && !pin[1])
-            pitchNum = pin[0] - '0';
-    }
-    if (pitchNum < 1) pitchNum = 1;
-    if (pitchNum > 6) pitchNum = 6;
+    int pitchNum = dos_pitch_number(mapIndex);
 
     /* Tile bank — already 256-byte chunky tiles. Load via the DIRECT asset
      * dispatch, NOT LoadFileEx: LoadFileEx stages through the ~91 KB
@@ -274,11 +280,10 @@ static void dos_load_pitch(uint16_t mapIndex)
     for (int i = 0; i < PITCH_POINTER_COUNT; i++)
         slots[i] = (uint32_t)(uintptr_t)_s_pitchFullPtrs[i];
 
-    /* [graphics] pitch_maps: this pitch's PICTURE from <dir>/pitch<N>.tmj when there
-     * is one. The files above are still what the match is played on (the crowd's
-     * slots); the map is baked once the fans have their kits, at the end of
-     * FixupAndColorPitchFile. */
-    PitchMap_Load(_gDosGraphicsDir, pitchNum);
+    /* A mod's picture of this pitch (the pitchmaps mod: <dir>/pitch<N>.tmj). The files
+     * above are still what the match is played on (the crowd's slots); the mod bakes its
+     * picture once the fans have their kits, at the end of FixupAndColorPitchFile. */
+    ModHooks_PitchLoaded(_gDosGraphicsDir, pitchNum);
 }
 #endif /* SWOS_SDL_BUILD */
 
@@ -407,7 +412,8 @@ __attribute__((used, externally_visible))
 void LoadPitchMap(uint16_t mapIndex)
 {
 #ifdef SWOS_SDL_BUILD
-    PitchMap_Drop();                /* until a map is loaded for this pitch */
+    ModHooks_PitchDropped();        /* until a mod's picture is loaded for this pitch */
+    AnimatedPatterns_ClearOwnCells();   /* (Pitch_ApplyCrowdLayout marks them again) */
     if (_gDosGraphics) {
         dos_load_pitch(mapIndex);
         return;
@@ -857,9 +863,9 @@ void FixupAndColorPitchFile(void)
         #undef PITCH_GRID_ROWS
     }
 
-    /* The pitch from its map, now that every fan tile of the bank has its kit. */
+    /* A mod's picture of the pitch, now that every fan tile of the bank has its kit. */
     if (dosPitch)
-        PitchMap_Bake();
+        ModHooks_PitchColoured();
 #endif
 #if defined(AGA) && !defined(SWOS_SDL_BUILD)
     copyPitchTilesToFast();     /* the fans are coloured: the tiles are final */
@@ -936,7 +942,7 @@ void DrawChunkyPitch(void)
 
     int tilesAcross = fbW / PITCH_TILE_SIZE + 2;
     int tilesDown   = fbH / PITCH_TILE_SIZE + 2;
-    const int mapped = PitchMap_Active();
+    const ModPitchTileFn mapTile = ModHooks_PitchTiles();  /* a mod's picture, NULL none */
 
     for (int ty = 0; ty < tilesDown; ty++) {
         int gridY = startTileY + ty;
@@ -952,10 +958,10 @@ void DrawChunkyPitch(void)
                 int ptrIdx = PITCH_PTR_START + gridY * PITCH_GRID_COLS + gridX;
                 tile = (ptrIdx >= 0 && ptrIdx < PITCH_POINTER_COUNT)
                          ? _s_pitchFullPtrs[ptrIdx] : (uint8_t *)0;
-                /* Drawn from a map: the map's tile for this cell, seated or standing
-                 * as the engine's own tile there is (src/pitch_map.c). */
-                if (mapped && ptrIdx >= 0 && ptrIdx < PITCH_POINTER_COUNT)
-                    tile = (uint8_t *)PitchMap_Tile(ptrIdx, tile);
+                /* A mod's picture: its tile for this cell, seated or standing as the
+                 * engine's own tile there is (src/mod_pitchmaps.c). */
+                if (mapTile && ptrIdx >= 0 && ptrIdx < PITCH_POINTER_COUNT)
+                    tile = (uint8_t *)mapTile(ptrIdx, tile);
             }
 
             for (int row = 0; row < PITCH_TILE_SIZE; row++) {
@@ -981,3 +987,128 @@ void DrawChunkyPitch(void)
     }
 }
 #endif
+
+#ifdef SWOS_SDL_BUILD
+/* ================================================================
+ * The crowd as the match plays it (include/pitch.h)
+ * ================================================================ */
+extern void RncDecompressV1(uint8_t *src, uint8_t *dest);
+extern void RncDecompressV2(uint8_t *src, uint8_t *dest);
+extern void *_swcPitchMapFiles[];
+
+static int32_t crowd_slot(int32_t cell)
+{
+    return cell < PITCH_CROWD_ROW_CELLS ? PITCH_CROWD_TOP_SLOT + cell
+                                        : PITCH_CROWD_BOTTOM_SLOT + cell - PITCH_CROWD_ROW_CELLS;
+}
+
+/* A file, unpacked, in a buffer of its own (free it); NULL if it cannot be read. Straight
+ * through the asset dispatch, as the DOS pitch's bank is: LoadFileEx stages through the
+ * frontbuffer, which is the lobby's screen when the host builds the setup. */
+static uint8_t *crowd_file(const char *name, uint32_t *size)
+{
+    uint8_t *raw = (uint8_t *)malloc(PITCHFILE_MAX_SIZE), *out;
+    uint32_t n = 0, unpacked;
+    if (!raw)
+        return NULL;
+    if (CAssetSys_DispatchGetSize(DOS_ASSET_OP_INIT_SOURCE0, 0, (void *)name, raw, &n) != 0 || n < 8) {
+        free(raw);
+        return NULL;
+    }
+    if (raw[0] != 'R' || raw[1] != 'N' || raw[2] != 'C' || (raw[3] != 1 && raw[3] != 2)) {
+        *size = n;
+        return raw;
+    }
+    unpacked = BE_READ_U32(raw + 4);            /* (LoadFileEx: methods 1 and 2) */
+    out = unpacked && unpacked <= PITCHFILE_MAX_SIZE ? (uint8_t *)malloc(unpacked) : NULL;
+    if (out) {
+        if (raw[3] == 1) RncDecompressV1(raw, out);
+        else             RncDecompressV2(raw, out);
+    }
+    free(raw);
+    *size = unpacked;
+    return out;
+}
+
+int32_t Pitch_CrowdLayout(uint16_t mapIndex, uint16_t out[PITCH_CROWD_CELLS])
+{
+    uint32_t size = 0;
+    uint8_t *buf;
+    int32_t cell;
+
+    if (mapIndex >= PITCH_CROWD_FILES)
+        return 0;
+    if (_gDosGraphics) {
+        /* dos_load_pitch: the .DAT's tile map; a cell past the map draws the surround (none). */
+        char name[320];
+        static uint16_t tileMap[PITCH_POINTER_COUNT];
+        int n;
+        snprintf(name, sizeof name, "%s/PITCH%d.DAT", _gDosGraphicsDir, dos_pitch_number(mapIndex));
+        buf = crowd_file(name, &size);
+        if (!buf)
+            return 0;
+        n = DosGfx_ParsePitchMap(buf, size, tileMap, PITCH_POINTER_COUNT);
+        free(buf);
+        for (cell = 0; cell < PITCH_CROWD_CELLS; cell++) {
+            const int32_t slot = crowd_slot(cell);
+            out[cell] = slot < n && tileMap[slot] < DOS_PITCH_BANK_MAX_TILES ? (uint16_t)(tileMap[slot] + 1) : 0;
+        }
+        return 1;
+    }
+    /* FixupAndColorPitchFile, Steps 1 and 1b: a slot's tile is its file offset over the
+     * file's tile size, the slot's own number for an offset past the tiles. */
+    buf = crowd_file((const char *)_swcPitchMapFiles[mapIndex], &size);
+    if (!buf)
+        return 0;
+    if (size <= PITCH_POINTER_COUNT * 4u) {
+        free(buf);
+        return 0;
+    }
+    {
+        static uint32_t rel[PITCH_POINTER_COUNT];
+        const uint32_t region = size - PITCH_POINTER_COUNT * 4u, baseLow = 0x10000u;
+        uint32_t planes, tileSize;
+        int32_t k;
+        for (k = 0; k < (int32_t)PITCH_POINTER_COUNT; k++)
+            rel[k] = BE_READ_U32(buf + 4 * k) + baseLow;
+        planes = pitchTilePlanes(rel, baseLow, region);
+        if (planes > PITCH_NUM_PLANES)
+            planes = PITCH_NUM_PLANES;
+        tileSize = planes * 2u * TILE_HEIGHT;
+        for (cell = 0; cell < PITCH_CROWD_CELLS; cell++) {
+            const int32_t slot = crowd_slot(cell);
+            const uint32_t off = rel[slot] - baseLow;
+            uint32_t tile = (uint32_t)slot;
+            if (off + tileSize <= region && off / tileSize < PITCH_POINTER_COUNT)
+                tile = off / tileSize;
+            out[cell] = (uint16_t)(tile + 1);
+        }
+    }
+    free(buf);
+    return 1;
+}
+
+void Pitch_ApplyCrowdLayout(const uint16_t in[PITCH_CROWD_CELLS])
+{
+    uint32_t *slots = (uint32_t *)_pitchDatBuffer;
+    const uint32_t base = (uint32_t)(uintptr_t)_pitchChunkyBuffer;
+    int32_t cell, theirs = 0;
+
+    for (cell = 0; cell < PITCH_CROWD_CELLS; cell++) {
+        const int32_t slot = crowd_slot(cell);
+        const uint32_t v = slots[slot];
+        uint16_t own;
+        if (in[cell] == PITCH_CROWD_KEEP)
+            continue;
+        own = v == 0 ? 0 : ((v - base) & 0xFFu) ? 0xFFFEu : (uint16_t)(((v - base) >> 8) + 1);
+        if (own == in[cell])
+            continue;
+        slots[slot] = in[cell] ? base + ((uint32_t)(in[cell] - 1) << 8) : 0;
+        AnimatedPatterns_SetOwnCell(slot);
+        theirs++;
+    }
+    if (theirs)
+        fprintf(stderr, "[crowd] %d of %d crowd cells are the host's, not this pitch's own: "
+                        "drawn still, in this game's artwork\n", (int)theirs, PITCH_CROWD_CELLS);
+}
+#endif /* SWOS_SDL_BUILD */

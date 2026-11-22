@@ -5,12 +5,14 @@
  * Palette + decode tables transcribed from the working swos-port-c reference
  * (vm_stubs.cpp, ultimately DosPalette.cs). DOS files are little-endian.
  */
+#include "team_colors.h"
 #include "dos_graphics.h"
+#include "match_setup.h"   /* _gImprovedPitchPalette */
 #include "display.h"
 #include "dos_mode.h"
 #include <string.h>
 #ifdef SWOS_SDL_BUILD
-#include "pitch_map.h"
+#include "mod_hooks.h"
 #include <stdlib.h>
 #include <stdio.h>
 #endif
@@ -129,13 +131,18 @@ void DosGfx_BuildPalette(int pitchType, uint8_t *rgb888Out)
         pal6[dst + 1] = kPitchPalettes[pitchType][i * 3 + 1];
         pal6[dst + 2] = kPitchPalettes[pitchType][i * 3 + 2];
     }
+    if (_gImprovedPitchPalette && (pitchType == 2 || pitchType == 3))   /* (match_setup.c: SWOS 2020's) */
+        pal6[kPitchPaletteIndices[2] * 3 + 1] = pitchType == 2 ? 39 : 31;
+    if (TeamColors_PurpleInMatch()) {   /* purple in maroon's entry (team_colors.c, the Mod's pk_pal) */
+        pal6[12 * 3 + 0] = 24; pal6[12 * 3 + 1] = 8; pal6[12 * 3 + 2] = 34;
+    }
 #ifdef SWOS_SDL_BUILD
     /* A pitch drawn from a map takes the condition's entries from the map's
      * `pitch-<condition>` event (src/pitch_map.c). Through the same six bits as the
      * table above, so the game's own map gives the game's own colours exactly. */
     {
         uint8_t entry[64], colour[64][3];
-        int n = PitchMap_Condition(pitchType, entry, colour, 64);
+        int n = ModHooks_PitchCondition(pitchType, entry, colour, 64);
         int differ = 0;
         for (int i = 0; i < n; i++) {
             for (int c = 0; c < 3; c++) {

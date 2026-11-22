@@ -19,6 +19,10 @@ uint8_t *StringCopy(const uint8_t *src, uint8_t *dst);
 uint8_t *StringCopyUntilChar(const uint8_t *src, uint8_t *dst, uint8_t stopChar);
 
 /* ---- Number formatting (Chunk 100) ---- */
+/* Convert stored economy units to the amounts shown in the current world. */
+unsigned CareerMoneyScale(void);
+/* Format a displayed amount in thousands as K or M, without a currency sign. */
+void FormatCompactMoney(uint32_t thousands, uint8_t *dst);
 void Int2Pounds(uint32_t pounds, uint8_t *dst);
 void Int2PoundsSigned(int32_t pounds, uint8_t *dst);
 void WriteAccountBalance(int32_t delta, uint8_t *dst);

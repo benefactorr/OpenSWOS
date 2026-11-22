@@ -1,6 +1,7 @@
 /*
  * controls_menu.c -- the CONTROLS menu: the player's own keys, and the press latch (SDL
- * builds). Opened from OPTIONS.
+ * builds). Opened from OPTIONS -> SETTINGS -> CONTROLS -> KEYBOARD KEYS (src/settings_menus.c,
+ * SWOS 2020's CONTROLS MENU, whose REDEFINE this is).
  *
  * SWOS 2020 had REDEFINE CONTROLS (its controlOptionsMenu.cpp: a screen that asked for UP,
  * DOWN, LEFT, RIGHT, FIRE and BENCH in turn). This is the same thing as rows of a menu: fire
@@ -12,6 +13,7 @@
  * section 10) and flagged dos_redraw, so its onDraw runs every frame.
  */
 #include "controls_menu.h"
+#include "touch_controls.h"   /* ON-SCREEN: the phones' touch controls */
 
 #ifdef SWOS_SDL_BUILD
 
@@ -34,17 +36,22 @@ enum {
     ControlsMenu_leftLabel,  ControlsMenu_left,
     ControlsMenu_rightLabel, ControlsMenu_right,
     ControlsMenu_fireLabel,  ControlsMenu_fire,
-    ControlsMenu_passLabel,  ControlsMenu_pass,
-    ControlsMenu_shootLabel, ControlsMenu_shoot,
-    ControlsMenu_highLabel, ControlsMenu_high,
     ControlsMenu_latchLabel, ControlsMenu_latch,
     ControlsMenu_note,
     ControlsMenu_clear,
     ControlsMenu_exit,
+    ControlsMenu_touchLabel, ControlsMenu_touch,    /* (appended: a phone's only) */
+    ControlsMenu_passLabel, ControlsMenu_pass,
+    ControlsMenu_shotLabel, ControlsMenu_shot,
+    ControlsMenu_highLabel, ControlsMenu_high,
     ControlsMenu_kNumEntries
 };
 
-enum { kKeys = 8 };     /* classic 5 plus pass, shoot, high shot */
+enum { kClassicKeys = 5, kKeys = 8 };
+static const int kKeyRow[kKeys] = {
+    ControlsMenu_up, ControlsMenu_down, ControlsMenu_left, ControlsMenu_right, ControlsMenu_fire,
+    ControlsMenu_pass, ControlsMenu_shot, ControlsMenu_high
+};
 
 /* input_sdl.c */
 extern int         InputSDL_SetKeyBinding(int which, const char *name);
@@ -59,7 +66,7 @@ extern void      CallDrawMenuItem(MenuEntry *entry);
 extern void      SetExitMenuFlag(void);
 extern volatile uint16_t _shortFire;
 
-static char s_rowText[kKeys][24];       /* what each key row shows */
+static char s_rowText[kKeys][32];       /* what each key row shows */
 static char s_note[64];                 /* the line under the rows */
 
 static MenuEntry *entry_at(int32_t ordinal)
@@ -93,9 +100,14 @@ static void save(void)
     for (i = 0; i < kKeys; i++)
         snprintf(g_arcadeOpts->key_bind[i], sizeof g_arcadeOpts->key_bind[i], "%s", InputSDL_KeyBindingName(i));
     g_arcadeOpts->latch_presses = InputSDL_PressLatch();
+    g_arcadeOpts->touch_controls = TouchControls_Mode();
     if (g_arcadeIniPath)
         Settings_Save(g_arcadeOpts, g_arcadeIniPath);
 }
+
+/* The keys every control has whatever is chosen here (built_in below): what a row shows
+ * with no key of the player's ("NOT SET" read as no key at all: tester report 0044). */
+static const char *const k_builtIn[kClassicKeys] = { "CURSOR UP", "CURSOR DOWN", "CURSOR LEFT", "CURSOR RIGHT", "CTRL" };
 
 static void refresh(void)
 {
@@ -103,16 +115,21 @@ static void refresh(void)
 
     for (i = 0; i < kKeys; i++) {
         const char *name = InputSDL_KeyBindingName(i);
-        if (name[0])
-            upper(s_rowText[i], sizeof s_rowText[i], name);
-        else
-            snprintf(s_rowText[i], sizeof s_rowText[i], "NOT SET");
-        const int indices[kKeys] = { ControlsMenu_up, ControlsMenu_down, ControlsMenu_left,
-            ControlsMenu_right, ControlsMenu_fire, ControlsMenu_pass, ControlsMenu_shoot,
-            ControlsMenu_high };
-        entry_at(indices[i])->fg = (uintptr_t)s_rowText[i];
+        if (i >= kClassicKeys) {
+            upper(s_rowText[i], sizeof s_rowText[i], name[0] ? name : "NOT SET");
+        } else if (name[0]) {
+            char own[16];
+            upper(own, sizeof own, name);
+            snprintf(s_rowText[i], sizeof s_rowText[i], "%s OR %s", own, k_builtIn[i]);
+            if (strlen(s_rowText[i]) > 24)      /* (the row's 150 px: the player's key alone) */
+                snprintf(s_rowText[i], sizeof s_rowText[i], "%s", own);
+        } else
+            snprintf(s_rowText[i], sizeof s_rowText[i], "%s", k_builtIn[i]);
+        entry_at(kKeyRow[i])->fg = (uintptr_t)s_rowText[i];
     }
     entry_at(ControlsMenu_latch)->fg = (uintptr_t)(InputSDL_PressLatch() ? "ALWAYS COUNT" : "CAN BE MISSED");
+    entry_at(ControlsMenu_touch)->fg = (uintptr_t)(TouchControls_Mode() == TOUCH_CONTROLS_NEVER ? "NEVER"
+                                                 : TouchControls_Mode() == TOUCH_CONTROLS_ALWAYS ? "ALWAYS" : "AUTO");
     entry_at(ControlsMenu_note)->fg = (uintptr_t)s_note;
 }
 
@@ -129,10 +146,7 @@ static int32_t built_in(SDL_Scancode sc)
  * again, leaves it as it was; BACKSPACE or DELETE takes the player's key away. */
 static void choose(int32_t which)
 {
-    const int indices[kKeys] = { ControlsMenu_up, ControlsMenu_down, ControlsMenu_left,
-        ControlsMenu_right, ControlsMenu_fire, ControlsMenu_pass, ControlsMenu_shoot,
-        ControlsMenu_high };
-    MenuEntry   *e = entry_at(indices[which]);
+    MenuEntry   *e = entry_at(kKeyRow[which]);
     SDL_Scancode sc;
     char         name[24];
     int32_t      i;
@@ -195,8 +209,32 @@ static void choose(int32_t which)
 
 /* ---- handlers ---- */
 
+/* Set a row's links (the JSON's are the desktops'). */
+static void nav(int32_t ordinal, int32_t up, int32_t down)
+{
+    MenuEntry *e = entry_at(ordinal);
+    e->upEntry = (int8_t)up;
+    e->downEntry = (int8_t)down;
+    e->directionUp = e->directionDown = -1;
+}
+
 static void controlsMenu_OnInit(void)
 {
+    /* ON-SCREEN (the touch controls): a phone's row, between SHORT PRESSES and the buttons. */
+#ifdef SWOS_MOBILE_BUILD
+    const int32_t touch = 1;
+#else
+    const int32_t touch = 0;
+#endif
+    entry_at(ControlsMenu_touchLabel)->isInvisible = !touch;
+    entry_at(ControlsMenu_touch)->isInvisible = !touch;
+    nav(ControlsMenu_fire, ControlsMenu_right, ControlsMenu_pass);
+    nav(ControlsMenu_pass, ControlsMenu_fire, ControlsMenu_shot);
+    nav(ControlsMenu_shot, ControlsMenu_pass, ControlsMenu_high);
+    nav(ControlsMenu_high, ControlsMenu_shot, ControlsMenu_latch);
+    nav(ControlsMenu_latch, ControlsMenu_high, touch ? ControlsMenu_touch : ControlsMenu_clear);
+    nav(ControlsMenu_clear, touch ? ControlsMenu_touch : ControlsMenu_latch, -1);
+    nav(ControlsMenu_exit,  touch ? ControlsMenu_touch : ControlsMenu_latch, -1);
     note("");
     refresh();
 }
@@ -211,8 +249,9 @@ static void controlsMenu_down_OnSelect(void)  { choose(1); }
 static void controlsMenu_left_OnSelect(void)  { choose(2); }
 static void controlsMenu_right_OnSelect(void) { choose(3); }
 static void controlsMenu_fire_OnSelect(void)  { choose(4); }
+
 static void controlsMenu_pass_OnSelect(void)  { choose(5); }
-static void controlsMenu_shoot_OnSelect(void) { choose(6); }
+static void controlsMenu_shot_OnSelect(void)  { choose(6); }
 static void controlsMenu_high_OnSelect(void)  { choose(7); }
 
 /* SHORT PRESSES: [input] latch_presses. */
@@ -221,6 +260,17 @@ static void controlsMenu_latch_OnSelect(void)
     InputSDL_SetPressLatch(!InputSDL_PressLatch());
     note(InputSDL_PressLatch() ? "A TAP SHORTER THAN A FRAME STILL COUNTS"
                                : "ONLY WHAT IS HELD WHEN THE GAME LOOKS");
+    save();
+}
+
+/* ON-SCREEN: [input] touch_controls, AUTO -> ALWAYS -> NEVER. */
+static void controlsMenu_touch_OnSelect(void)
+{
+    const int32_t mode = (TouchControls_Mode() + 1) % 3;
+    TouchControls_SetMode(mode);
+    note(mode == TOUCH_CONTROLS_NEVER  ? "OFF: FOR A HANDHELD WITH ITS OWN CONTROLS"
+       : mode == TOUCH_CONTROLS_ALWAYS ? "ON SCREEN WHATEVER CONTROLLER IS USED"
+                                       : "HIDDEN WHILE A CONTROLLER IS PLAYED");
     save();
 }
 
@@ -251,9 +301,10 @@ static const MenuSymbol k_handlers[] = {
     HANDLER(controlsMenu_right_OnSelect),
     HANDLER(controlsMenu_fire_OnSelect),
     HANDLER(controlsMenu_pass_OnSelect),
-    HANDLER(controlsMenu_shoot_OnSelect),
+    HANDLER(controlsMenu_shot_OnSelect),
     HANDLER(controlsMenu_high_OnSelect),
     HANDLER(controlsMenu_latch_OnSelect),
+    HANDLER(controlsMenu_touch_OnSelect),
     HANDLER(controlsMenu_clear_OnSelect),
     HANDLER(controlsMenu_exit_OnSelect),
 };

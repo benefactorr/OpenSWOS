@@ -11,13 +11,24 @@
  */
 
 #include <stdint.h>
+#include "project_identity.h"
 #include "platform_sdl.h"
+#include "mod_hooks.h"
+#include "swos_settings.h"  /* Settings_Save: the volume keys' */
+#include "text_render.h"    /* DrawMenuText: their readout */      /* ModHooks_FrameDrawn: the built-in mods' drawing */
+#include "gfx.h"            /* the overlays' drawing, on either presenter */
+#include "gpu_present.h"    /* the GPU presenter ([video] renderer = gpu: docs/RENDERING.md) */
+#include "match_chat.h"     /* chatting in an online match: its keys first, its box over the picture */
 #include "crt_effects.h"   /* CRT mask / vignette / curved corners */
 #include "display.h"
 #include "dos_mode.h"        /* gDosGraphics */
 #include "dos_gameplay.h"    /* DosGameplay_TargetFps — 70 (DOS) vs 50 (Amiga) */
 #include "dos_graphics.h"    /* DosGfx_BuildPalette */
 #include "build_info.h"      /* the commit, in the window title */
+#include "pixel_filter.h"    /* [video] pixel_filter (launcher options, agent B) */
+#include "team_colors.h"     /* [video] purple_for_brown */
+#include "match_setup.h"     /* [video] improved_pitch_palette */
+#include "gpu_slang.h"       /* (a shader preset is a filter of its own) */
 
 #include <SDL.h>
 #include <stdio.h>
@@ -94,6 +105,7 @@ void InputSDL_ClearKeyState(void);
  * the buffer the game last drew into. */
 extern volatile uintptr_t _frontbufferBasePtr;
 extern volatile uintptr_t _frontbufferBaseAltPtr;
+extern volatile uint16_t _gTextInputActive;   /* input_text.c: a name is being typed */
 extern uint8_t  _frontbufferBase[];
 extern uint8_t  _frontbufferBaseAlt[];
 extern uint8_t  _frontbufferMaskBuffer[];
@@ -127,7 +139,7 @@ static SDL_Renderer *s_renderer;
  * Worst case the HUD covers the whole screen (the result/scoreboard overlay),
  * hence a full second screen's worth. */
 #define PLATFORM_TEX_H  (PLATFORM_SCREEN_H * 2)
-static SDL_Texture  *s_textures[PLATFORM_TEX_RING];  /* RGBA8888 streaming, _screen_width x 272 */
+static SDL_Texture  *s_textures[PLATFORM_TEX_RING];  /* RGBA8888 streaming, the widest picture x PLATFORM_TEX_H; used at _screen_width */
 static int           s_tex_idx;
 /* Cached-RAM staging buffer: ALL per-pixel work (8bpp→RGBA, overlay blend) happens
  * here, then one SDL_UpdateTexture uploads it. Writing/reading SDL_LockTexture's
@@ -209,6 +221,20 @@ void Platform_HudLayerMark(int x, int y, int w, int h)
     s_hud_stamp = Platform_NowMs();
 }
 
+/* The match is paused: the frame on screen is shown again and again and nothing draws, so
+ * both 100 ms freshness rules below would take its HUD (the clock, the team names, the
+ * score) and its sub-pixel scroll away a moment after P (report 0043). The pause loop
+ * (pauseSpinWaitOneTick) calls this before each present to keep them, as drawn. Menus
+ * never pause, so they still decay out there. */
+void Platform_KeepFrameFresh(void)
+{
+    extern void Render_KeepScrollSubpixel(void);
+    if (s_hud_stamp)
+        s_hud_stamp = Platform_NowMs();
+    Render_KeepScrollSubpixel();
+    ModHooks_FrameKept();               /* (a mod's drawing that keeps the frame's age) */
+}
+
 /* Is there a HUD layer worth presenting this frame? Same 100 ms freshness rule
  * as the scroll residual: menus never draw these sprites, so they decay out
  * instead of leaving a stale clock floating over the frontend. */
@@ -247,6 +273,7 @@ static int hud_layer_pending(void)
  * scale_pass_factor() returns 0 there and the old single copy runs unchanged,
  * which is every windowed scale. */
 static int           s_scaling_smooth = 1;  /* [video] scaling = smooth | sharp */
+static int           s_gpu;                 /* the GPU presenter is up: no SDL renderer (gpu_present.c) */
 static SDL_Texture  *s_scale_target;        /* NULL until a fractional scale needs it */
 static int           s_scale_n;             /* the N s_scale_target was built at */
 static int           s_scale_targets_ok = 1;/* cleared if the backend can't render to a texture */
@@ -257,8 +284,11 @@ static SDL_mutex    *s_render_mtx;       /* serializes Platform_RenderFrame call
 static Uint64        s_perf_freq;
 static Uint64        s_next_frame_perf;  /* high-res counter for 50 Hz pacing */
 /* How many frames late the limiter will still catch up on, by running frames back to
- * back, before it drops the rest (Platform_SetCatchUpFrames). */
-static int           s_catchup_frames = 1;
+ * back, before it drops the rest: one -- a burst of frames after a hitch only looks
+ * worse. (A live match caught up on its whole prediction window, the host's CATCH UP
+ * switch, fd911618; removed 2026-10-30: it caused netplay problems.) */
+static const int     s_catchup_frames = 1;
+static int           s_display_index = -1;    /* the display the window is on (check_display) */
 static int           s_display_hz;       /* monitor refresh, 0 = unknown. See the pacing note in Platform_VBlank. */
 static double        k_frame_secs = 1.0 / 50.0;  /* refreshed per frame from the
                                                   * active game style (DOS 70 / Amiga 50) */
@@ -285,6 +315,13 @@ static volatile Uint32 s_last_main_render_ms;
  * In all cases the request is processed inside Platform_RenderFrame while
  * the render mutex is held, so the captured ARGB buffer is consistent. */
 static volatile int s_screenshot_request;
+
+/* A screenshot at the next full render, as F12 takes one (the career autopilot's test
+ * switch SWOS_GOLDEN_SHOT_COMP, career_autopilot.c). */
+void Platform_RequestScreenshot(void)
+{
+    s_screenshot_request = 1;
+}
 static int          s_screenshot_index;
 static int          s_screenshot_interval;   /* 0 = disabled, N>0 = every N frames */
 static int          s_present_capture;       /* 0 = disabled, N>0 = every N frames (see capture_presented_frame) */
@@ -387,6 +424,14 @@ static int           s_frame_count;
  * hardware (D3D / GL / Metal) contexts are thread-bound. */
 static int           s_renderer_is_hw;
 static int           s_vsync_enabled;
+/* SWOS_FRAME_SKIP=1: for a screen that holds every present to its own refresh, whatever
+ * vsync says (the PortMaster handhelds' 60 Hz panels). DOS gameplay paces at 70 Hz, so
+ * there the presents held the whole game to 60 and it played 14% slow. A frame that
+ * starts past its deadline runs in full and only isn't shown, so the match keeps its
+ * rate, never two in a row. Nothing here touches the simulation. */
+static int           s_frame_skip;
+static int           s_frame_skip_now;   /* this frame is not shown */
+static int           s_frames_skipped;   /* for SWOS_PRESENT_STATS */
 
 /* Harness TURBO (env SWOS_HARNESS_TURBO, read once in Platform_Init): when
  * set, the inferior runs frames CPU-bound instead of paced to a 50 Hz wall
@@ -640,6 +685,10 @@ int Platform_Init(const PlatformInitOptions *opts)
         }
     }
 #endif
+#ifdef SWOS_MOBILE_BUILD
+    /* Phones: the whole screen, always (docs/MOBILE.md). */
+    fs_mode = PLATFORM_FULLSCREEN_DESKTOP;
+#endif
 #ifdef SWOS_WASM_BUILD
     /* Web: fullscreen is browser-managed (F11) — SDL desktop-fullscreen at boot
      * is user-gesture-gated and would stretch the canvas — so force windowed
@@ -674,6 +723,9 @@ int Platform_Init(const PlatformInitOptions *opts)
 #ifndef SWOS_WASM_BUILD
     wflags |= SDL_WINDOW_RESIZABLE;
 #endif
+#ifdef SWOS_MOBILE_BUILD
+    wflags |= SDL_WINDOW_ALLOW_HIGHDPI;     /* (the screen's own pixels, not iOS's points) */
+#endif
     if (fs_mode == PLATFORM_FULLSCREEN_DESKTOP) {
         /* Borderless window sized to the desktop, no display-mode
          * change. SDL_RenderSetLogicalSize letterboxes 336x272 inside
@@ -688,12 +740,20 @@ int Platform_Init(const PlatformInitOptions *opts)
         wflags |= SDL_WINDOW_FULLSCREEN;
     }
 
+    /* The GPU presenter wants an OpenGL window, its context's attributes set first. If it
+     * cannot start on it after all, SDL's renderer takes the same window. */
+    int gpu_wanted = renderer_mode == PLATFORM_RENDERER_ACCEL && GpuPresent_Compiled();
+    if (gpu_wanted) {
+        GpuPresent_ConfigureWindow();
+        wflags |= GpuPresent_WindowFlags();
+    }
+
     /* Open (and, for fullscreen, cover) the requested monitor. CENTERED_DISPLAY
      * places the window on display `screen`; on WASM SDL only has display 0. */
     /* The build goes in the title bar as well as on the main menu: a windowed
      * screenshot then carries it even when the shot crops to the game area. */
     static char s_title[96];
-    snprintf(s_title, sizeof s_title, "OpenSWOS %s (%s)", Build_Id(), Build_Platform());
+    snprintf(s_title, sizeof s_title, PROJECT_NAME " %s (%s)", Build_Id(), Build_Platform());
 
     /* [video] resolution=WxH IS THE CLIENT AREA, when one is named.
      *
@@ -752,6 +812,15 @@ int Platform_Init(const PlatformInitOptions *opts)
         SDL_WINDOWPOS_CENTERED_DISPLAY(screen),
         client_w, client_h,
         wflags);
+    if (!s_window && gpu_wanted) {
+        /* No OpenGL window here (SDL's dummy driver of the headless rigs, a driver without GL):
+         * a plain one, on SDL's renderer. */
+        fprintf(stderr, "[gpu] no OpenGL window (%s): SDL's renderer instead\n", SDL_GetError());
+        gpu_wanted = 0;
+        wflags &= ~GpuPresent_WindowFlags();
+        s_window = SDL_CreateWindow(s_title, SDL_WINDOWPOS_CENTERED_DISPLAY(screen),
+                                    SDL_WINDOWPOS_CENTERED_DISPLAY(screen), client_w, client_h, wflags);
+    }
     if (!s_window) {
         fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
         return -1;
@@ -769,6 +838,7 @@ int Platform_Init(const PlatformInitOptions *opts)
 #endif
 
 #ifndef SWOS_WASM_BUILD
+    s_display_index = SDL_GetWindowDisplayIndex(s_window);  /* (the one it opened on: check_display) */
     /* Post-creation window fit (windowed only). The pre-creation scale clamp
      * uses SDL_GetDisplayUsableBounds, which can under-shrink (DPI virtualization
      * on Windows, work-area quirks) and CANNOT account for the title bar — that's
@@ -853,6 +923,16 @@ int Platform_Init(const PlatformInitOptions *opts)
      * misbehaves; it permits cross-thread RenderFrame calls from the
      * SDL_AddTimer worker (used as a fallback during loader-intro
      * spins). */
+    if (gpu_wanted && GpuPresent_Init(s_window, vsync) == 0) {
+        s_gpu = 1;
+        s_renderer_is_hw = 1;
+        s_vsync_enabled = GpuPresent_Vsync();
+        s_scale_targets_ok = 1;
+    } else {
+    if (gpu_wanted)
+        fprintf(stderr, "[gpu] no GPU presenter on this machine: SDL's renderer instead\n");
+    if (renderer_mode == PLATFORM_RENDERER_SDL)
+        renderer_mode = PLATFORM_RENDERER_ACCEL;   /* (SDL's hardware renderer, by choice) */
     Uint32 rflags;
     if (renderer_mode == PLATFORM_RENDERER_SOFTWARE) {
         rflags = SDL_RENDERER_SOFTWARE;
@@ -894,9 +974,13 @@ int Platform_Init(const PlatformInitOptions *opts)
         fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
         return -1;
     }
+    }   /* (SDL's renderer) */
+    Gfx_BindSdl(s_renderer, s_window);
 
     s_subpixel_scroll = opts ? opts->subpixel_scroll : 1;
     s_scaling_smooth  = opts ? opts->scaling_smooth  : 1;
+    if (opts)
+        Platform_SetDisplayOptions(opts);   /* (launcher options, agent B: DISPLAY OPTIONS) */
     {
         CrtEffectsConfig cfx;
         cfx.mask          = opts ? (CrtMaskKind)opts->crt_mask : CRT_MASK_OFF;
@@ -920,7 +1004,10 @@ int Platform_Init(const PlatformInitOptions *opts)
      * elsewhere — see present_frame_copy and docs/AMIGA_60.md. */
     {
         SDL_RendererInfo info;
-        if (SDL_GetRendererInfo(s_renderer, &info) == 0) {
+        if (s_gpu)
+            fprintf(stderr, "[render] driver=gpu (sokol) vsync: requested=%s actual=%s\n",
+                    vsync ? "on" : "off", s_vsync_enabled ? "on" : "off");
+        if (!s_gpu && SDL_GetRendererInfo(s_renderer, &info) == 0) {
             int got_vsync = (info.flags & SDL_RENDERER_PRESENTVSYNC) ? 1 : 0;
             /* Pass 1 renders into a texture. The software renderer and a few
              * exotic backends can't, so ask before relying on it rather than
@@ -983,7 +1070,10 @@ int Platform_Init(const PlatformInitOptions *opts)
     /* HUD layer + its conversion scratch. Allocation failure is not fatal:
      * Platform_HudLayerBuffer() then returns NULL and the HUD simply stays in
      * the main framebuffer, i.e. today's behaviour with a wobble. */
-    s_hud_layer = (uint8_t *)SDL_calloc(1, (size_t)_screen_width * PLATFORM_SCREEN_H);
+    /* (At the widest picture, as the textures and s_frame_rgba below: the width can grow
+     * after start-up -- the window moved to a wider display (main.c Video_DisplayChanged).
+     * Each is used at the current width, its strides and upload rects _screen_width.) */
+    s_hud_layer = (uint8_t *)SDL_calloc(1, (size_t)PITCH_VIEW_MAX_WIDTH * PLATFORM_SCREEN_H);
     if (!s_hud_layer)
         fprintf(stderr, "[render] HUD layer alloc failed — the HUD will ride the "
                         "sub-pixel shift (harmless, slightly jittery)\n");
@@ -1001,19 +1091,19 @@ int Platform_Init(const PlatformInitOptions *opts)
     SDL_EventState(SDL_MOUSEMOTION, SDL_DISABLE);
 
     s_tex_idx = 0;
-    for (int ti = 0; ti < PLATFORM_TEX_RING; ti++) {
+    for (int ti = 0; ti < PLATFORM_TEX_RING && !s_gpu; ti++) {
         s_textures[ti] = SDL_CreateTexture(
             s_renderer,
             SDL_PIXELFORMAT_ARGB8888,
             SDL_TEXTUREACCESS_STREAMING,
-            _screen_width, PLATFORM_TEX_H);
+            PITCH_VIEW_MAX_WIDTH, PLATFORM_TEX_H);
         if (!s_textures[ti]) {
             fprintf(stderr, "SDL_CreateTexture[%d]: %s\n", ti, SDL_GetError());
             return -1;
         }
         (void)0;
     }
-    s_frame_rgba = (uint32_t *)SDL_malloc((size_t)_screen_width * PLATFORM_TEX_H * 4);
+    s_frame_rgba = (uint32_t *)SDL_malloc((size_t)PITCH_VIEW_MAX_WIDTH * PLATFORM_TEX_H * 4);
     if (!s_frame_rgba) {
         fprintf(stderr, "frame buffer alloc failed (%d x %d)\n", _screen_width, PLATFORM_SCREEN_H);
         return -1;
@@ -1064,6 +1154,7 @@ int Platform_Init(const PlatformInitOptions *opts)
         }
     }
     s_present_stats = (getenv("SWOS_PRESENT_STATS") != NULL);
+    s_frame_skip    = (getenv("SWOS_FRAME_SKIP") != NULL);
     {
         const char *pc = getenv("SWOS_PRESENT_CAPTURE");
         const char *from = getenv("SWOS_PRESENT_CAPTURE_FROM");
@@ -1108,14 +1199,71 @@ void Platform_Shutdown(void)
         if (s_textures[ti]) { SDL_DestroyTexture(s_textures[ti]); s_textures[ti] = NULL; }
     if (s_scale_target) { SDL_DestroyTexture(s_scale_target); s_scale_target = NULL; s_scale_n = 0; }
     CrtEffects_Shutdown();
+    if (s_gpu) { GpuPresent_Shutdown(); s_gpu = 0; }
     if (s_frame_rgba) { SDL_free(s_frame_rgba); s_frame_rgba = NULL; }
     if (s_hud_layer)  { SDL_free(s_hud_layer);  s_hud_layer  = NULL; }
     if (s_renderer) { SDL_DestroyRenderer(s_renderer); s_renderer = NULL; }
     if (s_window)   { SDL_DestroyWindow(s_window);     s_window = NULL; }
 }
 
+/* Which display the window is on. It decides the picture's width and the refresh the pacing
+ * keys on, both taken at start-up -- a window moved to another monitor kept its first one's
+ * (a 16:10 laptop's picture on a 21:9 monitor, even fullscreen: a tester, macOS, 2026-10-31).
+ * Checked on every window event: SDL_WINDOWEVENT_DISPLAY_CHANGED where SDL has it (2.0.18+),
+ * a move or resize anywhere. */
+static void check_display(void)
+{
+#ifndef SWOS_WASM_BUILD
+    if (!s_window)
+        return;
+    const int d = SDL_GetWindowDisplayIndex(s_window);
+    if (d < 0 || d == s_display_index)
+        return;
+    const int first = s_display_index < 0;
+    s_display_index = d;
+    SDL_DisplayMode dm;
+    if (first || SDL_GetDesktopDisplayMode(d, &dm) != 0)
+        return;
+    fprintf(stderr, "[video] the window is on display %d now: %dx%d @%dHz\n", d, dm.w, dm.h, dm.refresh_rate);
+    if (dm.refresh_rate > 0)
+        s_display_hz = dm.refresh_rate;
+    {
+        extern void Video_DisplayChanged(int dw, int dh);
+        Video_DisplayChanged(dm.w, dm.h);
+    }
+#endif
+}
+
+/* Fullscreen, by SDL's flags or by the window covering its display. macOS's green button puts the
+ * window in a fullscreen Space without setting SDL's flags (SDL 2.30: only SDL_SetWindowFullscreen
+ * sets them), so a resize there "for the windowed size" shrank the window inside the Space: the
+ * picture top-left at its windowed size, black around it -- the first fullscreen after moving to
+ * another monitor, whose display change is seen as the Space opens (issue #5). */
+static int window_is_fullscreen(void)
+{
+    if (SDL_GetWindowFlags(s_window) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP))
+        return 1;
+#ifndef SWOS_WASM_BUILD
+    {
+        SDL_Rect b;
+        int w = 0, h = 0;
+        const int d = SDL_GetWindowDisplayIndex(s_window);
+        SDL_GetWindowSize(s_window, &w, &h);
+        if (d >= 0 && SDL_GetDisplayBounds(d, &b) == 0 && b.w > 0 && w >= b.w && h >= b.h)
+            return 1;
+    }
+#endif
+    return 0;
+}
+
 void Platform_ToggleFullscreen(void)
 {
+#ifdef SWOS_WASM_BUILD
+    /* The web: the page does Alt+Enter itself (wasm/shell.html), as its fullscreen button does --
+     * the canvas scaled by the page, never resized. SDL's own fullscreen resized the canvas to the
+     * screen and, leaving it, left SDL with the screen's size: a black picture (2026-11-08). */
+    return;
+#endif
     if (!s_window) return;
     Uint32 flags = SDL_GetWindowFlags(s_window);
     int currently_fullscreen =
@@ -1144,6 +1292,113 @@ void Platform_ToggleFullscreen(void)
     }
 }
 
+/* ---- SWOS 2020's VIDEO OPTIONS (SWOS 2020 port, agent A; src/settings_menus.c) ----
+ * WINDOW MODE: windowed, or one of the two fullscreens, now -- what Alt+Enter toggles between,
+ * picked by name. The kind of fullscreen is also what the next Alt+Enter goes to. */
+void Platform_SetFullscreenMode(PlatformFullscreenMode mode)
+{
+#ifdef SWOS_WASM_BUILD
+    (void)mode;
+    return;                             /* (the page owns fullscreen: Platform_ToggleFullscreen) */
+#else
+    if (!s_window)
+        return;
+    if (mode != PLATFORM_FULLSCREEN_NONE)
+        s_fullscreen_mode = mode;
+    if (mode == Platform_GetFullscreenMode())
+        return;
+    if (mode == PLATFORM_FULLSCREEN_NONE) {
+        Platform_ToggleFullscreen();    /* (back to the window's own size) */
+        return;
+    }
+    SDL_SetWindowFullscreen(s_window, mode == PLATFORM_FULLSCREEN_EXCLUSIVE ? SDL_WINDOW_FULLSCREEN
+                                                                            : SDL_WINDOW_FULLSCREEN_DESKTOP);
+    SDL_ShowCursor(SDL_DISABLE);
+#endif
+}
+
+/* The picture's pixel under the window's point wx, wy (the letterbox and the scaling undone,
+ * as SDL draws the picture): 0 when it is on the picture (menu_mouse.c). */
+int Platform_MouseToPicture(int wx, int wy, int *x, int *y)
+{
+    if (s_gpu) {        /* the window's point -> the drawable's -> the picture's (gpu_present.c) */
+        int ww = 0, wh = 0, dw = 0, dh = 0;
+        float px, py, pw, ph;
+        SDL_GetWindowSize(s_window, &ww, &wh);
+        GpuPresent_OutputSize(&dw, &dh);
+        GpuPresent_PictureRect(&px, &py, &pw, &ph);
+        if (ww <= 0 || wh <= 0 || pw <= 0.0f || ph <= 0.0f)
+            return -1;
+        const float fx = ((float)wx * dw / ww - px) / pw * _screen_width;
+        const float fy = ((float)wy * dh / wh - py) / ph * _screen_height;
+        *x = (int)SDL_floorf(fx);
+        *y = (int)SDL_floorf(fy);
+        return fx >= 0.0f && fy >= 0.0f && *x < _screen_width && *y < _screen_height ? 0 : -1;
+    }
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+    float lx, ly;
+    if (!s_renderer)
+        return -1;
+    SDL_RenderWindowToLogical(s_renderer, wx, wy, &lx, &ly);
+    *x = (int)lx;
+    *y = (int)ly;
+    return lx >= 0 && ly >= 0 && *x < _screen_width && *y < _screen_height ? 0 : -1;
+#else
+    (void)wx; (void)wy; (void)x; (void)y;
+    return -1;
+#endif
+}
+
+/* ---- launcher options (agent A) ----
+ * AUTO CENTERING (SWOS 2020's --auto-centering, controls.cpp setAutoCenteringWindow): a window
+ * resized, maximized or moved goes back to the middle of its display -- the one it is on now, so
+ * dragging it to another monitor centres it there. Windowed only; [video] auto_centering. */
+static int s_auto_center;
+static void auto_centre(Uint8 event);
+
+void Platform_SetAutoCentering(int on)
+{
+    s_auto_center = on != 0;
+    if (s_auto_center)
+        auto_centre(SDL_WINDOWEVENT_SIZE_CHANGED);
+}
+
+static void auto_centre(Uint8 event)
+{
+#if !defined(SWOS_WASM_BUILD) && !defined(SWOS_MOBILE_BUILD)
+    int d;
+    if (!s_auto_center || !s_window || window_is_fullscreen())
+        return;
+    if (event != SDL_WINDOWEVENT_SIZE_CHANGED && event != SDL_WINDOWEVENT_MAXIMIZED &&
+        event != SDL_WINDOWEVENT_MOVED)
+        return;
+    if (SDL_GetWindowFlags(s_window) & SDL_WINDOW_MAXIMIZED)
+        return;                         /* (a maximized window fills its display already) */
+    d = SDL_GetWindowDisplayIndex(s_window);
+    if (d < 0)
+        d = 0;
+    {
+        SDL_Rect r;
+        int w, h, x, y;
+        if (SDL_GetDisplayBounds(d, &r) != 0)     /* (what SDL_WINDOWPOS_CENTERED_DISPLAY centres in) */
+            return;
+        SDL_GetWindowSize(s_window, &w, &h);
+        SDL_GetWindowPosition(s_window, &x, &y);
+        if (x != r.x + (r.w - w) / 2 || y != r.y + (r.h - h) / 2)
+            SDL_SetWindowPosition(s_window, SDL_WINDOWPOS_CENTERED_DISPLAY(d), SDL_WINDOWPOS_CENTERED_DISPLAY(d));
+    }
+#else
+    (void)event;
+#endif
+}
+
+/* The mouse cursor over the window: shown in a menu while the mouse is used (menu_mouse.c). */
+void Platform_ShowMouseCursor(int on)
+{
+    if ((SDL_ShowCursor(SDL_QUERY) == SDL_ENABLE) != (on != 0))
+        SDL_ShowCursor(on ? SDL_ENABLE : SDL_DISABLE);
+}
+
 int Platform_GetWindowScale(void)
 {
     return s_win_scale_current;
@@ -1170,7 +1425,7 @@ PlatformFullscreenMode Platform_GetFullscreenMode(void)
 
 void Platform_ViewChanged(void)
 {
-    if (!s_renderer) return;
+    if (!s_renderer && !s_gpu) return;
     apply_picture_scaling();
 
     /* And the WINDOW follows the view, so the picture keeps its whole-pixel
@@ -1182,14 +1437,10 @@ void Platform_ViewChanged(void)
      *
      * Not when fullscreen (SDL letterboxes, which is right), and not when
      * [video] resolution pinned a client area -- that was asked for by name. */
-    if (!s_window || s_pinned_w > 0) return;
-    {
-        Uint32 flags = SDL_GetWindowFlags(s_window);
-        if (flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) return;
-        SDL_SetWindowSize(s_window,
-                          _screen_width  * s_win_scale_current,
-                          _screen_height * s_win_scale_current);
-    }
+    if (!s_window || s_pinned_w > 0 || window_is_fullscreen()) return;
+    SDL_SetWindowSize(s_window,
+                      _screen_width  * s_win_scale_current,
+                      _screen_height * s_win_scale_current);
 }
 
 void Platform_SetWindowScale(int scale)
@@ -1204,8 +1455,7 @@ void Platform_SetWindowScale(int scale)
     s_pinned_w = s_pinned_h = 0;
     /* Only resize when actually windowed — fullscreen ignores the size
      * (SDL_RenderSetLogicalSize handles letterboxing for us). */
-    Uint32 flags = SDL_GetWindowFlags(s_window);
-    if ((flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) == 0) {
+    if (!window_is_fullscreen()) {
         SDL_SetWindowSize(s_window,
             _screen_width * scale,
             _screen_height * scale);
@@ -1236,6 +1486,13 @@ uint8_t Platform_NearestColour(uint8_t r, uint8_t g, uint8_t b)
         }
     }
     return (uint8_t)best;
+}
+
+void Platform_PaletteColour(uint8_t index, uint8_t *r, uint8_t *g, uint8_t *b)
+{
+    *r = s_palette[index].r;
+    *g = s_palette[index].g;
+    *b = s_palette[index].b;
 }
 
 static void refresh_palette_from_copper(void)
@@ -1339,11 +1596,142 @@ static void refresh_palette_from_copper(void)
 #endif
 }
 
+/* The frame to show (see chunky_to_rgba): the GPU presenter takes it as it is. */
+/* The menus' true-colour backdrop (Platform_SetMenuBackdrop). For SDL's renderer, `s_bdSmall`
+ * is the image covering the game's own frame size, sampled once per size. */
+static const uint8_t *s_bd;
+static int            s_bdW, s_bdH;
+static uint32_t       s_bdSerial;
+static uint32_t      *s_bdSmall;
+static int            s_bdSmallW, s_bdSmallH;
+static uint32_t       s_bdSmallSerial;
+
+void Platform_SetMenuBackdrop(const uint8_t *rgba, int w, int h)
+{
+    if (rgba != s_bd || w != s_bdW || h != s_bdH)
+        s_bdSerial++;
+    s_bd = rgba && w > 0 && h > 0 ? rgba : NULL;
+    s_bdW = w;
+    s_bdH = h;
+}
+
+/* The backdrop shows: there is one, and the menus are up (in a match or a replay the key colour
+ * is anything). */
+static int backdrop_shown(void)
+{
+    extern int32_t ModApi_InMenus(void);
+    extern int _gArcadeMode;
+    return s_bd && !_gArcadeMode && ModApi_InMenus();
+}
+
+/* The backdrop at w x h, covering it (cropped to its aspect, centred): ARGB, for SDL's renderer. */
+static const uint32_t *backdrop_small(int w, int h)
+{
+    if (s_bdSmall && s_bdSmallW == w && s_bdSmallH == h && s_bdSmallSerial == s_bdSerial)
+        return s_bdSmall;
+    free(s_bdSmall);
+    s_bdSmall = (uint32_t *)malloc((size_t)w * h * 4);
+    if (!s_bdSmall)
+        return NULL;
+    {
+        /* (the frame's pixels are not square: it is shown at the window's aspect, so cover the
+         * picture's display aspect -- the logical size's -- not w : h) */
+        const float scale = SDL_max((float)w / (float)s_bdW, (float)h / (float)s_bdH);
+        const float cw = (float)w / scale, ch = (float)h / scale;
+        const float x0 = ((float)s_bdW - cw) / 2.0f, y0 = ((float)s_bdH - ch) / 2.0f;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                int sx = (int)(x0 + ((float)x + 0.5f) * cw / (float)w);
+                int sy = (int)(y0 + ((float)y + 0.5f) * ch / (float)h);
+                sx = sx < 0 ? 0 : sx >= s_bdW ? s_bdW - 1 : sx;
+                sy = sy < 0 ? 0 : sy >= s_bdH ? s_bdH - 1 : sy;
+                const uint8_t *p = s_bd + ((size_t)sy * s_bdW + sx) * 4;
+                s_bdSmall[(size_t)y * w + x] = 0xFF000000u | ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+            }
+    }
+    s_bdSmallW = w;
+    s_bdSmallH = h;
+    s_bdSmallSerial = s_bdSerial;
+    return s_bdSmall;
+}
+
+/* ---- launcher options (agent B): DISPLAY OPTIONS' menu opacity and pixel filter ----
+ * MENU OPACITY (SWOS 2020's --alpha-blending-menu, render.cpp updateMenuScreen*): in the menus the
+ * frame's coloured parts -- buttons, boxes -- are blended over the backdrop at that opacity, its
+ * text and frames left solid (SWOS 2020's colours 1, 2, 7, 9 and pure white). "The backdrop" is the
+ * one the menu was drawn on: the backgrounds mod's picture where there is one (the GPU presenter
+ * draws it under the frame and the palette's alpha does the rest), else the game's own backdrop
+ * from the mask buffer DrawMenu copies it from (here, on the CPU). Never in a match, a replay or
+ * the arcade.
+ * PIXEL FILTER (include/pixel_filter.h): the GPU presenter's frame made as ARGB on the CPU, through
+ * the filter, and handed over 2 or 3 times its size; the backdrop picture's pixels left clear so it
+ * is still drawn at the window's size under it. Not on SDL's renderer, and not with a slang preset.
+ * Neither reads or changes anything but the picture shown. */
+static int       s_menu_alpha = 255;    /* [video] menu_opacity as 0-255; 255 solid */
+static int       s_pixel_filter;        /* [video] pixel_filter: PIXEL_FILTER_* */
+static int       s_key_clear;           /* chunky_to_rgba: the backdrop picture's pixels clear */
+static uint32_t *s_filter_out;          /* the filtered frame */
+static size_t    s_filter_cap;
+
+void Platform_SetDisplayOptions(const PlatformInitOptions *o)
+{
+    int a = o->menu_opacity;
+    a = a < 0 ? 0 : a > 100 ? 100 : a;
+    s_menu_alpha = (a * 255 + 50) / 100;
+    s_pixel_filter = o->pixel_filter > 0 && o->pixel_filter < PIXEL_FILTER_COUNT ? o->pixel_filter : 0;
+    TeamColors_SetPurpleForMaroon(o->purple_for_brown);
+    _gImprovedPitchPalette = o->improved_pitch_palette ? 1 : 0;
+}
+
+/* The menus' opacity this frame, 0-255: 255 (solid) outside the menus. */
+static int menu_alpha_now(void)
+{
+    extern int32_t ModApi_InMenus(void);
+    extern int _gArcadeMode;
+    if (s_menu_alpha >= 255 || _gArcadeMode || !ModApi_InMenus())
+        return 255;
+    return s_menu_alpha;
+}
+
+/* A menu colour that stays solid at any opacity (SWOS 2020's: the text and the frames). */
+static int menu_solid(int idx)
+{
+    const SDL_Color c = s_palette[idx];
+    return idx == 1 || idx == 2 || idx == 7 || idx == 9 || (c.r == 255 && c.g == 255 && c.b == 255);
+}
+
+static uint32_t blend_argb(SDL_Color c, uint32_t under, int a)
+{
+    const int ur = (int)(under >> 16) & 255, ug = (int)(under >> 8) & 255, ub = (int)under & 255;
+    const int r = (c.r * a + ur * (255 - a) + 127) / 255;
+    const int g = (c.g * a + ug * (255 - a) + 127) / 255;
+    const int b = (c.b * a + ub * (255 - a) + 127) / 255;
+    return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+
+static const uint8_t *frame_source(void)
+{
+    if (_usePlaneOffsetFlag != 0)
+        return _frontbufferMaskBuffer;
+    if (_useAltBaseFlag != 0)
+        return (const uint8_t *)(uintptr_t)_frontbufferBasePtr;
+    return (const uint8_t *)(uintptr_t)_frontbufferBaseAltPtr;
+}
+
+/* The 8bpp frame this present shows (frame_source), FRONTBUFFER_ROW_STRIDE_BYTES a row: for a
+ * mod drawing over the picture from what it holds (ModDef frameDrawn). */
+const uint8_t *Platform_FrameShown(void)
+{
+    return frame_source();
+}
+
 /* ---- 8bpp chunky → RGBA ------------------------------------------- */
 /* The frontbuffer is now 1 byte per pixel (palette index). Each frame
  * we walk SCREEN_WIDTH x SCREEN_HEIGHT bytes and look each one up in
  * the current palette to write an ARGB8888 pixel into the streaming
  * SDL texture. Same shape as swos-port-c's `updateScreen`. */
+static const uint8_t *frame_source(void);
+
 static void chunky_to_rgba(uint32_t *dst, int dst_pitch_pixels)
 {
     /* Double-buffer semantics — read the *completed* frame, not the
@@ -1361,13 +1749,7 @@ static void chunky_to_rgba(uint32_t *dst, int dst_pitch_pixels)
      * pointer aliasing hid. `useAltBaseFlag` inverts this when the
      * game code wants to display the drawing target directly (used by
      * transient overlay paths). */
-    const uint8_t *fb;
-    if (_usePlaneOffsetFlag != 0)
-        fb = _frontbufferMaskBuffer;
-    else if (_useAltBaseFlag != 0)
-        fb = (const uint8_t *)(uintptr_t)_frontbufferBasePtr;
-    else
-        fb = (const uint8_t *)(uintptr_t)_frontbufferBaseAltPtr;
+    const uint8_t *fb = frame_source();
     if (!fb) return;
 
     /* Originally applied the Amiga copper Y offset:
@@ -1384,10 +1766,30 @@ static void chunky_to_rgba(uint32_t *dst, int dst_pitch_pixels)
      * irrelevant to the chunky frontbuffer. */
     (void)_cameraYMod320;
 
+    const uint32_t *bd = backdrop_shown() ? (s_key_clear ? NULL : backdrop_small(_screen_width, _screen_height)) : NULL;
+    const int keyed = backdrop_shown();
+    const int alpha = menu_alpha_now();     /* (launcher options, agent B: the menus' opacity) */
+    const uint8_t *under = alpha < 255 && fb != _frontbufferMaskBuffer ? _frontbufferMaskBuffer : NULL;
     for (int y = 0; y < _screen_height; ++y) {
         const uint8_t *line = fb + (size_t)y * FRONTBUFFER_ROW_STRIDE_BYTES;
+        const uint8_t *uline = under ? under + (size_t)y * FRONTBUFFER_ROW_STRIDE_BYTES : NULL;
         uint32_t      *out  = dst + (size_t)y * dst_pitch_pixels;
         for (int x = 0; x < _screen_width; ++x) {
+            if (keyed && line[x] == MENU_BACKDROP_KEY) {   /* the menus' true-colour backdrop */
+                out[x] = bd ? bd[(size_t)y * _screen_width + x] : 0u;    /* (s_key_clear: the GPU's) */
+                continue;
+            }
+            if (uline && uline[x] != line[x] && !menu_solid(line[x])) {
+                const SDL_Color mc = s_palette[line[x]];
+                if (keyed && uline[x] == MENU_BACKDROP_KEY)
+                    out[x] = bd ? blend_argb(mc, bd[(size_t)y * _screen_width + x], alpha)
+                                : ((uint32_t)alpha << 24) | ((uint32_t)mc.r << 16) | ((uint32_t)mc.g << 8) | mc.b;
+                else {
+                    const SDL_Color uc = s_palette[uline[x]];
+                    out[x] = blend_argb(mc, 0xFF000000u | ((uint32_t)uc.r << 16) | ((uint32_t)uc.g << 8) | uc.b, alpha);
+                }
+                continue;
+            }
             SDL_Color c = s_palette[line[x]];
             out[x] = ((uint32_t)0xFFu << 24) |
                      ((uint32_t)c.r  << 16) |
@@ -1443,6 +1845,48 @@ static void write_screenshot(const uint32_t *argb)
     free(rgba);
 }
 
+/* ---- SWOS 2020's in-match volume keys and their two seconds on screen ---- */
+static uint32_t s_volume_shown;         /* SDL_GetTicks() when a key changed one, 0 none */
+
+void Platform_VolumeKey(int key)
+{
+    extern PlatformInitOptions *g_arcadeOpts;
+    extern const char *g_arcadeIniPath;
+    extern void AudioSDL_SetKindVolumes(int music, int chants, int commentary, int effects);
+    PlatformInitOptions *o = g_arcadeOpts;
+    if (!o)
+        return;
+    int *v = key < 2 ? &o->vol_chants : key < 4 ? &o->vol_commentary : &o->vol_effects;
+    *v += (key & 1) ? 5 : -5;
+    *v = *v < 0 ? 0 : *v > 100 ? 100 : *v;
+    AudioSDL_SetKindVolumes(o->vol_music, o->vol_chants, o->vol_commentary, o->vol_effects);
+    s_volume_shown = SDL_GetTicks() | 1u;
+    if (g_arcadeIniPath)
+        Settings_Save(o, g_arcadeIniPath);
+}
+
+/* The volumes over the match (showClockScoresAndOthers: three lines at the top left). From the
+ * match's frame, after its sprites. */
+void Platform_DrawVolumes(void)
+{
+    extern void *_charTables[];
+    extern PlatformInitOptions *g_arcadeOpts;
+    char buf[48];
+    if (!s_volume_shown || !g_arcadeOpts)
+        return;
+    if (SDL_GetTicks() - s_volume_shown > 2000) {
+        s_volume_shown = 0;
+        return;
+    }
+    const PlatformInitOptions *o = g_arcadeOpts;
+    snprintf(buf, sizeof buf, "   CHANTS VOLUME : %d%%", o->vol_chants);
+    DrawMenuText(4, 30, 2, (uint8_t *)buf, (uint8_t *)_charTables[0]);
+    snprintf(buf, sizeof buf, "   COMMENTARY VOLUME : %d%%", o->vol_commentary);
+    DrawMenuText(4, 41, 2, (uint8_t *)buf, (uint8_t *)_charTables[0]);
+    snprintf(buf, sizeof buf, "   BALL AND WHISTLE VOLUME : %d%%", o->vol_effects);
+    DrawMenuText(4, 52, 2, (uint8_t *)buf, (uint8_t *)_charTables[0]);
+}
+
 /* Capture what is actually PRESENTED — not what was drawn into the framebuffer.
  *
  * write_screenshot() reads `fb`, which is UPSTREAM of present_frame_copy, so it
@@ -1465,14 +1909,19 @@ static void capture_presented_frame(void)
     mod = 0;
 
     int ow = 0, oh = 0;
-    if (SDL_GetRendererOutputSize(s_renderer, &ow, &oh) != 0 || ow <= 0 || oh <= 0)
+    if (s_gpu)
+        GpuPresent_OutputSize(&ow, &oh);
+    else if (SDL_GetRendererOutputSize(s_renderer, &ow, &oh) != 0)
+        return;
+    if (ow <= 0 || oh <= 0)
         return;
 
     /* ABGR8888 is 0xAABBGGRR, i.e. R,G,B,A byte order on a little-endian host —
      * exactly what stb_image_write wants, so no conversion pass. */
     uint8_t *px = (uint8_t *)malloc((size_t)ow * oh * 4);
     if (!px) return;
-    if (SDL_RenderReadPixels(s_renderer, NULL, SDL_PIXELFORMAT_ABGR8888, px, ow * 4) == 0) {
+    if (s_gpu ? GpuPresent_ReadPixels(px, ow, oh) == 0
+              : SDL_RenderReadPixels(s_renderer, NULL, SDL_PIXELFORMAT_ABGR8888, px, ow * 4) == 0) {
         char path[64];
         snprintf(path, sizeof path, "swos_present%03d.png", count++);
         if (stbi_write_png(path, ow, oh, 4, px, ow * 4))
@@ -1528,11 +1977,41 @@ static void maybe_dump_frame(const uint32_t *argb)
  * call from multiple threads: the queue is internally locked, events
  * are consumed by whichever pump grabs them first, and Platform_RequestQuit
  * is safe from any thread. */
+#ifdef SWOS_MOBILE_BUILD
+/* The phones' on-screen controls (src/touch_controls.c): an event, with the output's size. */
+extern void TouchControls_HandleEvent(const SDL_Event *e, int w, int h);
+extern void TouchControls_Draw(void);
+static void touch_event(const SDL_Event *e)
+{
+    int w = 0, h = 0;
+    Gfx_OutputSize(&w, &h);
+    TouchControls_HandleEvent(e, w, h);
+}
+#endif
+
 static void pump_events_any_thread(void)
 {
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
+        /* An online match's chat: TAB, F3, the quick keys, and everything typed into an open
+         * line -- the game never sees those (src/match_chat.c). */
+        if ((ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP || ev.type == SDL_TEXTINPUT ||
+             ev.type == SDL_TEXTEDITING) && MatchChat_Event(&ev))
+            continue;
         switch (ev.type) {
+        case SDL_DROPFILE:
+#ifdef SWOS_IOS_BUILD
+            /* iOS hands a URL the app was opened with (OpenSWOS Setup's Wi-Fi copy) over as a
+             * dropped file, whenever its run loop gets to it -- often before the start-up's
+             * data check looks: kept here, or this pump threw it away (src/mobile.c). */
+            { extern void Mobile_LinkDropped(const char *link); Mobile_LinkDropped(ev.drop.file); }
+#endif
+            SDL_free(ev.drop.file);
+            break;
+        case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEWHEEL:
+            { extern void MenuMouse_Event(const SDL_Event *e); MenuMouse_Event(&ev); }
+            break;
         case SDL_QUIT:
             Platform_RequestQuit();
             /* Hide the window immediately so the main-menu unwind
@@ -1548,6 +2027,8 @@ static void pump_events_any_thread(void)
             AudioSDL_PauseAndClear();
             break;
         case SDL_WINDOWEVENT:
+            check_display();                /* (another monitor: its shape, its refresh) */
+            auto_centre(ev.window.event);   /* ([video] auto_centering) */
             if (ev.window.event == SDL_WINDOWEVENT_CLOSE) {
                 Platform_RequestQuit();
                 if (s_window) SDL_HideWindow(s_window);
@@ -1562,6 +2043,10 @@ static void pump_events_any_thread(void)
                  * highlighted menu entry. Drop everything; new presses
                  * after focus returns will repopulate via KEYDOWN. */
                 InputSDL_ClearKeyState();
+#ifdef SWOS_MOBILE_BUILD
+                /* (and a finger whose lift went to a message box or the system) */
+                { extern void TouchControls_ReleaseAll(void); TouchControls_ReleaseAll(); }
+#endif
             } else if (ev.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
                 /* Defence-in-depth: also clear on regain in case any
                  * KEYDOWN slipped in between FOCUS_LOST and the actual
@@ -1576,7 +2061,14 @@ static void pump_events_any_thread(void)
             if (ev.key.repeat == 0 && ev.key.keysym.sym == SDLK_ESCAPE) {
                 extern volatile uintptr_t _currentMenuPtr;
                 extern uint8_t _swosMainMenu[];
-                if (_currentMenuPtr == (uintptr_t)_swosMainMenu) {
+                extern volatile uint16_t _playGame, _playHighlightFlag;
+                extern int32_t GameLoop_Active(void);
+                /* A match a mod plays from a main-menu entry (MODES, a challenge, the
+                 * practice) runs inside the menu's callback, so the pointer still names
+                 * the main menu all through it: ESC must reach the match (and its
+                 * loading and exit) there (the5ar, af534dca). */
+                if (_currentMenuPtr == (uintptr_t)_swosMainMenu &&
+                    !_playGame && !_playHighlightFlag && !GameLoop_Active()) {
                     Platform_RequestQuit();
                     if (s_window) SDL_HideWindow(s_window);
                     AudioSDL_PauseAndClear();
@@ -1600,24 +2092,58 @@ static void pump_events_any_thread(void)
                 Platform_ToggleFullscreen();
                 continue;
             }
+            /* SWOS 2020's volume keys in a match: Shift+1 / 2 the crowd chants down / up, 3 / 4
+             * the commentary, 5 / 6 the ball and whistle; shown for two seconds, kept in
+             * SWOS.ini ([audio] *_volume). */
+            if (ev.key.repeat == 0 && !_gTextInputActive && (ev.key.keysym.mod & KMOD_SHIFT) &&
+                ev.key.keysym.sym >= SDLK_1 && ev.key.keysym.sym <= SDLK_6) {
+                extern int32_t ModApi_InMatch(void);
+                if (ModApi_InMatch()) {
+                    Platform_VolumeKey((int)(ev.key.keysym.sym - SDLK_1));
+                    continue;
+                }
+            }
+            /* A recording being viewed: its controls (src/replay_v2.c, the viewer's: P, I,
+             * the arrows, Home, End, PgUp, PgDn), before the game's own pause. */
+            if (ev.key.repeat == 0 && !_gTextInputActive) {
+                extern int32_t ReplayV2_ViewerKey(int32_t key);
+                if (ReplayV2_ViewerKey((int32_t)ev.key.keysym.sym))
+                    continue;
+            }
+            /* A key for a mod during a match (ModDef.matchKey: SWOS 2020's training drills,
+             * F1-F12, ALT, 9, 0, - and =), before the game's and the window's own. */
+            if (ev.key.repeat == 0 && !_gTextInputActive) {
+                extern int32_t ModApi_InMatch(void);
+                extern int32_t ModHooks_MatchKey(const char *key);
+                if (ModApi_InMatch() && ModHooks_MatchKey(SDL_GetKeyName(ev.key.keysym.sym)))
+                    continue;
+            }
             /* +/- keys: cycle the windowed scale 1..4. Both the typing-
              * row keys and the keypad ones work. SDLK_EQUALS is the
              * same physical key as SDLK_PLUS on most layouts (US),
              * so we accept either. Swallowed so they don't reach the
              * menu/game layer. No-op while fullscreen (the runtime
-             * scaler ignores the size change). */
-            if (ev.key.repeat == 0 &&
+             * scaler ignores the size change). Not while a name is being
+             * typed: '-' is a letter there. */
+            if (ev.key.repeat == 0 && !_gTextInputActive &&
                 (ev.key.keysym.sym == SDLK_EQUALS ||
                  ev.key.keysym.sym == SDLK_PLUS   ||
                  ev.key.keysym.sym == SDLK_KP_PLUS)) {
                 Platform_SetWindowScale(s_win_scale_current + 1);
                 continue;
             }
-            if (ev.key.repeat == 0 &&
+            if (ev.key.repeat == 0 && !_gTextInputActive &&
                 (ev.key.keysym.sym == SDLK_MINUS ||
                  ev.key.keysym.sym == SDLK_KP_MINUS)) {
                 Platform_SetWindowScale(s_win_scale_current - 1);
                 continue;
+            }
+            /* A mod's hotkey (ModApi_AddHotkey): only keys the game leaves alone, never
+             * while a name is being typed. */
+            if (ev.key.repeat == 0 && !_gTextInputActive) {
+                extern int32_t ModApi_Hotkey(int32_t key, int32_t mods);
+                if (ModApi_Hotkey((int32_t)ev.key.keysym.sym, (int32_t)ev.key.keysym.mod))
+                    continue;
             }
             /* Arcade cabinet inputs (MAME convention): 5 = coin P1, 6 = coin P2,
              * F2 = service, 1 = P1 start, 2 = P2 start. Only when arcade mode is
@@ -1635,6 +2161,7 @@ static void pump_events_any_thread(void)
             }
             /* fallthrough */
         case SDL_KEYUP:
+        case SDL_TEXTINPUT:             /* (a password's characters: InputSDL_RawText) */
         case SDL_CONTROLLERBUTTONDOWN:
         case SDL_CONTROLLERBUTTONUP:
         case SDL_CONTROLLERAXISMOTION:
@@ -1642,12 +2169,27 @@ static void pump_events_any_thread(void)
         case SDL_CONTROLLERDEVICEREMOVED:
         case SDL_JOYDEVICEADDED:
         case SDL_JOYDEVICEREMOVED:
+#ifdef SWOS_MOBILE_BUILD
+            if (ev.type == SDL_CONTROLLERBUTTONDOWN)
+                touch_event(&ev);           /* (a controller played: the on-screen controls go) */
+#endif
             InputSDL_HandleEvent(&ev);
             break;
+#ifdef SWOS_MOBILE_BUILD
+        case SDL_FINGERDOWN:
+        case SDL_FINGERMOTION:
+        case SDL_FINGERUP:
+            touch_event(&ev);
+            break;
+        case SDL_APP_WILLENTERBACKGROUND:   /* (the app sent away: no lift comes for a held finger) */
+            { extern void TouchControls_ReleaseAll(void); TouchControls_ReleaseAll(); }
+            break;
+#endif
         default:
             break;
         }
     }
+    MatchChat_Tick();                   /* (the repeats of a chat line just sent) */
     InputSDL_PostFrame();
 }
 
@@ -1975,6 +2517,179 @@ static void screenshot_frame_release(uint32_t *shot, uint32_t *fb)
     if (shot != fb) SDL_free(shot);
 }
 
+/* What goes over the picture, on either presenter (gfx.h). */
+static void draw_overlays(void)
+{
+    /* The built-in mods' drawing over the frame (src/mod_hooks.c: the weather), before the
+     * CRT effects so the grille and the glass sit on top of it too. */
+    ModHooks_FrameDrawn();
+    /* CRT effects go on LAST, over the finished frame and its HUD, so the
+     * grille and the glass edge sit on the picture rather than under it. */
+    CrtEffects_Apply();
+    MatchChat_Draw();                /* (an online match's chat: over the CRT, to be read) */
+    { extern void FpsOverlay_Draw(void); FpsOverlay_Draw(); }   /* ([video] show_fps: src/fps_overlay.c) */
+    { extern void OnlineMenus_DrawOverlay(void); OnlineMenus_DrawOverlay(); }   /* (the lobby's chat) */
+    { extern void CreditsMenu_DrawOverlay(void); CreditsMenu_DrawOverlay(); }   /* (FULL CREDITS' scrolling text) */
+#ifdef SWOS_MOBILE_BUILD
+    TouchControls_Draw();            /* (the phones' on-screen controls, over everything) */
+#endif
+}
+
+static void frame_captures(uint32_t *fb, int pump_full);
+static int frame_captures_wanted(int pump_full);
+
+/* The GPU presenter's frame (gpu_present.c): the 8bpp frame and the HUD layer go up as they are,
+ * the shader colours and scales them. RGBA is made on the CPU only when something needs it: the
+ * arcade's screens and overlay, and the captures. */
+static void render_frame_gpu(int pump_full)
+{
+    SDL_LockMutex(s_render_mtx);
+    refresh_palette_from_copper();
+
+    GpuFrame f;
+    SDL_memset(&f, 0, sizeof f);
+    f.w = _screen_width;
+    f.h = _screen_height;
+    f.palette = s_palette;
+
+    extern int _gArcadeMode;
+    uint32_t *fb = NULL;
+    /* (launcher options, agent B) a pixel filter, or the menus' opacity over the game's own
+     * backdrop: the frame made on the CPU. Not with a slang preset (a filter of its own). */
+    const int slang = GpuSlang_Active();
+    const int filter = slang ? 0 : s_pixel_filter;
+    const int menuAlpha = menu_alpha_now();
+    const int cpuAlpha = menuAlpha < 255 && !slang && !backdrop_shown();
+    if (_gArcadeMode || frame_captures_wanted(pump_full) || filter || cpuAlpha) {
+        fb = s_frame_rgba;
+        int arcade_full = 0;
+        if (_gArcadeMode) {
+            extern int Arcade_RenderFullScreen(uint32_t *, int, int, int);
+            arcade_full = Arcade_RenderFullScreen(fb, _screen_width, _screen_width, _screen_height);
+        }
+        if (!arcade_full) {
+            chunky_to_rgba(fb, _screen_width);
+            if (_gArcadeMode) {
+                extern void Arcade_CompositeOverlay(uint32_t *, int, int, int);
+                Arcade_CompositeOverlay(fb, _screen_width, _screen_width, _screen_height);
+            }
+        }
+        frame_captures(fb, pump_full);
+        if (_gArcadeMode || filter || cpuAlpha)
+            f.argb = fb;
+        if (filter && !arcade_full && !_gArcadeMode && backdrop_shown()) {
+            s_key_clear = 1;            /* (the picture drawn by the GPU, under the filtered frame) */
+            chunky_to_rgba(fb, _screen_width);
+            s_key_clear = 0;
+        }
+    }
+    if (filter && f.argb) {
+        const int k = PixelFilter_Factor(filter);
+        const size_t need = (size_t)_screen_width * k * _screen_height * k;
+        if (need > s_filter_cap) {
+            free(s_filter_out);
+            s_filter_out = (uint32_t *)malloc(need * 4);
+            s_filter_cap = s_filter_out ? need : 0;
+        }
+        if (s_filter_out) {
+            PixelFilter_Run(filter, f.argb, _screen_width, _screen_height, _screen_width, s_filter_out);
+            f.argb = s_filter_out;
+            f.argbScale = k;
+        }
+    }
+    {   /* the menus' opacity over a backdrop picture: the palette's alpha (the shader blends) */
+        static uint8_t alphas[256];
+        if (menuAlpha < 255 && backdrop_shown()) {
+            for (int i = 0; i < 256; i++)
+                alphas[i] = menu_solid(i) ? 255 : (uint8_t)menuAlpha;
+            f.paletteAlpha = alphas;
+        }
+    }
+    if (!f.argb) {
+        f.index = frame_source();
+        f.indexPitch = FRONTBUFFER_ROW_STRIDE_BYTES;
+    }
+    if (hud_layer_pending()) {
+        f.hud = s_hud_layer;
+        f.hudPitch = _screen_width;
+    }
+    if (!s_subpixel_scroll || !Render_ScrollSubpixel(&f.fracX, &f.fracY))
+        f.fracX = f.fracY = 0;
+    f.subpixel = s_subpixel_scroll;
+    f.smooth = s_scaling_smooth;
+    f.stretch = s_stretch;
+    if ((f.index || (f.argb && f.argbScale > 1)) && backdrop_shown()) {
+        f.backdrop = s_bd;
+        f.backdropW = s_bdW;
+        f.backdropH = s_bdH;
+        f.backdropKey = MENU_BACKDROP_KEY;
+        f.backdropSerial = s_bdSerial;
+    }
+
+    if ((f.index || f.argb) && GpuPresent_Begin(&f, NULL)) {
+        Gfx_BeginFrame();
+        draw_overlays();
+        Gfx_EndFrame();
+        capture_presented_frame();
+        GpuPresent_End();
+    }
+    SDL_UnlockMutex(s_render_mtx);
+}
+
+/* The frame's screenshots and dumps (F12, SWOS_DUMP_FRAMES, SWOS_SCREENSHOT_INTERVAL), from the
+ * RGBA frame `fb`. Only the main-thread render (pump_full) writes the F12 shot; the timer-thread
+ * fallback would race the draw. */
+static int frame_captures_wanted(int pump_full)
+{
+    return s_dump_frames || (pump_full && s_screenshot_request) || s_screenshot_interval > 0;
+}
+
+static void frame_captures(uint32_t *fb, int pump_full)
+{
+    /* Screenshots read the packed RAM buffer directly (always the right stride now,
+     * so the old pitch-mismatch skip is gone). Only write the F12 shot from the
+     * main-thread render (pump_full); the timer-thread fallback would race the draw. */
+    if (s_dump_frames) {
+        uint32_t *shot = screenshot_frame_with_hud(fb);
+        maybe_dump_frame(shot);
+        screenshot_frame_release(shot, fb);
+    }
+    if (pump_full && s_screenshot_request) {
+        uint32_t *shot = screenshot_frame_with_hud(fb);
+        write_screenshot(shot);
+        screenshot_frame_release(shot, fb);
+        s_screenshot_request = 0;
+    }
+    if (s_screenshot_interval > 0) {
+        static int frame_mod, presented, from = -1, cap = 200;
+        /* SWOS_SCREENSHOT_FROM=N: start the interval shots at the N-th present, so the
+         * 200 of them can cover one moment of a long replay (docs/NETPLAY_GHOSTING.md).
+         * SWOS_SCREENSHOT_MAX=N raises the 200, e.g. to film a whole highlight. */
+        if (from < 0) {
+            const char *v = getenv("SWOS_SCREENSHOT_FROM");
+            from = (v && v[0]) ? atoi(v) : 0;
+            v = getenv("SWOS_SCREENSHOT_MAX");
+            if (v && atoi(v) > 0) cap = atoi(v);
+        }
+        if (++presented < from)
+            return;
+        if (++frame_mod >= s_screenshot_interval) {
+            frame_mod = 0;
+            if (s_screenshot_auto_count < cap) {
+                uint32_t *shot = screenshot_frame_with_hud(fb);
+                write_screenshot(shot);
+                screenshot_frame_release(shot, fb);
+                s_screenshot_auto_count++;
+            } else if (s_screenshot_auto_count == cap) {
+                fprintf(stderr,
+                    "[screenshot] interval mode hit the %d-shot cap; disabling\n", cap);
+                s_screenshot_interval = 0;
+                s_screenshot_auto_count++;
+            }
+        }
+    }
+}
+
 static void render_frame_impl(int pump_full)
 {
     /* SDL_PollEvent -> SDL_PumpEvents pulls from the OS window message queue, which on
@@ -1999,7 +2714,13 @@ static void render_frame_impl(int pump_full)
     AudioSDL_Tick();
 #endif
 
+    if (s_gpu) {
+        if (pump_full && s_frame_skip_now) return;
+        render_frame_gpu(pump_full);
+        return;
+    }
     if (!s_renderer || !s_textures[0]) return;
+    if (pump_full && s_frame_skip_now) return;
 
     SDL_LockMutex(s_render_mtx);
 
@@ -2032,49 +2753,7 @@ static void render_frame_impl(int pump_full)
               Arcade_CompositeOverlay(fb, fbpx, _screen_width, _screen_height); }
     }
 
-    /* Screenshots read the packed RAM buffer directly (always the right stride now,
-     * so the old pitch-mismatch skip is gone). Only write the F12 shot from the
-     * main-thread render (pump_full); the timer-thread fallback would race the draw. */
-    if (s_dump_frames) {
-        uint32_t *shot = screenshot_frame_with_hud(fb);
-        maybe_dump_frame(shot);
-        screenshot_frame_release(shot, fb);
-    }
-    if (pump_full && s_screenshot_request) {
-        uint32_t *shot = screenshot_frame_with_hud(fb);
-        write_screenshot(shot);
-        screenshot_frame_release(shot, fb);
-        s_screenshot_request = 0;
-    }
-    if (s_screenshot_interval > 0) {
-        static int frame_mod, presented, from = -1, cap = 200;
-        /* SWOS_SCREENSHOT_FROM=N: start the interval shots at the N-th present, so the
-         * 200 of them can cover one moment of a long replay (docs/NETPLAY_GHOSTING.md).
-         * SWOS_SCREENSHOT_MAX=N raises the 200, e.g. to film a whole highlight. */
-        if (from < 0) {
-            const char *v = getenv("SWOS_SCREENSHOT_FROM");
-            from = (v && v[0]) ? atoi(v) : 0;
-            v = getenv("SWOS_SCREENSHOT_MAX");
-            if (v && atoi(v) > 0) cap = atoi(v);
-        }
-        if (++presented < from)
-            goto shots_done;
-        if (++frame_mod >= s_screenshot_interval) {
-            frame_mod = 0;
-            if (s_screenshot_auto_count < cap) {
-                uint32_t *shot = screenshot_frame_with_hud(fb);
-                write_screenshot(shot);
-                screenshot_frame_release(shot, fb);
-                s_screenshot_auto_count++;
-            } else if (s_screenshot_auto_count == cap) {
-                fprintf(stderr,
-                    "[screenshot] interval mode hit the %d-shot cap; disabling\n", cap);
-                s_screenshot_interval = 0;
-                s_screenshot_auto_count++;
-            }
-        }
-    }
-shots_done:
+    frame_captures(fb, pump_full);
 
     /* Compose the HUD overlay into the scratch strip of the SAME buffer, then
      * hand frame + overlay to the GPU in ONE bulk upload from cached RAM. The
@@ -2107,9 +2786,11 @@ shots_done:
     } else {
         present_frame_copy(tex);
     }
-    /* CRT effects go on LAST, over the finished frame and its HUD, so the
-     * grille and the glass edge sit on the picture rather than under it. */
-    CrtEffects_Apply(s_renderer);
+    /* The built-in mods' drawing over the frame (src/mod_hooks.c: the weather), before the
+     * CRT effects so the grille and the glass sit on top of it too. */
+    Gfx_BeginFrame();
+    draw_overlays();
+    Gfx_EndFrame();
     capture_presented_frame();     /* after every draw, before the swap */
     SDL_RenderPresent(s_renderer);
 
@@ -2137,7 +2818,7 @@ void Platform_SetFrameHook(void (*hook)(void))
  * keyboard: pair it with SWOS_PRESENT_CAPTURE to see what the keys did. Frame counts
  * depend on load times, so leave generous gaps. */
 enum { kKeyScriptMax = 128 };
-static struct { uint32_t frame; SDL_Keycode key; } s_key_script[kKeyScriptMax];
+static struct { uint32_t frame; SDL_Keycode key; char text[32]; } s_key_script[kKeyScriptMax];
 static int      s_key_script_len = -1;      /* -1 = not read yet */
 static uint32_t s_key_script_frame;
 
@@ -2169,8 +2850,17 @@ static void key_script_tick(void)
             if (sscanf(spec, "%u:%31[^ ,]%n", &frame, name, &used) != 2 || used == 0)
                 break;
             s_key_script[s_key_script_len].frame = frame;
-            s_key_script[s_key_script_len].key   = SDL_GetKeyFromName(name);
-            if (s_key_script[s_key_script_len].key == SDLK_UNKNOWN)
+            s_key_script[s_key_script_len].text[0] = '\0';
+            if (strncmp(name, "text=", 5) == 0) {
+                /* typed text (SDL_TEXTINPUT), '_' for a space: the chat (match_chat.c) */
+                char *t = s_key_script[s_key_script_len].text;
+                snprintf(t, sizeof s_key_script[0].text, "%s", name + 5);
+                for (; *t; t++)
+                    if (*t == '_')
+                        *t = ' ';
+                s_key_script[s_key_script_len].key = SDLK_UNKNOWN;
+                s_key_script_len++;
+            } else if ((s_key_script[s_key_script_len].key = SDL_GetKeyFromName(name)) == SDLK_UNKNOWN)
                 fprintf(stderr, "[keys] SWOS_KEY_SCRIPT: unknown key '%s'\n", name);
             else
                 s_key_script_len++;
@@ -2182,6 +2872,18 @@ static void key_script_tick(void)
     if (s_key_script_len == 0)
         return;
     for (int i = 0; i < s_key_script_len; i++) {
+        if (s_key_script[i].text[0]) {
+            if (s_key_script[i].frame == s_key_script_frame) {
+                SDL_Event ev;
+                memset(&ev, 0, sizeof ev);
+                ev.type = SDL_TEXTINPUT;
+                snprintf(ev.text.text, sizeof ev.text.text, "%s", s_key_script[i].text);
+                SDL_PushEvent(&ev);
+                fprintf(stderr, "[keys] frame %u: text \"%s\"\n", (unsigned)s_key_script_frame,
+                        s_key_script[i].text);
+            }
+            continue;
+        }
         if (s_key_script[i].frame == s_key_script_frame) {
             push_key(s_key_script[i].key, 1);
             fprintf(stderr, "[keys] frame %u: %s\n", (unsigned)s_key_script_frame,
@@ -2209,18 +2911,6 @@ int Platform_VBlank(void)
 /* Platform_DelayNextFrame's wait, for the browser's own pacing (Platform_Present). */
 static double s_wasm_extra_ms;
 #endif
-
-/* Catch-up after a stall. Offline the limiter drops a backlog of more than one frame:
- * a burst of frames after a hitch only looks worse. A LIVE match sets it to its
- * prediction window (netplay_match.c) and back to 1 when it ends, on thd79's
- * advice: there a game that stalled and then dropped the frames comes back BEHIND,
- * and it is the OTHER player who pays -- held at the prediction limit through the
- * stall, then slowed by time sync until the two are level. Catching up on as many
- * frames as the other game can be ahead puts the cost on the player who stalled. */
-void Platform_SetCatchUpFrames(int frames)
-{
-    s_catchup_frames = frames < 1 ? 1 : frames;
-}
 
 void Platform_DelayNextFrame(uint32_t us)
 {
@@ -2267,10 +2957,22 @@ static void present_interval_stats(void)
                             "(%d Hz): %d long (>1.5x), %d short (<0.5x) of %d\n",
                     (double)s_sum / s_n * ms, (double)s_min * ms, (double)s_max * ms,
                     period * ms, Platform_ActivePacingFps(), s_long, s_short, s_n);
+            if (s_frame_skip)
+                fprintf(stderr, "[present] frame skip: %d of %d not shown\n",
+                        s_frames_skipped, s_n);
+            s_frames_skipped = 0;
             s_sum = s_max = 0; s_n = s_long = s_short = 0;
         }
     }
     s_last = now;
+}
+
+/* Has this frame already missed its deadline? s_next_frame_perf is still the last
+ * frame's, so the frame's own is one period on. */
+static int frame_is_late(void)
+{
+    Uint64 period = (Uint64)s_perf_freq / (Uint64)Platform_ActivePacingFps();
+    return s_next_frame_perf && SDL_GetPerformanceCounter() > s_next_frame_perf + period;
 }
 
 int Platform_Present(void)
@@ -2285,6 +2987,8 @@ int Platform_Present(void)
     key_script_tick();
     if (s_present_stats)
         present_interval_stats();
+    s_frame_skip_now = s_frame_skip && !s_frame_skip_now && frame_is_late();
+    s_frames_skipped += s_frame_skip_now;
     Platform_RenderFrame();
 
 #ifdef SWOS_WASM_BUILD
@@ -2312,8 +3016,7 @@ int Platform_Present(void)
         double sleep_ms = s_frame_deadline - now;
         if (sleep_ms < 1.0) {                 /* work overran the frame budget */
             sleep_ms = 1.0;                   /* still yield so the browser paints + polls input */
-            /* Drop the backlog -- beyond a live match's catch-up (Platform_SetCatchUpFrames),
-             * which runs back to back, as the native limiter does. */
+            /* Drop the backlog past one frame (s_catchup_frames), as the native limiter does. */
             if (now - s_frame_deadline > period * (s_catchup_frames - 1))
                 s_frame_deadline = now + period - period * (s_catchup_frames - 1);
         } else if (sleep_ms > period) {       /* first frame / clock jumped back */
@@ -2384,6 +3087,7 @@ int Platform_Present(void)
     if (s_vsync_enabled && s_display_hz > 0 &&
         s_display_hz == Platform_ActivePacingFps()) {
         s_next_frame_perf = SDL_GetPerformanceCounter();
+        pump_events_any_thread();       /* (after the present's own wait: see below) */
         return _quitToDos ? 1 : 0;
     }
 
@@ -2395,10 +3099,10 @@ int Platform_Present(void)
 
     {
     const Sint64 frame_perf = (Sint64)((double)s_perf_freq * k_frame_secs);
-    if ((Sint64)(now - s_next_frame_perf) > frame_perf * s_catchup_frames) {
-        /* Further behind than we catch up on (one frame, or a live match's prediction
-         * window: Platform_SetCatchUpFrames) — drop the rest, and run what is left
-         * back to back. */
+    /* Skipping is how the frames catch up, so they must be allowed to fall behind. */
+    if ((Sint64)(now - s_next_frame_perf) > frame_perf * (s_frame_skip ? 3 : s_catchup_frames)) {
+        /* Further behind than we catch up on (s_catchup_frames: one frame) — drop the
+         * rest, and run what is left back to back. */
         s_next_frame_perf = now - (Uint64)(frame_perf * (s_catchup_frames - 1));
     } else {
         /* Sleep almost-to-deadline, leaving a 2 ms margin for the spin. */
@@ -2417,10 +3121,108 @@ int Platform_Present(void)
     }
     }
 
+    /* The controls read as late as they can be: the frame's own pump ran before the
+     * present and the wait above (most of the 20 ms), so a press during the wait was
+     * seen only after the NEXT frame -- a frame of input lag the Amiga never had: it reads
+     * the joystick's register (JOY0DAT/JOY1DAT, Player1/2StatusProc) when the frame runs,
+     * after its VBlank wait, so a frame sees the stick as it is then (ReportBot 0051:
+     * ~40 ms more than a plain SDL game, by a 240 fps camera). Pumped again here, the
+     * frame about to run reads what was pressed up to now. */
+    pump_events_any_thread();
     return _quitToDos ? 1 : 0;
 }
 
 Uint64 Platform_NowMs(void)
 {
     return SDL_GetTicks64();
+}
+
+/* A bar across the screen, `permille`/1000 full: the phones' Wi-Fi copy of the game's data
+ * (src/mobile.c, src/phone_fetch.c), drawn before there are any of the game's graphics. */
+void Platform_ShowProgress(int permille)
+{
+    if (permille < 0) permille = 0;
+    if (permille > 1000) permille = 1000;
+    if (s_gpu) {
+        SDL_PumpEvents();
+        static const uint8_t bg[3] = { 13, 17, 23 };
+        if (!GpuPresent_Begin(NULL, bg))
+            return;
+        Gfx_BeginFrame();
+        Gfx_SetSpace(GFX_SPACE_OUTPUT);
+        int w = 0, h = 0;
+        Gfx_SpaceSize(&w, &h);
+        SDL_FRect frame = { (float)(w / 8), (float)(h / 2 - h / 32), (float)(w * 3 / 4), (float)(h / 16) };
+        if (frame.h < 4.0f) frame.h = 4.0f;
+        Gfx_FillRect(&frame, (SDL_Color){ 48, 54, 61, 255 });
+        SDL_FRect bar = frame;
+        bar.w = (float)((int64_t)(int)frame.w * permille / 1000);
+        Gfx_FillRect(&bar, (SDL_Color){ 59, 130, 246, 255 });
+        Gfx_EndFrame();
+        GpuPresent_End();
+        return;
+    }
+    if (!s_renderer)
+        return;
+    SDL_PumpEvents();
+    int w = 0, h = 0;
+    SDL_RenderGetLogicalSize(s_renderer, &w, &h);
+    if (w <= 0 || h <= 0)
+        SDL_GetRendererOutputSize(s_renderer, &w, &h);
+    SDL_SetRenderTarget(s_renderer, NULL);
+    SDL_SetRenderDrawColor(s_renderer, 13, 17, 23, 255);
+    SDL_RenderClear(s_renderer);
+    SDL_Rect frame = { w / 8, h / 2 - h / 32, w * 3 / 4, h / 16 };
+    if (frame.h < 4) frame.h = 4;
+    SDL_SetRenderDrawColor(s_renderer, 48, 54, 61, 255);
+    SDL_RenderFillRect(s_renderer, &frame);
+    SDL_Rect bar = { frame.x, frame.y, (int)((int64_t)frame.w * (permille < 0 ? 0 : permille > 1000 ? 1000 : permille) / 1000), frame.h };
+    SDL_SetRenderDrawColor(s_renderer, 59, 130, 246, 255);
+    SDL_RenderFillRect(s_renderer, &bar);
+    SDL_RenderPresent(s_renderer);
+}
+
+#ifdef __CYGWIN__
+#include <dlfcn.h>
+#endif
+
+/* SDL_OpenURL, except in the Windows (Cygwin) build: Cygwin's SDL runs xdg-open, which a Windows
+ * machine does not have, so every link button did nothing there -- ShellExecute instead (from
+ * SWOS United). */
+int Platform_OpenUrl(const char *url)
+{
+    if (!url || !url[0])
+        return -1;
+#ifdef __CYGWIN__
+    {
+        /* ShellExecuteA from shell32.dll, found at run time: no windows.h, no new import. */
+        typedef void *(*ShellExecuteAFn)(void *, const char *, const char *, const char *, const char *, int);
+        static ShellExecuteAFn fn;
+        if (!fn) {
+            void *lib = dlopen("shell32.dll", RTLD_LAZY);
+            if (lib)
+                fn = (ShellExecuteAFn)dlsym(lib, "ShellExecuteA");
+        }
+        if (fn && (intptr_t)fn(NULL, "open", url, NULL, NULL, 1 /* SW_SHOWNORMAL */) > 32)
+            return 0;
+        fprintf(stderr, "[url] could not open %s\n", url);
+        return -1;
+    }
+#else
+    if (SDL_OpenURL(url) != 0) {
+        fprintf(stderr, "[url] could not open %s: %s\n", url, SDL_GetError());
+        return -1;
+    }
+    return 0;
+#endif
+}
+
+/* One colour of the palette the screen is drawn in (true colour drawn over the picture -- a
+ * mod's, the lobby's flags -- picks the game's own colours by index). */
+void Platform_PaletteRgb(int index, uint8_t *r, uint8_t *g, uint8_t *b)
+{
+    const SDL_Color c = s_palette[index & 255];
+    *r = c.r;
+    *g = c.g;
+    *b = c.b;
 }

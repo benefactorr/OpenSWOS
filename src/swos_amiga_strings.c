@@ -465,12 +465,40 @@ char _aMenuMusic[] = "MENU MUSIC";
 char _aGameplay[] = "GAMEPLAY";
 char _aAmigaStyle[] = "AMIGA";
 char _aDosStyle[] = "DOS";
+char _aXboxStyle[] = "XBOX";
+char _aAmiga60Style[] = "AMIGA 60";     /* SWOS 2020's AMIGA (60FPS) */
+char _aMoonStyle[] = "MOON";            /* SWOS 2020's MOON SOCCER */
 /* OPTIONS -> CONTROLS: the player's own keys (SDL; src/controls_menu.c). */
 char _aControls[] = "CONTROLS";
 char _aRedefineKeys[] = "REDEFINE KEYS";
 /* OPTIONS -> PITCHES: DOS / 2020, which pitches the AGA Amiga draws (pitch.c). */
 char _aPitches[] = "PITCHES";
+/* OPTIONS -> WORLD (menus.c ChangeWorld): its label and its two values. */
+char _aWorldOption[] = "WORLD";
+char _aWorld9697[] = "96/97";
+char _aWorld2627[] = "2026-27";
 char _a2020Style[] = "2020";
+/* OPTIONS -> MODS (menus.c ShowModsMenu, src/mods_menu.c): its label, and its value with none on
+ * (the SDL build writes how many are on over it, OptionsMenuBeforeDraw). */
+char _aModsOption[] = "MODS";
+char _aModes[] = "MODES";
+char _aTeamPacks[] = "TEAM PACKS";
+char _aModRow[] = "";      /* a mod's row (MODPOINT): its label set when shown, mod_entries.c */
+char _aNextPage[] = "NEXT PAGE";   /* JOB OFFERS with more than one page (job_offers_capacity) */
+char _aModsNone[] = "NONE";
+/* OPTIONS -> LANGUAGE (menus.c ChangeLanguage): its label, and each language in its own words --
+ * so a player finds theirs whatever the menus are in. The C and N with their marks are bytes of
+ * the game's Latin-1 charset (the font extension's glyphs, docs/FONTS.md). */
+char _aLanguageOption[] = "LANGUAGE";
+/* OPTIONS -> SETUP (menus.c LaunchSetupSelected): its label and its button. */
+char _aSetupOption[] = "SETUP";
+char _aLaunchSetup[] = "LAUNCH";
+char _aLangEnglish[] = "ENGLISH";
+char _aLangGerman[] = "DEUTSCH";
+char _aLangFrench[] = "FRAN\307AIS";      /* FRANCAIS, its C with the cedilla (0xC7) */
+char _aLangSpanish[] = "ESPA\321OL";       /* ESPANOL, its N with the tilde (0xD1) */
+char _aLangItalian[] = "ITALIANO";
+char _aLangDutch[] = "NEDERLANDS";
 char _aGoals[] = "GOALS";
 char _aForm[] = "FORM";
 char _aLge[] = "LGE";

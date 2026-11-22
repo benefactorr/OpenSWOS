@@ -8,21 +8,18 @@
  * Chunk 65: 7 exported + 12 static functions ported from SWOS2.s.
  */
 
-#include "swos_national_trace.h"
 #include "career_eurocups.h"
-#include "comp_identity.h"
 #include "game_types.h"
 #include "diy_competition.h"
 #include "endian_helpers.h"
 #include "career_status.h"
 #include "career_teams.h"
 #include "panic.h"
-/* Detailed checkpoints for the season-end club European cup crash.
- * Diagnostic only, writes no game state. */
+#include "league_phase.h"
+#include "uefa_coef.h"
+#include "world_conti.h"
+#include "world.h"
 #include <stdio.h>
-#define EURO_TRACE(...) do { FILE *f = fopen("swos_euro_cup_crash.log", "a"); \
-    if (f) { fprintf(f, __VA_ARGS__); fputc('\n', f); fclose(f); } } while (0)
-
 
 /* ---- ASM externs (globals defined in assembly) ---- */
 extern DIYCompetitionEx _diyCompetitionStart;
@@ -278,14 +275,41 @@ static void qualifyTeamsForUefaCup(void)
  * Group B: Exported qualification entry point
  * ================================================================ */
 
+/* ---- A world's league phases (include/league_phase.h): every country's top 9 and cup winner
+ * go to the UEFA qualifying rounds (src/uefa_coef.c, the SWOS 96/97 Mod's uefaq), which fill
+ * the three lists; the holders join after (Career_DrawEuropeanCupTeamsAndCopyGrids). ---- */
+
+static int32_t worldLeaguePhases(void)
+{
+    const uint8_t (*places)[4];
+    int32_t n;
+    return World_LeaguePhaseCups(&places, &n) != 0;
+}
+
+/* The qualifying rounds' lists (uefa_coef.c): a club into cup 0..2's list and the TMD pool. */
+void Career_AppendTeamToEuroCupListN(int32_t cup, TeamFileEx *record)
+{
+    if (cup == 0)
+        appendTeamToEuroCupList((uint8_t *)record);
+    else if (cup == 1)
+        appendTeamToCupWinnersCupList((uint8_t *)record);
+    else
+        appendTeamToUefaCupList((uint8_t *)record);
+}
+
 __attribute__((used, externally_visible))
 void Career_ProcessCompetitionForEuropeanCupQualification(void)
 {
+    Conti_Country();        /* (a world's other confederations' cups: every country's table, conti_season.c) */
     /* countriesTable is uint32_t[] (pointer table); index by competition ID */
     uint16_t idx = (uint8_t)_currentCompetitionIndex;
     uint8_t *countryPtr = (uint8_t *)_countriesTable[idx];
     if (*countryPtr != 0)
         return; /* not European (first byte != 0) → skip */
+    if (worldLeaguePhases()) {     /* (its top 9 and cup winner: the qualifying rounds, uefa_coef.c) */
+        UefaQual_Country();
+        return;
+    }
     qualifyTeamForEuroCup();
     qualifyTeamForCupWinnersCup();
     qualifyTeamsForUefaCup();
@@ -466,6 +490,19 @@ static void reloadEuroCupTeamSelectionFromRestoredField(void)
         (uint16_t)_diyCompetitionStart.base.numTeams);
 }
 
+/* The same for a world's league phase (type 2, its 36 in the tournament's list): a loaded
+ * career's selection holds its league only, and the slot's update validates every club of the
+ * contest (VerifyTeamLoaded panic on the first club of another country). */
+extern DIYTournamentState _diyFileBufferCopy;
+static void reloadLeaguePhaseSelection(void)
+{
+    _numSelectedTeams = 0;
+    AppendTeamsToSelectionFromTmdOrTeamFile(
+        (uint16_t *)_diyFileBufferCopy.teamIds,
+        (uint16_t *)_diyFileBufferCopy.teamIds,
+        (uint16_t)_diyFileBufferCopy.header.numTeams);
+}
+
 /* Career_UpdateEuroCupCompetitionSlot (SWOS2.s line 31764)
  * If euroCupCopy is the active quaternary competition, edit it interactively;
  * otherwise auto-advance it as a league competition and copy the grid. */
@@ -481,27 +518,20 @@ void Career_UpdateEuroCupCompetitionSlot(void)
      * resurfaces here, the root cause is a STALE quaternaryCompetitionPtr, not
      * this branch — fix THAT, don't re-gate. See
      * project_eurocup_national_backup_clobber. */
-    EURO_TRACE("CHAMPIONS ENTER active=%u ptr=%p qptr=%p", (unsigned)(a4 == _quaternaryCompetitionPtr), (void *)a4, (void *)_quaternaryCompetitionPtr);
     if (a4 == _quaternaryCompetitionPtr) {
-        EURO_TRACE("CHAMPIONS ACTIVE restore begin");
         RestoreSelectedTeams();
-        EURO_TRACE("CHAMPIONS ACTIVE restore end");
         Career_CopyEuroCupsCompetitionContextToOrFromActive();
-        EURO_TRACE("CHAMPIONS MENU begin");
+        if (worldLeaguePhases())
+            reloadLeaguePhaseSelection();
         DIY_EditCompetitionSlot(1, 1, 0);
-        EURO_TRACE("CHAMPIONS MENU end");
-        EURO_TRACE("CHAMPIONS GRID begin");
         Career_CopyEuroCupTeamGridAndTitleHolder();
-        EURO_TRACE("CHAMPIONS GRID end");
+        if (worldLeaguePhases())
+            RestoreSelectedTeams();     /* (the backup stays the league's, as the cup path below) */
         SaveSelectedTeams();
     } else {
-        EURO_TRACE("CHAMPIONS AUTO begin");
         Career_AutoAdvanceLeagueCompetitionFromRecord(a4);
-        EURO_TRACE("CHAMPIONS AUTO end");
-        EURO_TRACE("CHAMPIONS GRID begin");
         Career_CopyEuroCupTeamGridAndTitleHolder();
-        EURO_TRACE("CHAMPIONS GRID end");
-    }    EURO_TRACE("CHAMPIONS EXIT");
+    }
 }
 
 /* Career_UpdateCupWinnersCupCompetitionSlot (SWOS2.s line 31792)
@@ -510,19 +540,27 @@ __attribute__((used, externally_visible))
 void Career_UpdateCupWinnersCupCompetitionSlot(void)
 {
     uint8_t *a4 = _cupWinnersCupCopy;
-    EURO_TRACE("CWC ENTER active=%u ptr=%p qptr=%p", (unsigned)(a4 == _quaternaryCompetitionPtr), (void *)a4, (void *)_quaternaryCompetitionPtr);
+    if (a4[1] == 2) {               /* (a world's league phase: a type-2 contest, as the Champions Cup) */
+        if (a4 == _quaternaryCompetitionPtr) {
+            RestoreSelectedTeams();
+            Career_CopyEuroCupsCompetitionContextToOrFromActive();
+            reloadLeaguePhaseSelection();
+            DIY_EditCompetitionSlot(1, 1, 0);
+            Career_CopyCupWinnersCupTeamGridAndTitleHolder();
+            RestoreSelectedTeams();
+            SaveSelectedTeams();
+        } else {
+            Career_AutoAdvanceLeagueCompetitionFromRecord(a4);
+            Career_CopyCupWinnersCupTeamGridAndTitleHolder();
+        }
+        return;
+    }
     if (a4 == _quaternaryCompetitionPtr) {
-        EURO_TRACE("CWC ACTIVE restore begin");
         RestoreSelectedTeams();
-        EURO_TRACE("CWC ACTIVE restore end");
         Career_CopyEuroCupsCompetitionContextToOrFromActive();
         reloadEuroCupTeamSelectionFromRestoredField();
-        EURO_TRACE("CWC MENU begin");
         ShowDIYCupMenuWithParams(1, 1, 0);
-        EURO_TRACE("CWC MENU end");
-        EURO_TRACE("CWC GRID begin");
         Career_CopyCupWinnersCupTeamGridAndTitleHolder();
-        EURO_TRACE("CWC GRID end");
         /* reloadEuroCupTeamSelectionFromRestoredField overwrote selTeamsPtr with
          * the cup field (needed by the menu's cache build + the title-grid copy
          * above), but it did NOT touch the shared savedTeamsBackupBuffer — which
@@ -536,13 +574,9 @@ void Career_UpdateCupWinnersCupCompetitionSlot(void)
         RestoreSelectedTeams();
         SaveSelectedTeams();
     } else {
-        EURO_TRACE("CWC AUTO begin");
         Career_AutoAdvanceCupCompetitionFromRecord(a4);
-        EURO_TRACE("CWC AUTO end");
-        EURO_TRACE("CWC GRID begin");
         Career_CopyCupWinnersCupTeamGridAndTitleHolder();
-        EURO_TRACE("CWC GRID end");
-    }    EURO_TRACE("CWC EXIT");
+    }
 }
 
 /* Career_UpdateUefaCupCompetitionSlot (SWOS2.s line 31820)
@@ -551,19 +585,27 @@ __attribute__((used, externally_visible))
 void Career_UpdateUefaCupCompetitionSlot(void)
 {
     uint8_t *a4 = _uefaCupCopy;
-    EURO_TRACE("UEFA ENTER active=%u ptr=%p qptr=%p", (unsigned)(a4 == _quaternaryCompetitionPtr), (void *)a4, (void *)_quaternaryCompetitionPtr);
+    if (a4[1] == 2) {               /* (a world's league phase: a type-2 contest, as the Champions Cup) */
+        if (a4 == _quaternaryCompetitionPtr) {
+            RestoreSelectedTeams();
+            Career_CopyEuroCupsCompetitionContextToOrFromActive();
+            reloadLeaguePhaseSelection();
+            DIY_EditCompetitionSlot(1, 1, 0);
+            Career_CopyUefaCupTeamGridAndTitleHolder();
+            RestoreSelectedTeams();
+            SaveSelectedTeams();
+        } else {
+            Career_AutoAdvanceLeagueCompetitionFromRecord(a4);
+            Career_CopyUefaCupTeamGridAndTitleHolder();
+        }
+        return;
+    }
     if (a4 == _quaternaryCompetitionPtr) {
-        EURO_TRACE("UEFA ACTIVE restore begin");
         RestoreSelectedTeams();
-        EURO_TRACE("UEFA ACTIVE restore end");
         Career_CopyEuroCupsCompetitionContextToOrFromActive();
         reloadEuroCupTeamSelectionFromRestoredField();
-        EURO_TRACE("UEFA MENU begin");
         ShowDIYCupMenuWithParams(1, 1, 0);
-        EURO_TRACE("UEFA MENU end");
-        EURO_TRACE("UEFA GRID begin");
         Career_CopyUefaCupTeamGridAndTitleHolder();
-        EURO_TRACE("UEFA GRID end");
         /* Restore the league selection into selTeamsPtr before saving — see the
          * Cup Winners' Cup update above for the full rationale (the reload left
          * the cup field in selTeamsPtr; the shared backup still holds the league
@@ -571,13 +613,9 @@ void Career_UpdateUefaCupCompetitionSlot(void)
         RestoreSelectedTeams();
         SaveSelectedTeams();
     } else {
-        EURO_TRACE("UEFA AUTO begin");
         Career_AutoAdvanceCupCompetitionFromRecord(a4);
-        EURO_TRACE("UEFA AUTO end");
-        EURO_TRACE("UEFA GRID begin");
         Career_CopyUefaCupTeamGridAndTitleHolder();
-        EURO_TRACE("UEFA GRID end");
-    }    EURO_TRACE("UEFA EXIT");
+    }
 }
 
 /* ---- Chunk 183: European Cup Team Draw ---- */
@@ -624,10 +662,10 @@ static void drawRandomTeamFromPoolAndCopyGrid(uint16_t titleHolder,
             continue;
 
         if (_teamNoOfferAccepted != 0xFFFF) {
-            if (selectedCountry == (uint8_t)(_teamNoOfferAccepted >> 8))
+            if (selectedCountry == World_FileCountry((uint8_t)(_teamNoOfferAccepted >> 8)))
                 continue;
         } else {
-            if (selectedCountry == (uint8_t)(_selTeamNumber >> 8))
+            if (selectedCountry == World_FileCountry((uint8_t)(_selTeamNumber >> 8)))   /* (include/world.h) */
                 continue;
         }
         break;
@@ -652,6 +690,15 @@ static void drawRandomTeamFromPoolAndCopyGrid(uint16_t titleHolder,
 __attribute__((used, externally_visible))
 void Career_DrawEuropeanCupTeamsAndCopyGrids(void)
 {
+    if (worldLeaguePhases()) {      /* (a world's league phases: the holders join, none is swapped) */
+        if (_euroCupTitleHolderTeamId != 0xFFFF)
+            appendTeamToEuroCupList(_euroCupTitleHolderGrid);
+        if (_cupWinnersCupTitleHolderTeamId != 0xFFFF)
+            appendTeamToEuroCupList(_cupWinnersCupTitleHolderGrid);
+        if (_uefaCupTitleHolderTeamId != 0xFFFF && !UefaQual_KeepsUeclHolder())
+            appendTeamToCupWinnersCupList(_uefaCupTitleHolderGrid);     /* (unless it won its league) */
+        return;
+    }
     drawRandomTeamFromPoolAndCopyGrid(
         _euroCupTitleHolderTeamId, _euroCupTitleHolderGrid,
         (uint16_t *)_euroCupTeamListPtr, _euroCupQualifiedTeamCount);
@@ -703,141 +750,266 @@ extern void DIY_BuildQualifiedTeamListFromSortedTable(uint16_t count, uint8_t *o
 extern void DIY_BuildQualifiedTeamListFromDiyFileBuffer(uint16_t count, uint8_t *out);
 extern void Career_AutoAdvanceInternationalCompetitionFixtures(uint8_t *record, uint16_t index);
 
-/* Career_UpdateEuropeanChampionshipCompetitionSlot (SWOS2.s line 31555)
- * in: competition record, count of teams to qualify, output list ptr.
- * If active competition, edit interactively; else auto-advance. */
-static void updateECSlot(uint8_t *competition, uint16_t count, uint8_t *out)
+/* EURO finals: collect one unique host and fifteen unique qualifiers before
+ * committing anything to the 16-team tournament seed list. The original
+ * direct-write path could select the host twice (or repeat a qualifier),
+ * allowing the tournament draw and career fixture list to disagree. */
+static int ecSeedContains(const uint16_t *seeds, unsigned used, uint16_t id)
 {
-    SWOS_NationalTrace("EC_QUAL_GROUP", "comp=%u type=%d qualifiers=%u active=%u",
-        (unsigned)comp_id(competition), (int)((Competition *)competition)->type,
-        (unsigned)count, (unsigned)(competition == _currentCompetitionPtr));
-    if (competition == _currentCompetitionPtr) {
+    for (unsigned i = 0; i < used; ++i)
+        if (seeds[i] == id) return 1;
+    return 0;
+}
+
+static void ecSeedLog(const char *event, unsigned group, unsigned rank,
+                      uint16_t id)
+{
+#ifdef SWOS_SDL_BUILD
+    FILE *log = fopen("swos_euro_draw_validation.log", "a");
+    if (log) {
+        fprintf(log, "%s group=%u rank=%u team=%04X\n",
+                event, group, rank, (unsigned)id);
+        fclose(log);
+    }
+#else
+    (void)event; (void)group; (void)rank; (void)id;
+#endif
+}
+
+/* This is the same advance path as the original EURO qualifier, except that
+ * we first read ALL available ranked teams into a temporary aligned buffer.
+ * If a team is already in the final (usually the host), the next ranked
+ * eligible team from that SAME group takes the qualifying slot. */
+static int ecCollectGroup(uint8_t *competition, unsigned group,
+                          unsigned places, uint16_t seeds[16], unsigned *used)
+{
+    uint16_t ranked[32] = { 0 };
+    unsigned available, accepted = 0;
+    int active = competition == _currentCompetitionPtr;
+
+    if (active) {
         RestoreSelectedTeams();
         Career_CopyCompetitionFileBufferToOrFromActive();
         ShowDiyLeaguesTournamentMenu(1, 1, 0);
-        DIY_BuildQualifiedTeamListFromSortedTable(count, out);
-        SaveSelectedTeams();
     } else {
         Career_AutoAdvanceInternationalCompetitionFixtures(competition, 0);
-        DIY_BuildQualifiedTeamListFromSortedTable(count, out);
     }
+
+    available = (unsigned)_diyCompetitionStart.base.numTeams;
+    if (available > 32u) available = 32u;
+    if (available < places) {
+        ecSeedLog("INSUFFICIENT_GROUP", group, available, 0);
+        if (active) SaveSelectedTeams();
+        return 0;
+    }
+    DIY_BuildQualifiedTeamListFromSortedTable((uint16_t)available,
+                                               (uint8_t *)ranked);
+    if (active) SaveSelectedTeams();
+
+    for (unsigned i = 0; i < available && accepted < places; ++i) {
+        uint16_t id = BE_READ_U16((const uint8_t *)&ranked[i]);
+        /* European national-team ID, packed as country 0x50 and ordinal. */
+        if ((id >> 8) != 0x50u) {
+            ecSeedLog("INVALID_NATION", group, i, id);
+            continue;
+        }
+        if (ecSeedContains(seeds, *used, id)) {
+            ecSeedLog("SKIP_DUPLICATE", group, i, id);
+            continue;
+        }
+        seeds[(*used)++] = id;
+        ++accepted;
+    }
+    if (accepted != places) {
+        ecSeedLog("NO_UNUSED_QUALIFIER", group, accepted, 0);
+        return 0;
+    }
+    return 1;
 }
 
-/* Career_UpdateEuropeanChampionshipCompetitions (SWOS2.s line 31524) */
+/* Career_UpdateEuropeanChampionshipCompetitions (SWOS2.s line 31524).
+ * Validate the entire 16-team draw before writing to the permanent copy.
+ * Keep the existing valid seed list rather than committing partial results
+ * if a qualifier record cannot supply the required number of countries. */
 __attribute__((used, externally_visible))
 void Career_UpdateEuropeanChampionshipCompetitions(void)
 {
-    SWOS_NationalTrace("EC_UPDATE_CHECK", "selected=%04X flags=%02X active=%u",
-        (unsigned)_selTeamNumber, (unsigned)_someTeamFlags,
-        (unsigned)((_someTeamFlags & 0x01) != 0));
-    if (!(_someTeamFlags & 0x01))
+    if (!(_someTeamFlags & 0x01)) return;
+
+    uint16_t seeds[16] = { 0 };
+    unsigned used = 1;
+    seeds[0] = _euroChampionshipQualTeam;
+    if ((seeds[0] >> 8) != 0x50u) {
+        ecSeedLog("INVALID_HOST", 0, 0, seeds[0]);
         return;
+    }
 
-    uint8_t *a5 = _europeanChampionships2Copy;
-    /* qualifier list = the cup *Copy's embedded teamSeedList. comp_team_seed_list
-     * handles base+7+offset and the 64-bit name[2] pointer-growth delta — without
-     * it the writes would land in name[1] and corrupt the comp name pointer
-     * (SIGSEGV when the season list is drawn). */
-    a5 = (uint8_t *)comp_team_seed_list((Competition *)a5);
-    /* Asm `move.w euroChampionshipQualTeam,(a5)+` writes BE on m68k.
-     * Use BE_WRITE_U16 so the destination byte order matches the rest
-     * of europeanChampionships2Copy.unk1 (BE-packed `{country, ordinal}`
-     * per the 295c9f3 convention). */
-    BE_WRITE_U16(a5, _euroChampionshipQualTeam);
-    a5 += 2;
+    int ok = 1;
+    ok &= ecCollectGroup(_ecQualifyingGroup1Copy, 1, 2, seeds, &used);
+    ok &= ecCollectGroup(_ecQualifyingGroup2Copy, 2, 2, seeds, &used);
+    ok &= ecCollectGroup(_ecQualifyingGroup3Copy, 3, 2, seeds, &used);
+    ok &= ecCollectGroup(_ecQualifyingGroup4Copy, 4, 2, seeds, &used);
+    ok &= ecCollectGroup(_ecQualifyingGroup5Copy, 5, 2, seeds, &used);
+    ok &= ecCollectGroup(_ecQualifyingGroup6Copy, 6, 2, seeds, &used);
+    ok &= ecCollectGroup(_ecQualifyingGroup7Copy, 7, 2, seeds, &used);
+    ok &= ecCollectGroup(_ecQualifyingGroup8Copy, 8, 1, seeds, &used);
+    if (!ok || used != 16u) {
+        ecSeedLog("DRAW_REJECTED", 0, used, 0);
+        return;
+    }
 
-    /* Asm uses `(a5)+` inside DIY_BuildQualifiedTeamListFromSortedTable_EC,
-     * advancing a5 by `count * 2` bytes across each slot call. The m68k
-     * register is shared between caller and callee; in C we have to
-     * advance the caller's pointer explicitly after each call. Without
-     * this, all 8 group calls overwrite the same first slots and entries
-     * past index 2 stay stale. */
-    updateECSlot(_ecQualifyingGroup1Copy, 2, a5); a5 += 2 * 2;
-    updateECSlot(_ecQualifyingGroup2Copy, 2, a5); a5 += 2 * 2;
-    updateECSlot(_ecQualifyingGroup3Copy, 2, a5); a5 += 2 * 2;
-    updateECSlot(_ecQualifyingGroup4Copy, 2, a5); a5 += 2 * 2;
-    updateECSlot(_ecQualifyingGroup5Copy, 2, a5); a5 += 2 * 2;
-    updateECSlot(_ecQualifyingGroup6Copy, 2, a5); a5 += 2 * 2;
-    updateECSlot(_ecQualifyingGroup7Copy, 2, a5); a5 += 2 * 2;
-    updateECSlot(_ecQualifyingGroup8Copy, 1, a5);
+    uint8_t *out = (uint8_t *)comp_team_seed_list(
+        (Competition *)_europeanChampionships2Copy);
+    if (!out) {
+        ecSeedLog("NO_SEED_LIST", 0, used, 0);
+        return;
+    }
+    for (unsigned i = 0; i < 16u; ++i)
+        BE_WRITE_U16(out + 2u * i, seeds[i]);
+    ecSeedLog("DRAW_COMMITTED_16_UNIQUE", 0, used, 0);
 }
 
-/* Career_UpdateWorldCupCompetitionSlot (SWOS2.s line 31638)
- * More complex: handles type 0 (league), type 2 (cup), and error cases. */
-static void updateWCSlot(uint8_t *competition, uint16_t count, uint8_t *out)
+/* Assemble World Cup seed entries transactionally. A team which also
+ * qualified through a region (notably the host) must not enter twice. */
+static int wcSeedContains(const uint16_t *seeds, unsigned used, uint16_t id)
 {
-    SWOS_NationalTrace("WC_QUAL_GROUP", "comp=%u type=%d qualifiers=%u active=%u",
-        (unsigned)comp_id(competition), (int)((Competition *)competition)->type,
-        (unsigned)count, (unsigned)(competition == _currentCompetitionPtr));
-    int8_t compType = ((Competition *)competition)->type;
+    for (unsigned j = 0; j < used; ++j)
+        if (seeds[j] == id)
+            return 1;
+    return 0;
+}
+
+static void wcSeedLog(const char *event, unsigned region, unsigned rank,
+                      uint16_t id)
+{
+    FILE *f = fopen("swos_worldcup_draw_validation.log", "a");
+    if (!f) return;
+    fprintf(f, "%s region=%u rank=%u team=%04X\n", event,
+            region, rank, (unsigned)id);
+    fclose(f);
+}
+
+/* The original qualification helpers return host-native uint16 team IDs,
+ * not the BE byte pairs stored in the competition seed list. Query as many
+ * ranked candidates as the actual runtime field contains, capped at 32,
+ * and encode the final seed list with BE_WRITE_U16. */
+static int wcCollectRegion(uint8_t *competition, unsigned region,
+                           unsigned places, uint16_t *seeds, unsigned *used)
+{
+    uint16_t ranked[32] = { 0 };
+    unsigned available;
+    unsigned accepted = 0;
+    int8_t type = ((Competition *)competition)->type;
+
     if (competition == _currentCompetitionPtr) {
         RestoreSelectedTeams();
-        if (compType == 2) {
-            Career_CopyCompetitionFileBufferToOrFromActive();
+        Career_CopyCompetitionFileBufferToOrFromActive();
+        if (type == 2) {
             DIY_EditCompetitionSlot(1, 1, 0);
-            DIY_BuildQualifiedTeamListFromDiyFileBuffer(count, out);
-            SaveSelectedTeams();
-        } else if (compType == 0) {
-            Career_CopyCompetitionFileBufferToOrFromActive();
+        } else if (type == 0) {
             ShowDiyLeaguesTournamentMenu(1, 1, 0);
-            DIY_BuildQualifiedTeamListFromSortedTable(count, out);
-            SaveSelectedTeams();
         } else {
-            _panicReasonCode = 0x1991;
-            PanicHaltLoop();
+            SaveSelectedTeams();
+            wcSeedLog("INVALID_TYPE", region, 0, (uint16_t)type);
+            return 0;
         }
     } else {
-        if (compType == 2) {
+        if (type == 2)
             Career_AutoAdvanceLeagueCompetitionFromRecord(competition);
-            DIY_BuildQualifiedTeamListFromDiyFileBuffer(count, out);
-        } else if (compType == 0) {
+        else if (type == 0)
             Career_AutoAdvanceInternationalCompetitionFixtures(competition, 0);
-            DIY_BuildQualifiedTeamListFromSortedTable(count, out);
-        } else {
-            _panicReasonCode = 0x1992;
-            PanicHaltLoop();
+        else {
+            wcSeedLog("INVALID_TYPE", region, 0, (uint16_t)type);
+            return 0;
         }
     }
+
+    /* Both extraction helpers work on the active DIY buffers. The cup
+     * helper may refresh its bracket, so its runtime team count must be
+     * read after the qualification competition has been advanced. */
+    if (type == 2) {
+        available = (unsigned)_diyFileBufferCopy.header.numTeams;
+    } else {
+        available = (unsigned)_diyCompetitionStart.base.numTeams;
+    }
+    if (available > 32) available = 32;
+    if (available < places) {
+        wcSeedLog("INSUFFICIENT_FIELD", region, available, 0);
+        return 0;
+    }
+    if (type == 2)
+        DIY_BuildQualifiedTeamListFromDiyFileBuffer((uint16_t)available, (uint8_t *)ranked);
+    else
+        DIY_BuildQualifiedTeamListFromSortedTable((uint16_t)available, (uint8_t *)ranked);
+    if (competition == _currentCompetitionPtr)
+        SaveSelectedTeams();
+
+    for (unsigned i = 0; i < available && accepted < places; ++i) {
+        uint16_t id = BE_READ_U16((const uint8_t *)&ranked[i]);
+        if ((id >> 8) < 0x50u || (id >> 8) > 0x55u) {
+            wcSeedLog("INVALID_ID", region, i, id);
+            continue;
+        }
+        if (wcSeedContains(seeds, *used, id)) {
+            wcSeedLog("SKIP_DUPLICATE", region, i, id);
+            continue;
+        }
+        seeds[(*used)++] = id;
+        ++accepted;
+    }
+    if (accepted != places) {
+        wcSeedLog("NO_UNUSED_QUALIFIER", region, accepted, 0);
+        return 0;
+    }
+    return 1;
 }
 
 /* Career_UpdateWorldCupCompetitions (SWOS2.s line 31589) */
 __attribute__((used, externally_visible))
 void Career_UpdateWorldCupCompetitions(void)
 {
-    SWOS_NationalTrace("WC_UPDATE_CHECK", "selected=%04X flags=%02X host=%04X qualifier_update=%u",
-        (unsigned)_selTeamNumber, (unsigned)_someTeamFlags,
-        (unsigned)_worldCupHostTeam, (unsigned)((_someTeamFlags & 0x40) != 0));
     if (_someTeamFlags & 0x80)
         _worldCupHostTeam = _primaryCompetitionBuf.tourn.header.winnerTeam;
 
     if (!(_someTeamFlags & 0x40))
         return;
 
-    uint8_t *a5 = _worldCup2Copy;
-    /* qualifier list = the cup *Copy's embedded teamSeedList — see the EC variant
-     * above. comp_team_seed_list handles the offset + 64-bit delta. */
-    a5 = (uint8_t *)comp_team_seed_list((Competition *)a5);
-    /* BE write — matches the eurochampionship variant above and the
-     * BE-packed convention for *.unk1 team-id lists (295c9f3). */
-    BE_WRITE_U16(a5, _worldCupHostTeam);
-    a5 += 2;
+    uint16_t seeds[32] = { 0 };
+    unsigned used = 1;
+    seeds[0] = _worldCupHostTeam;
+    if ((seeds[0] >> 8) < 0x50u || (seeds[0] >> 8) > 0x55u) {
+        wcSeedLog("INVALID_HOST", 0, 0, seeds[0]);
+        return;
+    }
 
-    /* a5 is shared across slot calls in the m68k version because the
-     * post-increment writes happen via the register inside
-     * DIY_BuildQualifiedTeamListFromSortedTable_WC / FromDiyFileBuffer.
-     * Advance the C pointer by `count * 2` bytes after each call so all
-     * 13 group qualifiers land in distinct slots of worldCup2Copy.unk1. */
-    updateWCSlot(_worldCupQualifyingGroup1Copy, 2, a5); a5 += 2 * 2;
-    updateWCSlot(_worldCupQualifyingGroup2Copy, 2, a5); a5 += 2 * 2;
-    updateWCSlot(_worldCupQualifyingGroup3Copy, 2, a5); a5 += 2 * 2;
-    updateWCSlot(_worldCupQualifyingGroup4Copy, 2, a5); a5 += 2 * 2;
-    updateWCSlot(_worldCupQualifyingGroup5Copy, 2, a5); a5 += 2 * 2;
-    updateWCSlot(_worldCupQualifyingGroup6Copy, 2, a5); a5 += 2 * 2;
-    updateWCSlot(_worldCupQualifyingGroup7Copy, 2, a5); a5 += 2 * 2;
-    updateWCSlot(_worldCupQualifyingGroup8Copy, 2, a5); a5 += 2 * 2;
-    updateWCSlot(_northAmericaWorldCupQualificationCopy, 3, a5); a5 += 3 * 2;
-    updateWCSlot(_southAmericaWorldCupQualificationCopy, 4, a5); a5 += 4 * 2;
-    updateWCSlot(_africaWorldCupQualificationCopy, 5, a5); a5 += 5 * 2;
-    updateWCSlot(_asiaWorldCupQualificationCopy, 2, a5); a5 += 2 * 2;
-    updateWCSlot(_oceaniaWorldCupQualificationCopy, 1, a5);
+    /* All 13 qualifier sources must succeed before modifying the draw.
+     * An already-qualified host is replaced with the next-ranked unused
+     * candidate from the SAME region, not an arbitrary national team. */
+    int ok = 1;
+    ok &= wcCollectRegion(_worldCupQualifyingGroup1Copy, 1, 2, seeds, &used);
+    ok &= wcCollectRegion(_worldCupQualifyingGroup2Copy, 2, 2, seeds, &used);
+    ok &= wcCollectRegion(_worldCupQualifyingGroup3Copy, 3, 2, seeds, &used);
+    ok &= wcCollectRegion(_worldCupQualifyingGroup4Copy, 4, 2, seeds, &used);
+    ok &= wcCollectRegion(_worldCupQualifyingGroup5Copy, 5, 2, seeds, &used);
+    ok &= wcCollectRegion(_worldCupQualifyingGroup6Copy, 6, 2, seeds, &used);
+    ok &= wcCollectRegion(_worldCupQualifyingGroup7Copy, 7, 2, seeds, &used);
+    ok &= wcCollectRegion(_worldCupQualifyingGroup8Copy, 8, 2, seeds, &used);
+    ok &= wcCollectRegion(_northAmericaWorldCupQualificationCopy, 9, 3, seeds, &used);
+    ok &= wcCollectRegion(_southAmericaWorldCupQualificationCopy, 10, 4, seeds, &used);
+    ok &= wcCollectRegion(_africaWorldCupQualificationCopy, 11, 5, seeds, &used);
+    ok &= wcCollectRegion(_asiaWorldCupQualificationCopy, 12, 2, seeds, &used);
+    ok &= wcCollectRegion(_oceaniaWorldCupQualificationCopy, 13, 1, seeds, &used);
+    if (!ok || used != 32u) {
+        wcSeedLog("DRAW_REJECTED", 0, used, 0);
+        return;
+    }
+
+    uint8_t *out = (uint8_t *)comp_team_seed_list((Competition *)_worldCup2Copy);
+    if (!out) {
+        wcSeedLog("NO_SEED_BUFFER", 0, used, 0);
+        return;
+    }
+    for (unsigned i = 0; i < 32; ++i)
+        BE_WRITE_U16(out + i * 2u, seeds[i]);
+    wcSeedLog("DRAW_COMMITTED_32_UNIQUE", 0, 32, _worldCupHostTeam);
 }

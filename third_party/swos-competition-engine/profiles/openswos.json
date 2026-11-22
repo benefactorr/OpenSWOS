@@ -1,0 +1,18 @@
+{
+  "id": "openswos",
+  "_about": "DRAFT host limits of OpenSWOS (SDL + Amiga m68k), from its sources and docs (2026-10-26): to confirm with the OpenSWOS maintainer. Encoding latin1 + the font extension's spare bytes (docs/FONTS.md CP_OVERRIDE: Œ 0x8C, Ÿ 0x9E, € 0x9D); charset = the stock font (A-Z, 0-9, punctuation, Ä Ö Ü) + the extended glyphs of bin/setup/glyphs.txt; team names 16 characters (teamName[17]); competition names 35 (competitionName[36]); 24 clubs per table (fixed pair tables, competitions-in-openswos §12); widths as the 1996 small font, 6 px for the added glyphs. The Amiga has more memory than the DOS exe, so the arena limit is higher.",
+  "languages": ["it", "en", "fr", "de"],
+  "encoding": "latin1",
+  "overrides": {"Œ": 140, "Ÿ": 158, "€": 157},
+  "charset": " &'()-./0123456789:,!?+ABCDEFGHIJKLMNOPQRSTUVWXYZ\"#$<=>@[]^_`{|}~ÄÖÜ¡¿ÀÁÂÇÈÉÊËÌÍÎÏÑÒÓÔÙÚÛŒŸ€",
+  "widths": {"default": 6, "I": 2, "1": 2, "'": 2, "(": 3, ")": 3, ",": 2, "-": 4, ".": 2, ":": 2, " ": 3},
+  "title_max": 35,
+  "title_px": 158,
+  "short_px": 70,
+  "club_name_max": 16,
+  "clubs_per_file": 256,
+  "table_rows": 24,
+  "long_table_rows": 24,
+  "max_teams_per_stage": 255,
+  "arena_max": 262144
+}

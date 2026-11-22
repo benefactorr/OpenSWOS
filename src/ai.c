@@ -13,7 +13,7 @@
  */
 
 #include "ai.h"
-#include "career_plus_options.h"
+#include "tweaks.h"
 #include "dos_mode.h"       /* _gDosGameplay: the DOS build has no position gate here */
 #include "game_types.h"
 #include "math68k.h"
@@ -779,7 +779,7 @@ AI_SetControlsDirection(TeamGeneralInfo *team)
 
         /* Kick-offs are restarts, not open-play shots. Never use the
          * original centre-circle long-shot logic for CPU sides. */
-        if (_careerImprovedAiOption && _gameState == ST_PLAYERS_TO_INITIAL_POSITIONS &&
+        if (Tweaks_On(TWEAK_IMPROVED_AI) && _gameState == ST_PLAYERS_TO_INITIAL_POSITIONS &&
             team->playerNumber == 0 && team == _lastTeamPlayedBeforeBreak &&
             AI_ControlledKickoff(team, a5))
             return;
@@ -873,7 +873,7 @@ AI_SetControlsDirection(TeamGeneralInfo *team)
      * selected computer defender should keep closing down rather than
      * turning away under the original random-direction fallback. Leave
      * close-range tackling, ball contact, and every restart to SWOS. */
-    if (_careerImprovedAiOption && team->playerNumber == 0 && !team->playerHasBall &&
+    if (Tweaks_On(TWEAK_IMPROVED_AI) && team->playerNumber == 0 && !team->playerHasBall &&
         team->opponentsTeam && team->opponentsTeam->playerNumber != 0 &&
         team->opponentsTeam->playerHasBall &&
         a5->playerState == PL_NORMAL && !a5->sentAway &&
@@ -911,7 +911,7 @@ theres_a_player_near:
         return;  /* firing */
     /* Career+ advanced possession decisions for CPU-controlled teams.
      * Preserve original shots, clearances, marking and set pieces. */
-    if (_careerImprovedAiOption && AI_AdvancedPossession(team, a5, d6))
+    if (Tweaks_On(TWEAK_IMPROVED_AI) && AI_AdvancedPossession(team, a5, d6))
         return;
 
     /* deadVarAlways0 check (always 0 in practice) */
@@ -1124,7 +1124,7 @@ setup_resume_play_and_turn_bias:
     /* Avoid direction-only long kicks in open space. If there is an actual
      * pass outlet use it; otherwise advance with the ball. Do not interfere
      * with pressured defensive clearances or shooting-range decisions. */
-    if (_careerImprovedAiOption && team->playerNumber == 0 && _gameStatePl == ST_GAME_IN_PROGRESS &&
+    if (Tweaks_On(TWEAK_IMPROVED_AI) && team->playerNumber == 0 && _gameStatePl == ST_GAME_IN_PROGRESS &&
         a5 && a5->playerOrdinal != 1 && a5->ballDistance <= 650 &&
         d6 > 60000 &&
         AI_OpponentDistanceSq(team, a5->x.s.i, a5->y.s.i) > 3600) {

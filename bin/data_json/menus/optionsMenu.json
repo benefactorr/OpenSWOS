@@ -1,7 +1,7 @@
 {
  "name": "_optionsMenu",
  "onInit": "OptionsMenuBeforeDraw",
- "onReturn": null,
+ "onReturn": "OptionsMenuBeforeDraw",
  "onDraw": null,
  "defaultEntry": 19,
  "items": [
@@ -39,7 +39,7 @@
    "kind": "entry",
    "coords": {
     "x": 10,
-    "y": 64,
+    "y": 32,
     "w": -116,
     "h": 11
    },
@@ -60,7 +60,7 @@
    "kind": "entry",
    "coords": {
     "x": -102,
-    "y": 64,
+    "y": 32,
     "w": -116,
     "h": 11
    },
@@ -69,7 +69,7 @@
      "op": "nav",
      "left": -1,
      "right": -1,
-     "up": -1,
+     "up": 26,
      "down": 4
     },
     {
@@ -92,7 +92,7 @@
    "kind": "entry",
    "coords": {
     "x": 10,
-    "y": 76,
+    "y": 44,
     "w": -116,
     "h": 11
    },
@@ -113,7 +113,7 @@
    "kind": "entry",
    "coords": {
     "x": -102,
-    "y": 76,
+    "y": 44,
     "w": -116,
     "h": 11
    },
@@ -145,7 +145,7 @@
    "kind": "entry",
    "coords": {
     "x": 10,
-    "y": 88,
+    "y": 56,
     "w": -116,
     "h": 11
    },
@@ -166,7 +166,7 @@
    "kind": "entry",
    "coords": {
     "x": -102,
-    "y": 88,
+    "y": 56,
     "w": -116,
     "h": 11
    },
@@ -198,7 +198,7 @@
    "kind": "entry",
    "coords": {
     "x": 10,
-    "y": 100,
+    "y": 68,
     "w": -116,
     "h": 11
    },
@@ -219,7 +219,7 @@
    "kind": "entry",
    "coords": {
     "x": -102,
-    "y": 100,
+    "y": 68,
     "w": -116,
     "h": 11
    },
@@ -251,7 +251,7 @@
    "kind": "entry",
    "coords": {
     "x": 10,
-    "y": 112,
+    "y": 80,
     "w": -116,
     "h": 11
    },
@@ -272,7 +272,7 @@
    "kind": "entry",
    "coords": {
     "x": -102,
-    "y": 112,
+    "y": 80,
     "w": -116,
     "h": 11
    },
@@ -304,7 +304,7 @@
    "kind": "entry",
    "coords": {
     "x": 10,
-    "y": 124,
+    "y": 92,
     "w": -116,
     "h": 11
    },
@@ -325,7 +325,7 @@
    "kind": "entry",
    "coords": {
     "x": -102,
-    "y": 124,
+    "y": 92,
     "w": -116,
     "h": 11
    },
@@ -357,7 +357,7 @@
    "kind": "entry",
    "coords": {
     "x": 10,
-    "y": 136,
+    "y": 104,
     "w": -116,
     "h": 11
    },
@@ -378,7 +378,7 @@
    "kind": "entry",
    "coords": {
     "x": -102,
-    "y": 136,
+    "y": 104,
     "w": -116,
     "h": 11
    },
@@ -410,7 +410,7 @@
    "kind": "entry",
    "coords": {
     "x": 10,
-    "y": 148,
+    "y": 116,
     "w": -116,
     "h": 11
    },
@@ -431,7 +431,7 @@
    "kind": "entry",
    "coords": {
     "x": -102,
-    "y": 148,
+    "y": 116,
     "w": -116,
     "h": 11
    },
@@ -441,7 +441,7 @@
      "left": -1,
      "right": -1,
      "up": 14,
-     "down": 19
+     "down": 22
     },
     {
      "op": "colors",
@@ -463,7 +463,7 @@
    "kind": "entry",
    "coords": {
     "x": 10,
-    "y": 148,
+    "y": 116,
     "w": -116,
     "h": 11
    },
@@ -484,7 +484,7 @@
    "kind": "entry",
    "coords": {
     "x": -102,
-    "y": 148,
+    "y": 116,
     "w": -116,
     "h": 11
    },
@@ -530,7 +530,7 @@
      "op": "nav",
      "left": -1,
      "right": -1,
-     "up": 16,
+     "up": 28,
      "down": -1
     },
     {
@@ -566,6 +566,218 @@
      "op": "text",
      "flags": "0x0",
      "str": "_aSwosVersion152"
+    }
+   ]
+  },
+  {
+   "kind": "entry",
+   "coords": {
+    "x": 10,
+    "y": 128,
+    "w": -116,
+    "h": 11
+   },
+   "commands": [
+    {
+     "op": "colors",
+     "frame_color": 0,
+     "background_color": 9
+    },
+    {
+     "op": "text",
+     "flags": "0x0",
+     "str": "_aWorldOption"
+    }
+   ]
+  },
+  {
+   "kind": "entry",
+   "coords": {
+    "x": -102,
+    "y": 128,
+    "w": -116,
+    "h": 11
+   },
+   "commands": [
+    {
+     "op": "nav",
+     "left": -1,
+     "right": -1,
+     "up": 16,
+     "down": 24
+    },
+    {
+     "op": "colors",
+     "frame_color": 0,
+     "background_color": 13
+    },
+    {
+     "op": "string_table",
+     "flags": "0x0",
+     "table": "_worldStrTable"
+    },
+    {
+     "op": "onselect_fire",
+     "func": "ChangeWorld"
+    }
+   ]
+  },
+  {
+   "kind": "entry",
+   "coords": {
+    "x": 10,
+    "y": 140,
+    "w": -116,
+    "h": 11
+   },
+   "commands": [
+    {
+     "op": "colors",
+     "frame_color": 0,
+     "background_color": 9
+    },
+    {
+     "op": "text",
+     "flags": "0x0",
+     "str": "_aModsOption"
+    }
+   ]
+  },
+  {
+   "kind": "entry",
+   "coords": {
+    "x": -102,
+    "y": 140,
+    "w": -116,
+    "h": 11
+   },
+   "commands": [
+    {
+     "op": "nav",
+     "left": -1,
+     "right": -1,
+     "up": 22,
+     "down": 28
+    },
+    {
+     "op": "colors",
+     "frame_color": 0,
+     "background_color": 13
+    },
+    {
+     "op": "text",
+     "flags": "0x0",
+     "str": "_aModsNone"
+    },
+    {
+     "op": "onselect_fire",
+     "func": "ShowModsMenu"
+    }
+   ]
+  },
+  {
+   "kind": "entry",
+   "coords": {
+    "x": 10,
+    "y": 20,
+    "w": -116,
+    "h": 11
+   },
+   "commands": [
+    {
+     "op": "colors",
+     "frame_color": 0,
+     "background_color": 9
+    },
+    {
+     "op": "text",
+     "flags": "0x0",
+     "str": "_aLanguageOption"
+    }
+   ]
+  },
+  {
+   "kind": "entry",
+   "coords": {
+    "x": -102,
+    "y": 20,
+    "w": -116,
+    "h": 11
+   },
+   "commands": [
+    {
+     "op": "nav",
+     "left": -1,
+     "right": -1,
+     "up": -1,
+     "down": 2
+    },
+    {
+     "op": "colors",
+     "frame_color": 0,
+     "background_color": 13
+    },
+    {
+     "op": "string_table",
+     "flags": "0x0",
+     "table": "_languageStrTable"
+    },
+    {
+     "op": "onselect_fire",
+     "func": "ChangeLanguage"
+    }
+   ]
+  },
+  {
+   "kind": "entry",
+   "coords": {
+    "x": 10,
+    "y": 152,
+    "w": -116,
+    "h": 11
+   },
+   "commands": [
+    {
+     "op": "colors",
+     "frame_color": 0,
+     "background_color": 9
+    },
+    {
+     "op": "text",
+     "flags": "0x0",
+     "str": "_aSetupOption"
+    }
+   ]
+  },
+  {
+   "kind": "entry",
+   "coords": {
+    "x": -102,
+    "y": 152,
+    "w": -116,
+    "h": 11
+   },
+   "commands": [
+    {
+     "op": "nav",
+     "left": -1,
+     "right": -1,
+     "up": 24,
+     "down": 19
+    },
+    {
+     "op": "colors",
+     "frame_color": 0,
+     "background_color": 13
+    },
+    {
+     "op": "text",
+     "flags": "0x0",
+     "str": "_aLaunchSetup"
+    },
+    {
+     "op": "onselect_fire",
+     "func": "LaunchSetupSelected"
     }
    ]
   }

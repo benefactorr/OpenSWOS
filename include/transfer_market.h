@@ -72,6 +72,7 @@ void Career_ApplyPendingForeignMarketPlayersToSelectedTeams(void);
 
 /* ---- DIY fixture & team removal (Chunk 76) ---- */
 void DIY_AdvanceFixtureIndex(uint16_t lo, uint16_t hi);
+int ModernCareer_ReleasePlayer(uint16_t slot);
 void Career_RemovePlayerFromTeamInternal(uint16_t teamNumber, uint16_t playerOrd);
 
 /* ---- Transfer/Offer menu callbacks (Chunk 113) ---- */
@@ -121,6 +122,9 @@ void TakeOffMarketMenu(void);
 void TransferMarketCommon(void *entry);
 
 /* --- BuildTransferPlayerMenuEntry (Chunk 163) --- */
+/* The player the next BuildTransferPlayerMenuEntry row shows (team id, his file slot, the row),
+ * for the mods' playerRowDrawn; taken by that call. */
+void TransferRow_Identity(uint16_t team, uint16_t slot, int16_t row);
 void BuildTransferPlayerMenuEntry(void *item, uint8_t *player,
                                     uint16_t y, int16_t idx,
                                     uint16_t style, uint8_t *extra);
@@ -169,7 +173,7 @@ void Career_RemovePlayerAndAddAsTrialist(uint16_t sourceTeam, uint16_t playerOrd
 void Career_GenerateTrialistForTeamPlayer(uint16_t playerIndex);
 void Career_ConvertPlayerToTrialistFromName(uint16_t sourceTeam, uint16_t playerOrd);
 void TrainingMatch_AddTrialPlayerToSelectedTeam(uint16_t role);
-void TrainingMatch_AdjustSelectedTeamRosterForTrialists(uint16_t teamNum, uint16_t baseCount, TeamFileEx *teamPtr);
+void TrainingMatch_AdjustSelectedTeamRosterForTrialists(uint16_t excludeFlags, uint16_t baseCount, TeamFileEx *teamPtr);
 
 /* --- PutPlayerOnMarketMenu (Chunk 177) --- */
 void PutPlayerOnMarketMenu(void);
@@ -184,6 +188,7 @@ void PlayerMarketBuildVisiblePlayerList(void);
 /* --- Player market menu callbacks --- */
 void PlayerMarketFilterPositionOnSelect(MenuEntry *entry);
 void PlayerMarketFilterAgeGroupOnSelect(MenuEntry *entry);
+void PlayerMarketValueSortOnSelect(MenuEntry *entry);
 void PlayerMarketScrollOnSelect(MenuEntry *entry);
 void PlayerMarketViewSquadOnSelect(MenuEntry *entry);
 void PlayerMarketItemOnSelect(MenuEntry *entry);
@@ -193,5 +198,8 @@ void PlayerMarketItemBeforeDraw(MenuEntry *entry);
 void CreateRandomTransferOfferForPlayer(uint16_t playerOrdinal);
 int16_t EvaluateTransferOfferNegotiation(void);
 uint16_t ApplyOfferDemandMultipliersForSwapAndExtraPlayers(uint16_t demandValue);
+
+/* Return emergency loans once competitive squad cover is sufficient. */
+void ModernCareer_ReleaseUnneededLoans(void);
 
 #endif

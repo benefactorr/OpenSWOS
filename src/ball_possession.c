@@ -1,9 +1,9 @@
-#include "career_plus_options.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
+#include "tweaks.h"            /* [tweaks] contest_own_ratings */
 #include "ball_possession.h"
 #include "dos_sound.h"
 #include "math68k.h"  /* M68kShiftLeft16: a signed left shift is UB, and the two platforms differ */
@@ -196,7 +196,7 @@ DoPass(Sprite *player, TeamGeneralInfo *team)
 
     /* Original SWOS's skill-dependent failed-pass path, restored when
      * Improved AI is set to ORIGINAL. It branches into the common speed path. */
-    if (!_careerImprovedAiOption && _gameStatePl == ST_GAME_IN_PROGRESS &&
+    if (!Tweaks_On(TWEAK_IMPROVED_AI) && _gameStatePl == ST_GAME_IN_PROGRESS &&
         team->playerNumber == 0) {
         PlayerInfo *pi = a4;
         int16_t passingSkill = pi->passing;
@@ -233,7 +233,7 @@ DoPass(Sprite *player, TeamGeneralInfo *team)
         int32_t aimY = targetPlayer->y.s.i;
         ball = &_ballSprite;
 
-        if (_careerImprovedAiOption && _gameStatePl == ST_GAME_IN_PROGRESS && team->playerNumber == 0) {
+        if (Tweaks_On(TWEAK_IMPROVED_AI) && _gameStatePl == ST_GAME_IN_PROGRESS && team->playerNumber == 0) {
             /* Career+ v13: lead a moving AI receiver according to how far
              * the ball must travel.  The old fixed three-frame prediction
              * made longer passes go behind runners.  This is capped so a
@@ -327,7 +327,7 @@ career_original_pass_speed:
         /* Near a boundary, a slightly softer CPU pass gives the receiver
          * a better chance to collect it before it rolls out of play.
          * Leave central passes and every human-controlled pass unchanged. */
-        if (_careerImprovedAiOption && _gameStatePl == ST_GAME_IN_PROGRESS && team->playerNumber == 0 &&
+        if (Tweaks_On(TWEAK_IMPROVED_AI) && _gameStatePl == ST_GAME_IN_PROGRESS && team->playerNumber == 0 &&
             (targetPlayer->x.s.i < 155 || targetPlayer->x.s.i > 516 ||
              targetPlayer->y.s.i < 200 || targetPlayer->y.s.i > 698))
             speed = (int16_t)(speed * 7 / 8);
@@ -335,7 +335,7 @@ career_original_pass_speed:
          * particularly through midfield. The ball still uses SWOS physics
          * and friction. Near the touchline/goal line retain v11's safer
          * delivery instead of blasting the ball past the recipient. */
-        if (_careerImprovedAiOption && _gameStatePl == ST_GAME_IN_PROGRESS && team->playerNumber == 0) {
+        if (Tweaks_On(TWEAK_IMPROVED_AI) && _gameStatePl == ST_GAME_IN_PROGRESS && team->playerNumber == 0) {
             int32_t x = (int32_t)targetPlayer->x.s.i - player->x.s.i;
             int32_t y = (int32_t)targetPlayer->y.s.i - player->y.s.i;
             int32_t dist2 = x * x + y * y;
@@ -531,10 +531,10 @@ exit_kick:
  * opponent's controlled player, but A6 -> this team?" beside it). The second lookup, for
  * the opponent, is right. docs/BALL_CONTEST.md, "Whose ratings the roll uses".
  *
- * 0 (the default) keeps it, because the game is the original's: a recording of the
- * original only replays with it. 1 rates this team by the man who is actually at the
- * ball -- `[gameplay] contest_own_ratings`, or -DSWOS_CONTEST_OWN_RATINGS=1 for a build
- * with no SWOS.ini (the Amiga's, through EXTRA_CFLAGS).
+ * The fix rates this team by the man who is actually at the ball: `[tweaks]
+ * contest_own_ratings` (include/tweaks.h; ON by default since 2026-11-10, off in the rigs,
+ * where a recording of the original only replays with the original's roll), or
+ * -DSWOS_CONTEST_OWN_RATINGS=1 for a build with no SWOS.ini (the Amiga's, through EXTRA_CFLAGS).
  *
  * OFFLINE ONLY for now. Two netplay peers must roll the same dice, and a recording must
  * be replayed by the rule it was played with; neither the handshake nor the .SRP says
@@ -551,6 +551,8 @@ static int contestOwnRatings(void)
     extern int32_t NetplayMatch_Enabled(void);
     if (NetplayMatch_Enabled())
         return 0;
+    if (Tweaks_On(TWEAK_CONTEST_OWN_RATINGS))
+        return 1;
 #endif
     return _gContestOwnRatings;
 }

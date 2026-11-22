@@ -1,10 +1,14 @@
-#include "career_plus_options.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
  * SWOS DOS Reversed by Zlatko Karakaš (https://github.com/zlatkok)
  */
 #include "team_control.h"
+#ifdef SWOS_SDL_BUILD
+#include "ball_physics.h"
+extern int InputSDL_TakeSpecialShot(void);
+extern void InputSDL_SpecialShotCompleted(void);
+#endif
 #include "dos_mode.h"      /* _gDosGameplay: DOS alternates teams on its own counter */
 
 /* ==================================================================
@@ -106,9 +110,6 @@ extern int16_t    _pl2Direction;
 /* ---- External functions ---- */
 extern void Player1StatusProc(void);
 extern void Player2StatusProc(void);
-extern int InputSDL_TakeSpecialShot(void); /* SDL-only: 1 kick, 2 opposite aftertouch */
-extern void InputSDL_SpecialShotCompleted(void);
-extern void ApplyBallAfterTouch(TeamGeneralInfo *team);
 extern void UpdateGameTimersAndCameraBreakMode(void);
 
 /* UpdatePlayers is now ported to C */
@@ -452,27 +453,6 @@ static int16_t processInputForPlayer(TeamGeneralInfo *team,
         *fireCounterPtr = 0;
     }
 
-    /* Present the dedicated shot to the original engine in ANY match state.
-     * In particular, stoppages have gameStatePl == ST_STOPPED and the engine
-     * itself validates direction, possession, ball height and player state.
-     * The old proximity and live-play checks discarded valid presses. */
-    if (specialShot && !_fire && !_inSubstitutesMenu && !team->resetControls) {
-        team->quickFire = 0;
-        team->normalFire = -1;
-
-        /* A and D also request the ORIGINAL header action for an airborne
-         * ball.  Headers are not normalFire actions: UpdatePlayers checks
-         * fireThisFrame separately when the ball is above foot height.
-         * Limit this extra signal to a nearby outfield player and a high
-         * ball, so it cannot accidentally produce a ground-level tackle. */
-        if (_gameStatePl == ST_GAME_IN_PROGRESS && _ballSprite.z.s.i > 8 &&
-            team->controlledPlayer &&
-            team->controlledPlayer->playerOrdinal != 1 &&
-            team->controlledPlayer->ballDistance <= 2450) {
-            team->fireThisFrame = -1;
-        }
-    }
-
     /* Check resetControls */
     if (team->resetControls)
         return 1;
@@ -487,37 +467,44 @@ static int16_t processInputForPlayer(TeamGeneralInfo *team,
         team->fireCounter = 0;
     }
 
-    /* Call UpdatePlayers */
-    {
-        int specialHeaderRequest = specialShot && !_fire &&
-                                   team->fireThisFrame && _ballSprite.z.s.i > 8;
-        UpdatePlayers(team);
-        /* A successful header consumes the queued A/D press just as a kick
-         * does.  Otherwise it could produce a surprise shot after the ball
-         * lands.  With an airborne ball the extra fireThisFrame signal can
-         * only enter the game's existing heading path, not the tackle path. */
-        if (specialHeaderRequest && team->headerOrTackle)
-            InputSDL_SpecialShotCompleted();
-        /* The kick has actually started.  Stop retrying this press.
-         * On throw-ins the release animation is queued before the kick. */
-        if (specialShot && (team->shooting ||
-                            (team->controlledPlayer &&
-                             team->controlledPlayer->playerState == PL_THROW_IN &&
-                             team->normalFire))) {
-            /* A replicates the original high/long kick: after shooting,
-             * pulling the stick 180 degrees triggers high-kick aftertouch
-             * at spinTimer=4. Apply that branch directly rather than
-             * steering the player backwards and possibly changing aim. */
-            if (specialShot == 2 && team->shooting && team->spinTimer >= 0) {
-                int16_t savedDirection = team->currentAllowedDirection;
-                team->currentAllowedDirection = (team->controlledPlDirection + 4) & 7;
-                team->spinTimer = 4;
-                ApplyBallAfterTouch(team);
-                team->currentAllowedDirection = savedDirection;
-            }
-            InputSDL_SpecialShotCompleted();
+#ifdef SWOS_SDL_BUILD
+    int specialHeader = 0;
+    if (specialShot && !_fire && !_inSubstitutesMenu) {
+        team->quickFire = 0;
+        team->normalFire = -1;
+        if (_gameStatePl == ST_GAME_IN_PROGRESS && _ballSprite.z.s.i > 8 &&
+            team->controlledPlayer && team->controlledPlayer->playerOrdinal != 1 &&
+            team->controlledPlayer->ballDistance <= 2450) {
+            specialHeader = 1;
+            team->fireThisFrame = -1;
         }
+    } else {
+        specialShot = 0;
     }
+#else
+    (void)specialShot;
+#endif
+
+    const int wasShooting = team->shooting;
+    UpdatePlayers(team);
+#ifdef SWOS_SDL_BUILD
+    if ((specialHeader && team->headerOrTackle) ||
+        (specialShot && ((!wasShooting && team->shooting) ||
+          (team->controlledPlayer && team->controlledPlayer->playerState == PL_THROW_IN &&
+           team->normalFire)))) {
+        /* Opposite aftertouch gives the original high kick without reversing aim. */
+        if (specialShot == 2 && !wasShooting && team->shooting && team->spinTimer >= 0) {
+            int16_t savedDirection = team->currentAllowedDirection;
+            team->currentAllowedDirection = (team->controlledPlDirection + 4) & 7;
+            team->spinTimer = 4;
+            ApplyBallAfterTouch(team);
+            team->currentAllowedDirection = savedDirection;
+        }
+        InputSDL_SpecialShotCompleted();
+    }
+#else
+    (void)wasShooting;
+#endif
 
     /* Check headerOrTackle. THIS one is deliberate in the original and stays:
      * the press made your own player lunge, so it must not also become a shot.
@@ -641,6 +628,10 @@ void UpdateAndApplyTeamControls(void) {
 
     /* Player 1 controls this team (playerNumber == 1 or other) */
     Player1StatusProc();
+    int specialShot = 0;
+#ifdef SWOS_SDL_BUILD
+    specialShot = InputSDL_TakeSpecialShot();
+#endif
     processInputForPlayer(team, _pl1Direction, _pl1ShortFire, _pl1Fire,
-                          &_pl1FireCounter, _careerThreeButtonOption ? InputSDL_TakeSpecialShot() : 0);
+                          &_pl1FireCounter, specialShot);
 }

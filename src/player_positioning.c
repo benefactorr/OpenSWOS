@@ -1,4 +1,4 @@
-#include "career_plus_options.h"
+#include "tweaks.h"
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
@@ -274,13 +274,13 @@ SetPlayerWithNoBallDestination(Sprite *player, TeamGeneralInfo *team,
 
     player->destX = d3;
     player->destY = d4;
-    if (_careerImprovedAiOption)
+    if (Tweaks_On(TWEAK_IMPROVED_AI))
         SupportAdjustRun(player, team);
 
     /* Career+ defensive pressure: support the active defender against a human
      * ball carrier, without pulling the entire defensive line out of shape.
      * Only a single nearby outfield teammate receives a modest adjustment. */
-    if (_careerImprovedAiOption && team->playerNumber == 0 && !team->playerHasBall &&
+    if (Tweaks_On(TWEAK_IMPROVED_AI) && team->playerNumber == 0 && !team->playerHasBall &&
         team->opponentsTeam && team->opponentsTeam->playerNumber != 0 &&
         team->opponentsTeam->playerHasBall &&
         _gameStatePl == ST_GAME_IN_PROGRESS &&

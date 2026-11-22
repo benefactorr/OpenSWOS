@@ -18,6 +18,7 @@
 #ifdef SWOS_SDL_BUILD
 
 #include "replay_v2.h"
+#include "mod_hooks.h"
 #include <SDL.h>            /* the checkpoint's thread */
 #include "dos_sound.h"
 #include "audio_sfx_filter.h"
@@ -25,12 +26,14 @@
 #include "display.h"
 #include "endian_helpers.h"
 #include "game_types.h"
+#include "sprites.h"            /* Sprite_WalkedOff */
 #include "miniz_swos.h"
 #include "srp_writer.h"     /* the file's layout, shared with the recorder */
 #include "swos_io.h"
 #include "image_cmd.h"      /* ProcessImageCommandStream */
 #include "platform_sdl.h"   /* Platform_NearestColour: the prediction overlay */
 #include "dos_mode.h"       /* _gDosView: the view a recording was played in */
+#include "text_render.h"    /* DrawMenuText: the viewer's frame box */
 #ifdef SWOS_NETPLAY
 #include "netplay_ghost.h"  /* Ghost_Prediction: this player's PRED and SEEN */
 #include "match_prediction.h"   /* the other player's, over the lobby's link */
@@ -309,6 +312,7 @@ static struct {
     uint32_t  kickoffLen;
     uint64_t  layout;
     uint8_t   rules;
+    uint8_t   style;            /* GAMEPLAY_*: the rules byte cannot say XBOX */
     uint16_t  simWidth;
     uint8_t  *inputs;           /* SRP_INPUT_BYTES a frame */
     uint32_t *hashes;
@@ -346,6 +350,7 @@ void ReplayRec_SetKickoff(const uint8_t *packet, uint32_t len, uint64_t layout, 
         memcpy(s_resume.kickoff, packet, len);
     s_resume.layout = layout;
     s_resume.rules = rules;
+    s_resume.style = (uint8_t)_gGameplayStyle;
     s_resume.simWidth = simWidth;
 }
 
@@ -528,6 +533,8 @@ void ReplayRec_CaptureSprites(void)
         if (!s || s->imageIndex < 0 || s->z.s.i >= HUD_Z_MIN)
             continue;
         g = graphics((uint16_t)s->imageIndex);
+        if (Sprite_WalkedOff(s, g))
+            continue;               /* (walked off into the tunnel: not drawn either) */
         p = s_rec.frms + s_rec.frmsLen;
         BE_WRITE_U16(p, (uint16_t)s->imageIndex);
         BE_WRITE_U16(p + 2, (uint16_t)(s->x.s.i - g->centerX));
@@ -622,9 +629,13 @@ static uint8_t *build_meta(void)
     BE_WRITE_U16(q, 1);                                           q += 2;  /* meta version */
     BE_WRITE_U16(q, (uint16_t)_screen_width);                     q += 2;
     /* 8 the DOS view (320x200), 16 "the view is recorded" -- a recording made before the
-     * view was kept says neither, and the player works it out (recorded_view). */
+     * view was kept says neither, and the player works it out (recorded_view); 32 the
+     * XBOX gameplay style, 64 AMIGA60, 128 MOON (1 is DOS's; none, the Amiga's). */
     BE_WRITE_U16(q, (uint16_t)((_gDosGameplay ? 1 : 0) | (_gDosGraphics ? 2 : 0) |
-                               (_gArcadeMode ? 4 : 0) | (_gDosView ? 8 : 0) | 16));   q += 2;
+                               (_gArcadeMode ? 4 : 0) | (_gDosView ? 8 : 0) | 16 |
+                               (_gGameplayStyle == GAMEPLAY_XBOX ? 32 : 0) |
+                               (_gGameplayStyle == GAMEPLAY_AMIGA60 ? 64 : 0) |
+                               (_gGameplayStyle == GAMEPLAY_MOON ? 128 : 0)));   q += 2;
     /* The height the match was SIMULATED in (display.h _sim_view_height): 200 in the DOS
      * view, 272 in the Amiga's, whatever the picture. Playback maps the recorded camera
      * onto its own picture from it, exactly as the live match did (camera.c
@@ -651,6 +662,14 @@ static void file_path(const char *name, char *out, size_t cap)
         snprintf(out, cap, "%s", name);
     else
         snprintf(out, cap, "%s/%s", swos_save_dir(), name);
+}
+
+static void file_path(const char *name, char *out, size_t cap);
+
+/* Where the last match's recording is (ModApi_LatestReplay, a mod's after-match screen). */
+void ReplayV2_LatestPath(char *out, size_t cap)
+{
+    file_path(s_rec.path ? s_rec.path : REPLAY_V2_LATEST, out, cap);
 }
 
 static int32_t write_file(const char *name, const uint8_t *buf, uint32_t len)
@@ -708,6 +727,7 @@ static void content(SrpContent *c)
         c->hashes     = s_resume.hashes;
         c->layout     = s_resume.layout;
         c->rules      = s_resume.rules;
+        c->style      = s_resume.style;
         c->simWidth   = s_resume.simWidth;
     }
 }
@@ -1081,6 +1101,7 @@ static struct {
     int32_t     dosView;        /* the view it was played in: 1 DOS, 0 Amiga, -1 not known */
     char        names[2][64];   /* PLYR: who played, "" when the file does not say */
     uint16_t    simHeight;      /* META: the view height it was simulated in, 0 not known */
+    char        file[256];      /* the file it was loaded from (ReplayV2_SaveCopy) */
 } s_play;
 
 /* Worked out on load, never in a file: this frame was DRAWN wrong for that player -- one
@@ -1091,6 +1112,11 @@ static struct {
 
 void ReplayV2_Unload(void)
 {
+    if (s_play.loaded) {                /* (the HIL header it wrote: no highlights behind it) */
+        extern volatile uint16_t _numScenesInHilFile;
+        _hilNumGoals = 0;
+        _numScenesInHilFile = 0;
+    }
     Audio_SetSfxObserver(NULL);         /* the playback trace's, if it was watching */
     free(s_play.frms);
     free(s_play.offsets);
@@ -1103,6 +1129,65 @@ void ReplayV2_Unload(void)
 }
 
 int32_t ReplayV2_Loaded(void)   { return s_play.loaded; }
+
+/* LIVE CAST (src/live_cast.c): frames that arrived after the recording was loaded, appended --
+ * the player then plays on into them where it would have held the last frame. `frms` is
+ * `count` frames as FRMS lays them out; the sounds those frames play, after the ones held. */
+int32_t ReplayV2_LiveAppend(const uint8_t *frms, uint32_t len, uint32_t count, const SrpAudioEvent *audio,
+                            uint32_t audioCount)
+{
+    uint8_t *nf;
+    uint32_t *no;
+    uint32_t off = 0, i;
+    if (!s_play.loaded || !count)
+        return 1;
+    nf = (uint8_t *)realloc(s_play.frms, (size_t)s_play.frmsLen + len);
+    if (!nf)
+        return 1;
+    s_play.frms = nf;
+    no = (uint32_t *)realloc(s_play.offsets, ((size_t)s_play.frameCount + count) * sizeof *no);
+    if (!no)
+        return 1;
+    s_play.offsets = no;
+    memcpy(s_play.frms + s_play.frmsLen, frms, len);
+    for (i = 0; i < count; i++) {
+        uint16_t sprites;
+        if (off + FRAME_HEAD_BYTES > len)
+            break;
+        sprites = BE_READ_U16(frms + off);
+        if (sprites > MAX_FRAME_SPRITES || off + FRAME_HEAD_BYTES + (uint32_t)sprites * SPRITE_BYTES > len)
+            break;
+        s_play.offsets[s_play.frameCount + i] = s_play.frmsLen + off;
+        off += FRAME_HEAD_BYTES + (uint32_t)sprites * SPRITE_BYTES;
+    }
+    s_play.frmsLen += off;
+    s_play.frameCount += i;
+    if (audioCount) {
+        AudioEvent *na = (AudioEvent *)realloc(s_play.audio, ((size_t)s_play.audioCount + audioCount) * sizeof *na + 1);
+        if (na) {
+            s_play.audio = na;
+            memcpy(s_play.audio + s_play.audioCount, audio, (size_t)audioCount * sizeof *na);
+            s_play.audioCount += audioCount;
+            s_play.flags |= SWRP_FLAG_AUDIO;
+        }
+    }
+    return i == count ? 0 : 1;
+}
+
+/* SAVE HIGHLIGHTS with a whole-match replay loaded: the recording kept under another name (it
+ * has no highlight scenes to save -- saving the HIL buffer then wrote a header and a junk scene,
+ * a file that showed the line-ups and went back to the menu: a tester, 2026-10-31). */
+int32_t ReplayV2_SaveCopy(const uint8_t *name)
+{
+    uint32_t len = 0;
+    uint8_t *file;
+    int32_t rc;
+    if (!s_play.loaded || !s_play.file[0] || !(file = read_file(s_play.file, &len)))
+        return 1;
+    rc = strcmp(s_play.file, (const char *)name) == 0 ? 0 : write_file((const char *)name, file, len);
+    free(file);
+    return rc;
+}
 int32_t ReplayV2_HasAudio(void) { return s_play.loaded && (s_play.flags & SWRP_FLAG_AUDIO); }
 
 static uint8_t *read_file(const char *name, uint32_t *len)
@@ -1190,6 +1275,7 @@ int32_t ReplayV2_LoadResume(const char *name, ReplayResume *out)
         rc = 3;
     } else {
         out->rules = simv[2];
+        out->style = simv[3];
         out->layout = ((uint64_t)BE_READ_U32(simv + 4) << 32) | BE_READ_U32(simv + 8);
         out->simWidth = BE_READ_U16(simv + 12);
         out->hashes = (uint32_t *)malloc((size_t)out->frames * sizeof(uint32_t) + 1);
@@ -1502,6 +1588,7 @@ int32_t ReplayV2_Load(const uint8_t *name)
     }
 
     DosReplay_ClearRpl();
+    snprintf(s_play.file, sizeof s_play.file, "%s", (const char *)name);   /* (ReplayV2_SaveCopy) */
     apply_meta(meta);
     free(meta);
     free(file);
@@ -1522,11 +1609,14 @@ static void play_on_sound(uint8_t kind, uint8_t channel, uint16_t id)
     trace_sound(s_play.cursor, kind, channel, id);
 }
 
+static void viewer_start(void);       /* (the viewer's controls, below) */
+
 void ReplayV2_StartScene(void)
 {
     s_play.cursor = 0;
     s_play.audioCursor = 0;
     _replayState = 1;
+    viewer_start();
     if (s_trace)
         Audio_SetSfxObserver(play_on_sound);
 }
@@ -1854,6 +1944,212 @@ static uint32_t shown_camera_y(uint32_t cy)
     return cy;
 }
 
+static uint32_t s_modLastCursor = 0xFFFFFFF0u;     /* the frame the mods were last told of */
+
+/* ---- The viewer's controls (SWOS 2020's replayControls.mnu / replays.cpp, docs/REPLAY_FORMAT_V2.md §6)
+ *
+ * A .SRP in the game's own viewer (HIGHLIGHTS -> LOAD, the after-match replay) under the keys:
+ * P pause, Up / Down the speed by a quarter (0 to 20 times), Left / Right play it backwards or
+ * forwards (paused: a frame back or on), Home / End the first or last frame, PgDn / PgUp a tenth
+ * back or on, I the frame box (the speed, what it is doing, the frame and a bar); a pad's stick
+ * as the arrows. Fire stops it, as ever. Only the recording plays at its own speed forwards does
+ * it sound: a jump, a pause, another speed or backwards is silent. The playback page's player
+ * (s_player) has controls of its own. */
+static struct {
+    int32_t active;             /* a recording is being viewed (not the playback page) */
+    int32_t quarter;            /* the speed in quarters: 4 = as played */
+    int32_t sign;               /* 1 forwards, -1 backwards */
+    int32_t paused, overlay, started;
+    int32_t pos;                /* the frame shown, in quarter frames */
+    int32_t step;               /* a frame on (1) or back (-1) asked for: a step */
+    int32_t jump;               /* a seek asked for, in frames (-1 none) */
+    int32_t silent;             /* the sound is stopped while it plays otherwise */
+    int16_t lastStick;
+} s_view = { 0, 4, 1, 0, 1, 0, 0, 0, -1, 0, -1 };
+static int32_t s_viewOverlayDefault = 1, s_viewHalfSpeed;
+
+void ReplayV2_ViewerConfigure(int32_t overlay, int32_t halfSpeed)
+{
+    s_viewOverlayDefault = overlay != 0;
+    s_viewHalfSpeed = halfSpeed != 0;
+}
+
+static void viewer_start(void)
+{
+    s_view.active = !s_player.on;
+    s_view.quarter = s_viewHalfSpeed ? 2 : 4;   /* (HIGHLIGHT DEFAULT SPEED: half) */
+    s_view.sign = 1;
+    s_view.paused = 0;
+    s_view.overlay = s_viewOverlayDefault;
+    s_view.started = 0;
+    s_view.pos = 0;
+    s_view.step = 0;
+    s_view.jump = -1;
+    s_view.silent = 0;
+    s_view.lastStick = -1;
+}
+
+int32_t ReplayV2_ViewerActive(void) { return s_view.active && s_play.loaded && _replayState != 0; }
+
+/* A key while a recording is viewed (platform_sdl.c, before the game's): 1 when it was the
+ * viewer's. Keys are SDL's (SDL_Keycode). */
+int32_t ReplayV2_ViewerKey(int32_t key)
+{
+    if (!ReplayV2_ViewerActive())
+        return 0;
+    const int32_t last = s_play.frameCount ? (int32_t)s_play.frameCount - 1 : 0;
+    const int32_t frame = s_view.pos / 4, tenth = (int32_t)s_play.frameCount / 10;
+    switch (key) {
+    case SDLK_p: s_view.paused ^= 1; return 1;
+    case SDLK_i: s_view.overlay ^= 1; return 1;
+    case SDLK_UP: if (s_view.quarter < 80) s_view.quarter++; return 1;
+    case SDLK_DOWN: if (s_view.quarter > 0) s_view.quarter--; return 1;
+    case SDLK_LEFT: case SDLK_RIGHT: {
+        const int32_t sign = key == SDLK_LEFT ? -1 : 1;
+        if (s_view.paused || s_view.quarter == 0)
+            s_view.step = sign;             /* (paused, or at speed 0: a frame) */
+        s_view.sign = sign;
+        return 1;
+    }
+    case SDLK_HOME: s_view.jump = 0; return 1;
+    case SDLK_END: s_view.jump = last; return 1;
+    case SDLK_PAGEUP: s_view.jump = frame + tenth > last ? last : frame + tenth; return 1;
+    case SDLK_PAGEDOWN: s_view.jump = frame - tenth < 0 ? 0 : frame - tenth; return 1;
+    default: return 0;
+    }
+}
+
+/* A pad's stick as the arrows (the keyboard's arrows come as keys): a new direction only. */
+static void viewer_stick(void)
+{
+    extern int16_t _pl1Direction;
+    extern int InputSDL_PlayerHasPad(int player);
+    if (!InputSDL_PlayerHasPad(0))
+        return;
+    const int16_t d = _pl1Direction;
+    if (d != s_view.lastStick)
+        switch (d) {
+        case 0: ReplayV2_ViewerKey(SDLK_UP); break;
+        case 4: ReplayV2_ViewerKey(SDLK_DOWN); break;
+        case 6: ReplayV2_ViewerKey(SDLK_LEFT); break;
+        case 2: ReplayV2_ViewerKey(SDLK_RIGHT); break;
+        default: break;
+        }
+    s_view.lastStick = d;
+}
+
+/* SWOS_VIEWER_TEST=1 (with --view-replay): the controls pressed at set calls, and what each did to
+ * the frame shown checked -- PASS or FAIL on stdout. */
+static int32_t s_viewTest = -1, s_viewTestCall, s_viewTestFail, s_viewTestAt;
+static void viewer_test(void)
+{
+    if (s_viewTest < 0)
+        s_viewTest = getenv("SWOS_VIEWER_TEST") != NULL;
+    if (!s_viewTest || (int32_t)s_play.frameCount < 1200)
+        return;
+    const int32_t c = ++s_viewTestCall, f = s_view.pos / 4;
+#define VT_EXPECT(cond, what) do { if (!(cond)) { s_viewTestFail = 1; \
+        fprintf(stdout, "VIEWER TEST: %s failed at call %d (frame %d)\n", what, (int)c, (int)f); } } while (0)
+    switch (c) {
+    case 100: VT_EXPECT(f == 98 || f == 99, "as played: a frame a call"); for (int i = 0; i < 4; i++) ReplayV2_ViewerKey(SDLK_UP); s_viewTestAt = f; break;
+    case 150: VT_EXPECT(f - s_viewTestAt >= 96 && f - s_viewTestAt <= 102, "2.00x: two frames a call"); ReplayV2_ViewerKey(SDLK_p); s_viewTestAt = f; break;
+    case 170: VT_EXPECT(f == s_viewTestAt, "paused: held"); ReplayV2_ViewerKey(SDLK_RIGHT); break;
+    case 172: VT_EXPECT(f == s_viewTestAt + 1, "paused: Right a frame on"); ReplayV2_ViewerKey(SDLK_LEFT); ReplayV2_ViewerKey(SDLK_p); s_viewTestAt = f; break;
+    case 222: VT_EXPECT(f < s_viewTestAt - 90, "Left: backwards at 2.00x"); ReplayV2_ViewerKey(SDLK_p);
+        ReplayV2_ViewerKey(SDLK_HOME); break;
+    case 224: VT_EXPECT(f == 0, "Home: the first frame"); ReplayV2_ViewerKey(SDLK_END); break;
+    case 226: VT_EXPECT(f == (int32_t)s_play.frameCount - 1, "End: the last frame"); ReplayV2_ViewerKey(SDLK_PAGEDOWN); break;
+    case 228: VT_EXPECT(f <= (int32_t)s_play.frameCount - 1 - (int32_t)s_play.frameCount / 10 + 2, "PgDn: a tenth back");
+        fprintf(stdout, "VIEWER TEST %s\n", s_viewTestFail ? "FAIL" : "PASS");
+        exit(s_viewTestFail);
+    default: break;
+    }
+#undef VT_EXPECT
+}
+
+/* The frame to draw now. 0 when the recording has played to its end (forwards, as played). */
+static int32_t viewer_advance(int32_t *fresh)
+{
+    viewer_test();
+    extern void AudioSDL_SilenceSfx(void);
+    const int32_t last = (int32_t)s_play.frameCount - 1;
+    const int32_t was = s_view.pos / 4;
+    viewer_stick();
+    if (!s_view.started) {
+        s_view.started = 1;
+    } else if (s_view.jump >= 0) {
+        s_view.pos = s_view.jump * 4;
+        s_view.jump = -1;
+    } else if (s_view.step) {
+        s_view.pos += s_view.step * 4;
+        s_view.step = 0;
+    } else if (!s_view.paused) {
+        s_view.pos += s_view.sign * s_view.quarter;
+    }
+    if (s_view.pos < 0)
+        s_view.pos = 0;
+    if (s_view.pos > last * 4) {
+        if (s_view.sign > 0 && !s_view.paused && s_view.quarter == 4)
+            return 0;                   /* (played to its end: the replay is over, as ever) */
+        s_view.pos = last * 4;
+    }
+    const int32_t frame = s_view.pos / 4;
+    const int32_t asPlayed = !s_view.paused && s_view.sign > 0 && s_view.quarter == 4 && frame == was + 1;
+    if (frame == was && s_view.started && s_play.cursor > 0) {
+        *fresh = 0;                     /* (the same frame again: held) */
+    } else if (!asPlayed && s_play.cursor != 0) {
+        if (frame < was || frame > was + 8)
+            _replayState = 1;           /* (a jump: the camera put there, not panned) */
+        for (s_play.audioCursor = 0; s_play.audioCursor < s_play.audioCount &&
+             s_play.audio[s_play.audioCursor].frame < (uint32_t)frame; s_play.audioCursor++)
+            ;
+        *fresh = 0;
+    }
+    if (!*fresh && !s_view.silent) {
+        AudioSDL_SilenceSfx();
+        s_view.silent = 1;
+    } else if (*fresh) {
+        s_view.silent = 0;
+    }
+    s_play.cursor = (uint32_t)frame;
+    return 1;
+}
+
+/* The frame box (SWOS 2020's, the bottom left: speed, state, scene, frame and a bar). */
+static void viewer_overlay(void)
+{
+    extern void *_charTables[];
+    extern volatile uintptr_t _frontbufferBasePtr;
+    char buf[48];
+    const int32_t h = _screen_height, y0 = h - 22, y1 = y0 - 13, y2 = y1 - 13, y3 = y2 - 13;
+    uint8_t *fb = (uint8_t *)(uintptr_t)_frontbufferBasePtr;
+    const int32_t x0 = _menu_draw_x_offset, stride = FRONTBUFFER_ROW_STRIDE_BYTES;
+    for (int32_t y = y3 - 5; y < h; y++)
+        for (int32_t x = x0; x < x0 + 132; x++)
+            if (fb[y * stride + x] < 128)
+                fb[y * stride + x] += 128;
+    uint8_t *small = (uint8_t *)_charTables[0];
+    snprintf(buf, sizeof buf, " REPLAY SPEED: %d.%02dX", (int)(s_view.quarter / 4), (int)(s_view.quarter % 4 * 25));
+    DrawMenuText(0, (uint16_t)y3, 2, (uint8_t *)buf, small);
+    DrawMenuText(0, (uint16_t)y2, 2, (uint8_t *)(s_view.paused ? " PAUSED" : s_view.sign < 0 ? " REWINDING" : " FORWARDING"),
+                 small);
+    DrawMenuText(0, (uint16_t)y1, 2, (uint8_t *)" SCENE: 1 / 1", small);
+    const int32_t frame = s_view.pos / 4, total = (int32_t)s_play.frameCount;
+    snprintf(buf, sizeof buf, " FRAME: %4d", (int)frame + 1);
+    DrawMenuText(0, (uint16_t)y0, 2, (uint8_t *)buf, small);
+    snprintf(buf, sizeof buf, " / %-4d", (int)total);
+    DrawMenuText(74, (uint16_t)y0, 2, (uint8_t *)buf, small);
+    const int32_t bx1 = 10, bx2 = bx1 + 112;
+    const int32_t xp = bx1 + (total ? (int32_t)((int64_t)(bx2 - bx1) * frame / total) : 0) - 3;
+    for (int32_t y = y0 + 11; y < y0 + 16; y++)
+        for (int32_t x = bx1; x < bx2; x++)
+            fb[y * stride + x0 + x] = 92;
+    for (int32_t y = y0 + 9; y < y0 + 18 && y < h; y++)
+        for (int32_t x = xp; x < xp + 6; x++)
+            if (x >= 0)
+                fb[y * stride + x0 + x] = 84;
+}
+
 void ReplayV2_DrawFrame(void)
 {
     const uint8_t *h, *sp;
@@ -1866,6 +2162,7 @@ void ReplayV2_DrawFrame(void)
 
     if (!s_play.loaded)
         return;
+    { extern void LiveCast_Pump(void); LiveCast_Pump(); }   /* (a live match's new frames: src/live_cast.c) */
     if (s_player.on) {
         /* No sound carries across a jump or a pause: a seek skips what would have
          * ended a looping effect, which then played on regardless of where the
@@ -1892,6 +2189,8 @@ void ReplayV2_DrawFrame(void)
                 s_play.cursor--;
             fresh = 0;
         }
+    } else if (s_view.active && !viewer_advance(&fresh)) {
+        s_play.cursor = s_play.frameCount;
     }
     if (s_play.cursor >= s_play.frameCount) {
         _replayState = 0;
@@ -1899,6 +2198,9 @@ void ReplayV2_DrawFrame(void)
     }
     h = s_play.frms + s_play.offsets[s_play.cursor];
 
+    /* (the replay's start, or a jump: the mods' trail starts again; a held frame is the same one) */
+    const int32_t modFirst = _replayState == 1 ||
+                             (s_play.cursor != s_modLastCursor + 1 && s_play.cursor != s_modLastCursor);
     if (_replayState == 1) {
         /* The first frame: the camera straight to where the match had it, both buffers. */
         int16_t x = (int16_t)(BE_READ_U32(h + 2) >> 16), y = (int16_t)(shown_camera_y(BE_READ_U32(h + 6)) >> 16);
@@ -1930,6 +2232,8 @@ void ReplayV2_DrawFrame(void)
     _hilRightTeamGoals = BE_READ_U16(h + 12);
     _animPatternsState = BE_READ_U16(h + 14);
     DrawAnimatedPatterns();
+    ModHooks_ReplayFrameBegin(modFirst, fresh);     /* (under the sprites: the weather mod's mud) */
+    s_modLastCursor = s_play.cursor;
 
     origin = Render_CameraX();
     camY = Render_CameraY();
@@ -1944,6 +2248,7 @@ void ReplayV2_DrawFrame(void)
     for (i = 0; i < sprites; i++, sp += SPRITE_BYTES) {
         extern int _menu_draw_x_offset;
         uint16_t image = BE_READ_U16(sp);
+        ModHooks_ReplaySprite(image, (int16_t)BE_READ_U16(sp + 2), (int16_t)BE_READ_U16(sp + 4));
         /* Where it lands on screen: the world position through the playback camera, as
          * live drawing does -- moved to where a player's screen had it, when that is
          * the screen being shown. */
@@ -1976,6 +2281,8 @@ void ReplayV2_DrawFrame(void)
            s_play.audio[s_play.audioCursor].frame <= s_play.cursor)
         fire_sound(&s_play.audio[s_play.audioCursor++]);
 
+    if (s_view.active && s_view.overlay && !s_trace)
+        viewer_overlay();
     if (s_trace)
         trace_frame(s_play.cursor);
     s_play.cursor++;
@@ -2024,6 +2331,33 @@ void ReplayV2_ViewTestRun(void)
             extern void    CopyTeamsAndHeader(void);
             if (LoadHilFile((uint8_t *)s_viewPath) != 0)
                 exit(1);
+            {   /* SWOS_TEST_HIL_RESAVE=NAME: saved as SAVE HIGHLIGHTS saves (DoSaveHighlights),
+                 * loaded back, every byte of the highlights compared, then played from it */
+                const char *re = getenv("SWOS_TEST_HIL_RESAVE");
+                if (re && *re) {
+                    extern int16_t DoSaveHighlights(uint8_t *filename);
+                    extern uint16_t _hilNumGoals;
+                    const uint32_t n = 2254u + (uint32_t)_hilNumGoals * 19000u;
+                    uint8_t *before = (uint8_t *)malloc(n);
+                    uint32_t diff = 0, first = 0;
+                    memcpy(before, _hilFileBuffer, n);
+                    if (DoSaveHighlights((uint8_t *)re) != 0 || LoadHilFile((uint8_t *)re) != 0)
+                        exit(1);
+                    for (uint32_t i = 0; i < n; i++)
+                        if (before[i] != _hilFileBuffer[i]) {
+                            if (!diff++)
+                                first = i;
+                            if (getenv("SWOS_TEST_HIL_DIFFS"))
+                                fprintf(stderr, "[replay] byte %u: %02X -> %02X\n", (unsigned)i, before[i], _hilFileBuffer[i]);
+                        }
+                    fprintf(stderr, "[replay] %s saved as %s and loaded back: %u goals, %u of %u bytes differ%s",
+                            s_viewPath, re, (unsigned)_hilNumGoals, (unsigned)diff, (unsigned)n,
+                            diff ? "" : "\n");
+                    if (diff)
+                        fprintf(stderr, " (the first at %u)\n", (unsigned)first);
+                    free(before);
+                }
+            }
             _hilStarted = 1;
             _gameMaxSubstitutes = _hilMaxSubstitutes;
             _teamsLoaded = 0;
@@ -2037,6 +2371,15 @@ void ReplayV2_ViewTestRun(void)
     }
     if (ReplayV2_Load((const uint8_t *)s_viewPath) != 0)
         exit(1);
+    {   /* SWOS_TEST_SRP_SAVECOPY=NAME: kept under NAME as SAVE HIGHLIGHTS keeps a loaded .SRP */
+        const char *cp = getenv("SWOS_TEST_SRP_SAVECOPY");
+        if (cp && *cp) {
+            const int32_t r = ReplayV2_SaveCopy((const uint8_t *)cp);
+            fprintf(stderr, "[replay] %s saved as %s: %s\n", s_viewPath, cp, r ? "FAILED" : "ok");
+            if (r)
+                exit(1);
+        }
+    }
     _hilStarted = 1;
     _gameMaxSubstitutes = _hilMaxSubstitutes;
     _teamsLoaded = 0;

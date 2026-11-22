@@ -16,7 +16,7 @@ unsigned SWOS_IdentityCheck(void);
 unsigned SWOS_IdentityAudit(void);
 /* Validates and safely reconciles career identities at season end / before save. */
 unsigned SWOS_CareerIntegrityCheck(const char *phase, unsigned season);
-/* Experimental, checked club-to-canonical-slot lookup. Returns zero on an unmapped club. */
+/* Resolve a live club/slot to its generated, manual or canonical identity. */
 void SWOS_IdentityRegisterClub(unsigned club,unsigned file,unsigned record);
 void SWOS_IdentityInvalidateClub(unsigned club);
 unsigned SWOS_IdentityAgeForClub(unsigned club,unsigned slot,unsigned *age,unsigned *id);

@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "team_db.h"
+#include "world.h"
 #include "endian_helpers.h"
 #include "swos_io.h"
 
@@ -39,137 +40,20 @@ extern int     DataJson_LoadTeamIdsForCountry(int countryNum, struct TeamDbIds *
 
 enum {
     kTeamRecord = 684,
-    kMaxTeamsInFile = 93,           /* what the game's own team buffer holds (teams.c) */
+    kMaxTeamsInFile = TEAM_FILE_MAX_TEAMS,  /* what the game's own team buffer holds (game_types.h) */
     kCountries = 256,
     kOwnCustoms = 100,              /* CUSTOMS.EDT, the player's own edited teams: not the database */
 };
 
-/* ---- SHA-1 (FIPS 180-1), for uuid5 and the checksum. Not a security boundary: an id
- * scheme and a fingerprint; what guards a match is the comparison, not the hash. ---- */
-
-typedef struct Sha1 {
-    uint32_t h[5];
-    uint8_t  block[64];
-    uint32_t used;
-    uint64_t bits;
-} Sha1;
-
-static uint32_t rol(uint32_t v, int32_t n) { return (v << n) | (v >> (32 - n)); }
-
-static void sha1_block(Sha1 *s)
-{
-    uint32_t w[80], a = s->h[0], b = s->h[1], c = s->h[2], d = s->h[3], e = s->h[4], f, k, t;
-    int32_t i;
-
-    for (i = 0; i < 16; i++)
-        w[i] = (uint32_t)s->block[i * 4] << 24 | (uint32_t)s->block[i * 4 + 1] << 16 |
-               (uint32_t)s->block[i * 4 + 2] << 8 | s->block[i * 4 + 3];
-    for (; i < 80; i++)
-        w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
-    for (i = 0; i < 80; i++) {
-        if (i < 20)      { f = (b & c) | (~b & d);          k = 0x5A827999u; }
-        else if (i < 40) { f = b ^ c ^ d;                   k = 0x6ED9EBA1u; }
-        else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDCu; }
-        else             { f = b ^ c ^ d;                   k = 0xCA62C1D6u; }
-        t = rol(a, 5) + f + e + k + w[i];
-        e = d; d = c; c = rol(b, 30); b = a; a = t;
-    }
-    s->h[0] += a; s->h[1] += b; s->h[2] += c; s->h[3] += d; s->h[4] += e;
-}
-
-static void sha1_start(Sha1 *s)
-{
-    s->h[0] = 0x67452301u; s->h[1] = 0xEFCDAB89u; s->h[2] = 0x98BADCFEu;
-    s->h[3] = 0x10325476u; s->h[4] = 0xC3D2E1F0u;
-    s->used = 0;
-    s->bits = 0;
-}
-
-static void sha1_add(Sha1 *s, const uint8_t *data, uint32_t count)
-{
-    uint32_t i;
-    for (i = 0; i < count; i++) {
-        s->block[s->used++] = data[i];
-        if (s->used == 64) {
-            sha1_block(s);
-            s->used = 0;
-        }
-    }
-    s->bits += (uint64_t)count * 8;
-}
-
-static void sha1_end(Sha1 *s, uint8_t out[20])
-{
-    uint64_t bits = s->bits;
-    uint8_t pad = 0x80, zero = 0, length[8];
-    int32_t i;
-
-    sha1_add(s, &pad, 1);
-    while (s->used != 56)
-        sha1_add(s, &zero, 1);
-    for (i = 0; i < 8; i++)
-        length[i] = (uint8_t)(bits >> (56 - i * 8));
-    sha1_add(s, length, 8);
-    for (i = 0; i < 20; i++)
-        out[i] = (uint8_t)(s->h[i / 4] >> (24 - (i % 4) * 8));
-}
-
-static void hex(const uint8_t *bytes, int32_t count, char *out)
-{
-    static const char digits[] = "0123456789abcdef";
-    int32_t i;
-    for (i = 0; i < count; i++) {
-        out[i * 2] = digits[bytes[i] >> 4];
-        out[i * 2 + 1] = digits[bytes[i] & 15];
-    }
-    out[count * 2] = '\0';
-}
-
-/* ---- ids ---- */
-
-/* uuid5(NAMESPACE_URL, "https://us.swos.eu/team-data") = af19cc5a-6529-537b-935b-
- * 407bd73b75fb. Never change it: every id of the original database follows from it. */
-static const uint8_t k_namespace[16] = {
-    0xaf, 0x19, 0xcc, 0x5a, 0x65, 0x29, 0x53, 0x7b, 0x93, 0x5b, 0x40, 0x7b, 0xd7, 0x3b, 0x75, 0xfb,
-};
-
-static void uuid5(const char *name, char out[TEAM_UUID_TEXT])
-{
-    Sha1 s;
-    uint8_t digest[20];
-    char text[33];
-
-    sha1_start(&s);
-    sha1_add(&s, k_namespace, sizeof k_namespace);
-    sha1_add(&s, (const uint8_t *)name, (uint32_t)strlen(name));
-    sha1_end(&s, digest);
-    digest[6] = (uint8_t)((digest[6] & 0x0F) | 0x50);       /* version 5 */
-    digest[8] = (uint8_t)((digest[8] & 0x3F) | 0x80);       /* the RFC 4122 variant */
-    hex(digest, 16, text);
-    snprintf(out, TEAM_UUID_TEXT, "%.8s-%.4s-%.4s-%.4s-%.12s", text, text + 8, text + 12, text + 16, text + 20);
-}
-
-void TeamDb_DerivedTeamUuid(int32_t country, int32_t ordinal, char out[TEAM_UUID_TEXT])
-{
-    char name[48];
-    snprintf(name, sizeof name, "96-97/team/%d/%d", (int)country, (int)ordinal);
-    uuid5(name, out);
-}
-
-void TeamDb_DerivedPlayerUuid(int32_t country, int32_t ordinal, int32_t index, char out[TEAM_UUID_TEXT])
-{
-    char name[64];
-    snprintf(name, sizeof name, "96-97/team/%d/%d/player/%d", (int)country, (int)ordinal, (int)index);
-    uuid5(name, out);
-}
+/* (SHA-1, uuid5 and the derived 96/97 ids: src/team_uuid.c, both targets) */
 
 void TeamDb_Checksum(const TeamFileEx *team, char out[TEAM_CHECKSUM_TEXT])
 {
-    Sha1 s;
+    TeamSha1 s;
     uint8_t digest[20];
     int32_t i;
 
-    sha1_start(&s);
+    TeamSha1_Start(&s);
     for (i = 0; i < TEAM_PLAYERS; i++) {
         const PlayerFile *p = &team->players[i];
         const uint8_t plays[9] = {
@@ -180,19 +64,21 @@ void TeamDb_Checksum(const TeamFileEx *team, char out[TEAM_CHECKSUM_TEXT])
             (uint8_t)((p->speedFinishing >> 4) & 15),  (uint8_t)(p->speedFinishing & 15),
             (uint8_t)p->price,
         };
-        sha1_add(&s, plays, sizeof plays);
+        TeamSha1_Add(&s, plays, sizeof plays);
     }
-    sha1_end(&s, digest);
-    hex(digest, (TEAM_CHECKSUM_TEXT - 1) / 2, out);
+    TeamSha1_End(&s, digest);
+    TeamUuid_Hex(digest, (TEAM_CHECKSUM_TEXT - 1) / 2, out);
 }
 
 /* ---- the database, a country at a time ---- */
 
+/* [0] 96/97's, [1] the world being played when it is not 96/97 (s_heldWorld: which). */
 static struct Country {
     TeamDbEntry *entries;
     int32_t      count;
     int32_t      absent;
-} s_country[kCountries];
+} s_country[2][kCountries];
+static int32_t s_heldWorld = -1;
 
 /* One country's teams as LoadTeamFile reads them -- the JSON database unless it is
  * turned off or has no such country, then the binary TEAM.nnn (big-endian count) --
@@ -228,21 +114,37 @@ static int32_t read_country(int32_t country, uint8_t *records, uint32_t size, Te
     return (uint32_t)count * kTeamRecord + 2 <= got ? count : 0;
 }
 
-static struct Country *country_of(int32_t country)
+/* A country of a database: 96/97's (`of9697`) or the world being played. */
+static struct Country *country_in(int32_t of9697, int32_t country)
 {
     static uint8_t   records[2 + kMaxTeamsInFile * kTeamRecord];
     static TeamDbIds ids[kMaxTeamsInFile];
+    const int32_t played = (int32_t)World_Current();
+    const int32_t db = of9697 || played == WORLD_9697 ? 0 : 1;
     struct Country *c;
     int32_t i, p;
 
     if (country < 0 || country >= kCountries || country == kOwnCustoms)
         return NULL;
-    c = &s_country[country];
+    if (db == 1 && s_heldWorld != played) {     /* another world now: its files, not the last one's */
+        for (i = 0; i < kCountries; i++) {
+            free(s_country[1][i].entries);
+            memset(&s_country[1][i], 0, sizeof s_country[1][i]);
+        }
+        s_heldWorld = played;
+    }
+    c = &s_country[db][country];
     if (c->absent)
         return NULL;
     if (c->entries)
         return c;
-    c->count = read_country(country, records, (uint32_t)sizeof records, ids);
+    if (db == 0 && played != WORLD_9697) {      /* 96/97's file under the world's: read with 96/97 on */
+        World_Set(World_TagOf(WORLD_9697));
+        c->count = read_country(country, records, (uint32_t)sizeof records, ids);
+        World_Set(World_TagOf((WorldId)played));
+    } else {
+        c->count = read_country(country, records, (uint32_t)sizeof records, ids);
+    }
     c->entries = c->count > 0 ? (TeamDbEntry *)calloc((size_t)c->count, sizeof *c->entries) : NULL;
     if (!c->entries) {
         c->absent = 1;
@@ -253,6 +155,7 @@ static struct Country *country_of(int32_t country)
         TeamDbEntry *e = &c->entries[i];
         memcpy(&e->team, records + 2 + (size_t)i * kTeamRecord, sizeof e->team);
         e->ids = ids[i];
+        e->world = db == 0 ? WORLD_9697 : played;
         /* What the file does not state is the 96/97 database's, by the formula. */
         if (!e->ids.uuid[0])
             TeamDb_DerivedTeamUuid(e->team.team.countryNumber, e->team.team.teamOrdinal, e->ids.uuid);
@@ -273,15 +176,15 @@ static struct Country *country_of(int32_t country)
     return c;
 }
 
-const TeamDbEntry *TeamDb_Entry(int32_t country, int32_t index)
+static const TeamDbEntry *entry_in(int32_t of9697, int32_t country, int32_t index)
 {
-    const struct Country *c = country_of(country);
+    const struct Country *c = country_in(of9697, country);
     return c && index >= 0 && index < c->count ? &c->entries[index] : NULL;
 }
 
-const TeamDbEntry *TeamDb_Team(int32_t country, int32_t ordinal)
+static const TeamDbEntry *team_in(int32_t of9697, int32_t country, int32_t ordinal)
 {
-    const struct Country *c = country_of(country);
+    const struct Country *c = country_in(of9697, country);
     int32_t i;
 
     for (i = 0; c && i < c->count; i++)
@@ -290,17 +193,28 @@ const TeamDbEntry *TeamDb_Team(int32_t country, int32_t ordinal)
     return NULL;
 }
 
-const TeamDbEntry *TeamDb_ByUuid(const char *uuid)
+const TeamDbEntry *TeamDb_Entry(int32_t country, int32_t index)     { return entry_in(0, country, index); }
+const TeamDbEntry *TeamDb_Team(int32_t country, int32_t ordinal)    { return team_in(0, country, ordinal); }
+const TeamDbEntry *TeamDb_Entry9697(int32_t country, int32_t index) { return entry_in(1, country, index); }
+const TeamDbEntry *TeamDb_Team9697(int32_t country, int32_t ordinal) { return team_in(1, country, ordinal); }
+
+static const TeamDbEntry *uuid_in(int32_t of9697, const char *uuid)
 {
     int32_t country, i;
 
     for (country = 0; country < kCountries; country++) {
-        const struct Country *c = country_of(country);
+        const struct Country *c = country_in(of9697, country);
         for (i = 0; c && i < c->count; i++)
             if (strcmp(c->entries[i].ids.uuid, uuid) == 0)
                 return &c->entries[i];
     }
     return NULL;
+}
+
+const TeamDbEntry *TeamDb_ByUuid(const char *uuid)
+{
+    const TeamDbEntry *e = uuid_in(0, uuid);
+    return e || World_Current() == WORLD_9697 ? e : uuid_in(1, uuid);
 }
 
 int32_t TeamDb_SelfTest(void)
@@ -324,15 +238,16 @@ int32_t TeamDb_SelfTest(void)
             bad++;
         }
     }
+    /* (96/97's database, whatever world is played: its ids are the formula's; a world states its own) */
     for (country = 0; country < kCountries; country++) {
         const TeamDbEntry *e;
-        for (i = 0; (e = TeamDb_Entry(country, i)) != NULL; i++) {
+        for (i = 0; (e = TeamDb_Entry9697(country, i)) != NULL; i++) {
             if (e->team.team.countryNumber != country)
                 continue;                       /* a record filed under another country's number */
             teams++;
             ids += 1 + TEAM_PLAYERS;
             TeamDb_DerivedTeamUuid(country, e->team.team.teamOrdinal, want);
-            if (strcmp(want, e->ids.uuid) != 0 || !e->canonical || TeamDb_ByUuid(e->ids.uuid) != e)
+            if (strcmp(want, e->ids.uuid) != 0 || !e->canonical || uuid_in(1, e->ids.uuid) != e)
                 bad++;
             for (p = 0; p < TEAM_PLAYERS; p++) {
                 TeamDb_DerivedPlayerUuid(country, e->team.team.teamOrdinal, p, want);

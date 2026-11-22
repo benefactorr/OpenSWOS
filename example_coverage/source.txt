@@ -1,0 +1,3 @@
+Dataset: https://pub-e682421888d945d684bcae8890b0ec20.r2.dev/data/
+Valuation dates: 2025-07-01 to 2026-06-12
+GBP per EUR: 0.85973 (2026-07-01)

@@ -45,10 +45,11 @@ void JobOffersFinish(void);
 void JobOffersCommon(MenuEntry *entry);
 void OldJobOffersCommon(MenuEntry *entry);
 void JobOffersExit(void);
-void JobOffers_TogglePage(void);
 
 /* --- Career_MaybeGenerateJobOffer (Chunk 216) --- */
 void Career_MaybeGenerateJobOffer(void);
 
-/* V3: starting-career nationality mapping and player pool guard. */
-int SWOS_NationalCareerStartEligible(uint16_t teamId);
+#ifdef SWOS_SDL_BUILD
+/* One-based season of the most recent 1996/97 national hiring round. */
+extern uint16_t _classicNationalHiringRoundSeason;
+#endif

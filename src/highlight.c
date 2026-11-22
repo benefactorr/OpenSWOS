@@ -9,6 +9,7 @@
  */
 
 #include "highlight.h"
+#include "goal_ring.h"
 #include "game_types.h"
 #include "deterministic.h"
 #include "panic.h"
@@ -476,6 +477,16 @@ void SetPitchTypeAndNumber(void)
         d0 = 0x500;
 
     _pitchNumberAndType = (uint16_t)_pitchType + d0;
+#ifdef SWOS_SDL_BUILD
+    {
+        /* A mod's match on an exact pitch (mod_match.c, H7): after both random numbers, so the
+         * generators are where any kick-off leaves them; the pitch's own art (1..6). */
+        extern int16_t ModMatch_PitchNumber(void);
+        const int16_t n = ModMatch_PitchNumber();
+        if (n)
+            _pitchNumberAndType = (uint16_t)((_pitchNumberAndType & 0x00FF) | (uint16_t)((n - 1) << 8));
+    }
+#endif
 
 #ifdef DETERMINISTIC_MODE
     /* Force fixed pitch to ensure ASM and C versions match */
@@ -487,9 +498,14 @@ void SetPitchTypeAndNumber(void)
  * CopyTeamsAndHeader
  * ============================================================ */
 __attribute__((used, externally_visible, optimize("no-tree-loop-distribute-patterns")))
+/* One scene of the file alone (ModApi_ViewHighlights: SWOS Galore's "SCENE n OF m"), 0-based; -1 all */
+int32_t _gHilOnlyScene = -1;
+
 void CopyTeamsAndHeader(void)
 {
     _numScenesInHilFile = _hilNumGoals;
+    if (_gHilOnlyScene >= 0 && _gHilOnlyScene < (int32_t)_hilNumGoals)
+        _numScenesInHilFile = (uint16_t)(_gHilOnlyScene + 1);   /* (it stops after that one) */
     _pitchNumberAndType = _hilPitchNumber;
 #ifdef SWOS_SDL_BUILD
     {
@@ -596,6 +612,8 @@ void SaveHighlightsPointers(void)
     _savedCurrentGoalPtr = (uintptr_t)_currentGoalPtr;
     _goIntoHighlightsLoop = 1;
     _hilSceneNumber = 0xFFFF;
+    if (_gHilOnlyScene > 0 && _gHilOnlyScene < (int32_t)_numScenesInHilFile)
+        _hilSceneNumber = (uint16_t)(_gHilOnlyScene - 1);         /* (the next one is that one) */
 }
 
 /* ============================================================
@@ -623,6 +641,16 @@ void FadeAndSaveHighlightScene(void)
     FadeIn();
 }
 
+/* `p` moved `bytes` back in the ring (_goalBasePtr .. _nextGoalPtr). */
+static uint8_t *ring_back(uint8_t *p, uint32_t bytes)
+{
+    const uint32_t size = (uint32_t)(_nextGoalPtr - _goalBasePtr);
+    uint32_t off = (uint32_t)(p - _goalBasePtr) % size;
+    bytes %= size;
+    off = off >= bytes ? off - bytes : off + size - bytes;
+    return _goalBasePtr + off;
+}
+
 /* ============================================================
  * SaveHighlightScene
  * Saves current replay ring buffer segment to the hil goals buffer.
@@ -648,10 +676,12 @@ void SaveHighlightScene(void)
         _numScenesInHilFile--;
     }
 
-    /* Scan forward from currentHilPtr for a frame-start marker (bit 7 of first byte set).
-     * Scan at most 19000 bytes (4750 longs). */
+    /* Scan forward for a frame-start marker (bit 7 of first byte set), at most 19000 bytes
+     * (4750 longs) -- from a scene's length back from currentHilPtr, the newest frame: the
+     * whole ring on the Amiga, as the original, and the newest 19000 bytes of the SDL build's
+     * bigger one (goal_ring.h), so a scene is the .HIL's 19000 bytes either way. */
     uint32_t count = 0;
-    uint8_t *p = _currentHilPtr;
+    uint8_t *p = ring_back(_currentHilPtr, HIL_SCENE_BYTES);
 
     for (;;) {
         if (count == HIL_SCENE_BYTES)
@@ -781,8 +811,14 @@ void DrawReplayFrame(void)
     }
 #endif
 
+#ifdef SWOS_SDL_BUILD
+    static int32_t s_modFirst;                  /* (the mods' replay hooks: a new replay) */
+#endif
     if (_replayState == 1) {
         /* STATE 1 → 2: Initialize replay */
+#ifdef SWOS_SDL_BUILD
+        s_modFirst = 1;
+#endif
         _replayState = 2;
         _savedCameraX = _cameraX.s.i;
         _savedCameraY = _cameraY.s.i;
@@ -822,6 +858,13 @@ void DrawReplayFrame(void)
     a0 = wrapPointerFwd(a0);
 
     DrawAnimatedPatterns();
+#ifdef SWOS_SDL_BUILD
+    {   /* (under the sprites: the weather mod's mud; include/mod_hooks.h) */
+        extern void ModHooks_ReplayFrameBegin(int32_t first, int32_t fresh);
+        ModHooks_ReplayFrameBegin(s_modFirst, 1);
+        s_modFirst = 0;
+    }
+#endif
 
     /* Read next entry after frame marker */
     d0 = BE_READ_U32(a0);
@@ -866,6 +909,10 @@ sprite_decode:
             extern int _menu_draw_x_offset;
             int32_t worldX = sx + (int32_t)s_replayRecCamX;
             int32_t worldY = sy + (int32_t)s_replayRecCamY;
+            {
+                extern void ModHooks_ReplaySprite(uint16_t image, int16_t left, int16_t top);
+                ModHooks_ReplaySprite((uint16_t)sprIdx, (int16_t)worldX, (int16_t)worldY);
+            }
 
             /* ---- Goal-overlay anchor guard ------------------------------------
              * The goal overlay is the one recorded sprite whose world position is
@@ -972,6 +1019,26 @@ after_decode:
 
         uint16_t leftGoals  = _hilLeftTeamGoals;
         uint16_t rightGoals = _hilRightTeamGoals;
+#ifdef SWOS_SDL_BUILD
+        /* On the screen-pinned HUD layer, as a match's own score is (sprites.c HUD_LAYER_Z_MIN):
+         * drawn into the frame, it moved with the pitch's sub-pixel scroll, a pixel this way and
+         * that as the camera panned -- a whole-match replay keeps the camera in full 16.16. */
+        extern uint8_t *Platform_HudLayerBuffer(void);
+        extern void     Platform_HudLayerMark(int, int, int, int);
+        extern volatile uintptr_t _frontbufferBasePtr;
+        uint8_t *hudLayer = Platform_HudLayerBuffer();
+        const uintptr_t savedFbBase = _frontbufferBasePtr;
+        if (hudLayer) {
+            /* Cleared first: the layer is reset by DrawSprites (sprites.c), which a replay
+             * never runs, so each frame's score was drawn over every one before it -- a whole
+             * match's 2-0 on top of its 1-0 and 0-0 (the recordings player, 2026-11-07). */
+            extern void Platform_HudLayerReset(void);
+            Platform_HudLayerReset();
+            _frontbufferBasePtr = (uintptr_t)hudLayer;
+            extern int _menu_draw_x_offset;
+            Platform_HudLayerMark((int)bx + _menu_draw_x_offset, (int)by, 64, 32);
+        }
+#endif
         uint16_t lTens = leftGoals / 10,  lUnits = leftGoals % 10;
         uint16_t rTens = rightGoals / 10, rUnits = rightGoals % 10;
 
@@ -989,6 +1056,10 @@ after_decode:
         /* Right team goals (SPR_BIG_0_ALT digit sprites) */
         if (rTens) { DarkenRectangle(SPR_BIG_0_ALT + rTens, bx, by); bx += 12; }
         DarkenRectangle(SPR_BIG_0_ALT + rUnits, bx, by);
+#ifdef SWOS_SDL_BUILD
+        if (hudLayer)
+            _frontbufferBasePtr = savedFbBase;
+#endif
     }
 
     /* State 3 timing: stretch each replay frame across 2 extra ticks
@@ -1043,6 +1114,52 @@ void ReplayUpdateCameraAndSwapBuffers(int16_t targetX, int16_t targetY)
     MirrorFrontbuffer();
 }
 
+#ifdef SWOS_SDL_BUILD
+/* An instant replay's first frame, from the ring's oldest (`oldest`): as far back as a 4:3
+ * screen's 19000 bytes would have gone (goal_ring.h). Each frame costs what it would have cost
+ * there -- its marker's three longs, and a long for each sprite drawn in the middle 336 pixels
+ * (a 4:3 screen draws no other) -- and the oldest frames go until the rest fits. At 336 wide
+ * every sprite counts: the original's 19000 bytes exactly. */
+static uint8_t *replay_start_as_4_3(uint8_t *oldest)
+{
+    extern int _screen_width;
+    enum { kMaxFrames = GOAL_RING_BYTES / 12u + 1u };
+    static uint8_t *start[kMaxFrames];
+    static uint16_t cost[kMaxFrames];
+    const int32_t lo = (_screen_width - 336) / 2, hi = lo + 336;
+    const uint32_t ringLongs = (uint32_t)(_nextGoalPtr - _goalBasePtr) / 4u;
+    uint32_t n = 0, total = 0, i = 0;
+    int32_t skip = 0;
+    uint8_t *p = oldest;
+
+    for (uint32_t steps = 0; p != _currentHilPtr && steps < ringLongs; steps++) {
+        const uint32_t v = BE_READ_U32(p);
+        if (skip)
+            skip--;                     /* (the score and the animated patterns after a marker) */
+        else if ((v & 0x80000000u) && v != 0xFFFFFFFFu) {
+            if (n == kMaxFrames)
+                break;
+            start[n] = p;
+            cost[n++] = 12;
+            total += 12;
+            skip = 2;
+        } else if (n && !(v & 0x80000000u)) {
+            const int32_t x = (int32_t)((v >> 10) & 0x3FF);     /* (the sprite's left, on screen) */
+            if (x + 16 > lo && x < hi) {
+                cost[n - 1] += 4;
+                total += 4;
+            }
+        }
+        p += 4;
+        if (p == _nextGoalPtr)
+            p = _goalBasePtr;
+    }
+    while (i + 1 < n && total > GOAL_SCENE_BYTES)
+        total -= cost[i++];
+    return n ? start[i] : oldest;
+}
+#endif
+
 /* ============================================================
  * HandleInstantReplayStateSwitch
  * ============================================================ */
@@ -1058,9 +1175,10 @@ void HandleInstantReplayStateSwitch(void)
          * BE (Amiga) and LE (SDL) hosts. */
         uint32_t count = 0;
         uint8_t *p = _currentHilPtr;
+        const uint32_t ringBytes = (uint32_t)(_nextGoalPtr - _goalBasePtr);
 
         for (;;) {
-            if (count == HIL_SCENE_BYTES)
+            if (count == ringBytes)
                 return;  /* Not found */
             count += 4;
             p += 4;
@@ -1068,6 +1186,13 @@ void HandleInstantReplayStateSwitch(void)
                 p = _goalBasePtr;
             if (*p & 0x80) {
                 /* Found frame start */
+#ifdef SWOS_SDL_BUILD
+                {   /* the match's own ring (not a highlights scene): as long as at 4:3 */
+                    extern char _goalBase[];
+                    if (_goalBasePtr == (uint8_t *)_goalBase)
+                        p = replay_start_as_4_3(p);
+                }
+#endif
                 _currentGoalPtr = p;
                 _replayState = 1;
                 return;

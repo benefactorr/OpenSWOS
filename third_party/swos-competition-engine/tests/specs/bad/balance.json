@@ -1,0 +1,318 @@
+{
+ "schema": "swc/1",
+ "id": "test.mini",
+ "host_world": 9,
+ "_note": "A synthetic two-level league + a cup: the validator's smallest green case (no real data).",
+ "languages": [
+  "it",
+  "en",
+  "fr",
+  "de"
+ ],
+ "countries": {
+  "TST": {
+   "names": {
+    "it": "TESTLANDIA",
+    "en": "TESTLAND",
+    "fr": "TESTLANDE",
+    "de": "TESTLAND"
+   }
+  }
+ },
+ "clubs": [
+  {
+   "id": "club:tst.alpha",
+   "name": "ALPHA",
+   "country": "TST",
+   "host": {
+    "file": 90,
+    "ordinal": 0
+   }
+  },
+  {
+   "id": "club:tst.beta",
+   "name": "BETA",
+   "country": "TST",
+   "host": {
+    "file": 90,
+    "ordinal": 1
+   }
+  },
+  {
+   "id": "club:tst.gamma",
+   "name": "GAMMA",
+   "country": "TST",
+   "host": {
+    "file": 90,
+    "ordinal": 2
+   }
+  },
+  {
+   "id": "club:tst.delta",
+   "name": "DELTA",
+   "country": "TST",
+   "host": {
+    "file": 90,
+    "ordinal": 3
+   }
+  },
+  {
+   "id": "club:tst.epsilon",
+   "name": "EPSILON",
+   "country": "TST",
+   "host": {
+    "file": 90,
+    "ordinal": 4
+   }
+  },
+  {
+   "id": "club:tst.zeta",
+   "name": "ZETA",
+   "country": "TST",
+   "host": {
+    "file": 90,
+    "ordinal": 5
+   }
+  },
+  {
+   "id": "club:tst.eta",
+   "name": "ETA",
+   "country": "TST",
+   "host": {
+    "file": 90,
+    "ordinal": 6
+   }
+  },
+  {
+   "id": "club:tst.theta",
+   "name": "THETA",
+   "country": "TST",
+   "host": {
+    "file": 90,
+    "ordinal": 7
+   }
+  }
+ ],
+ "competitions": [
+  {
+   "id": "tst.one",
+   "kind": "league",
+   "country": "TST",
+   "level": 1,
+   "names": {
+    "it": [
+     "PRIMA",
+     "PRIMA"
+    ],
+    "en": [
+     "FIRST",
+     "FIRST"
+    ],
+    "fr": [
+     "PREMIERE",
+     "PREMIERE"
+    ],
+    "de": [
+     "ERSTE",
+     "ERSTE"
+    ]
+   },
+   "participants": {
+    "count": 4,
+    "clubs": [
+     "club:tst.alpha",
+     "club:tst.beta",
+     "club:tst.gamma",
+     "club:tst.delta"
+    ]
+   },
+   "points": {
+    "win": 3,
+    "draw": 1,
+    "loss": 0
+   },
+   "stages": [
+    {
+     "id": "table",
+     "type": "round_robin",
+     "legs": 2,
+     "tiebreakers": [
+      "points",
+      "goal_difference",
+      "goals_for",
+      "draw_lots"
+     ]
+    }
+   ],
+   "outcomes": [
+    {
+     "stage": "table",
+     "positions": "1",
+     "tag": "champion"
+    },
+    {
+     "stage": "table",
+     "positions": "3-4",
+     "tag": "relegated",
+     "zone": "RETR",
+     "to": "tst.two",
+     "season": "next"
+    }
+   ],
+   "modes": [
+    "career",
+    "season",
+    "preset",
+    "friendly"
+   ]
+  },
+  {
+   "id": "tst.two",
+   "kind": "league",
+   "country": "TST",
+   "level": 2,
+   "names": {
+    "it": [
+     "SECONDA",
+     "SECONDA"
+    ],
+    "en": [
+     "SECOND",
+     "SECOND"
+    ],
+    "fr": [
+     "DEUXIEME",
+     "DEUXIEME"
+    ],
+    "de": [
+     "ZWEITE",
+     "ZWEITE"
+    ]
+   },
+   "participants": {
+    "count": 4,
+    "clubs": [
+     "club:tst.epsilon",
+     "club:tst.zeta",
+     "club:tst.eta",
+     "club:tst.theta"
+    ]
+   },
+   "stages": [
+    {
+     "id": "table",
+     "type": "round_robin",
+     "legs": 2,
+     "tiebreakers": [
+      "faithful_1996"
+     ]
+    }
+   ],
+   "outcomes": [
+    {
+     "stage": "table",
+     "positions": "1",
+     "tag": "promoted",
+     "zone": "PROM",
+     "to": "tst.one",
+     "season": "next"
+    }
+   ],
+   "modes": [
+    "career",
+    "season",
+    "friendly"
+   ]
+  },
+  {
+   "id": "tst.cup",
+   "kind": "cup",
+   "country": "TST",
+   "names": {
+    "it": [
+     "COPPA",
+     "COPPA"
+    ],
+    "en": [
+     "CUP",
+     "CUP"
+    ],
+    "fr": [
+     "COUPE",
+     "COUPE"
+    ],
+    "de": [
+     "POKAL",
+     "POKAL"
+    ]
+   },
+   "participants": {
+    "count": 8,
+    "clubs": [
+     "club:tst.alpha",
+     "club:tst.beta",
+     "club:tst.gamma",
+     "club:tst.delta",
+     "club:tst.epsilon",
+     "club:tst.zeta",
+     "club:tst.eta",
+     "club:tst.theta"
+    ]
+   },
+   "stages": [
+    {
+     "id": "ko",
+     "type": "knockout",
+     "rounds": [
+      {
+       "ties": 4,
+       "legs": 1,
+       "home": "draw",
+       "pairing": "draw",
+       "decider": [
+        "replay",
+        "extra_time",
+        "penalties"
+       ]
+      },
+      {
+       "ties": 2,
+       "legs": 2,
+       "home": "draw",
+       "pairing": "draw",
+       "decider": [
+        "aggregate",
+        "away_goals",
+        "extra_time",
+        "penalties"
+       ]
+      },
+      {
+       "ties": 1,
+       "legs": 1,
+       "home": "neutral",
+       "pairing": "bracket",
+       "decider": [
+        "extra_time",
+        "penalties"
+       ]
+      }
+     ]
+    }
+   ],
+   "outcomes": [
+    {
+     "stage": "ko",
+     "positions": "1",
+     "tag": "champion"
+    }
+   ],
+   "modes": [
+    "career",
+    "season",
+    "preset"
+   ]
+  }
+ ],
+ "_expect": "its size would change"
+}

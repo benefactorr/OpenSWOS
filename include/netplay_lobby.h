@@ -20,6 +20,7 @@
 
 #ifdef SWOS_SDL_BUILD
 
+#include "chat_style.h"
 #include "swos_types.h"
 #include "game_types.h"
 
@@ -51,6 +52,7 @@ typedef struct {
                                      * database team (CustomTeam_Allowed), so they have none here */
     int32_t    verified;            /* LobbyVerified: what the matchmaking server said of this team */
     int32_t    tactic;              /* TACTIC_*: 0..LOBBY_TACTIC_MAX */
+    int32_t    extraDelay;          /* frames this player adds to the input delay (FRAME DELAY +) */
     TeamFileEx team;
     TeamTactics userTactic;         /* the tactic itself when it is a USER one */
     char       name[LOBBY_NAME_MAX + 1];
@@ -68,9 +70,15 @@ typedef struct {
     /* The host's switches, NETPLAY_SW_* (netplay_match.h): how the match is played where
      * the builds since 7d9d6d9 changed it. Only the host's count; both play by them. */
     uint16_t switches;
+    /* What the match counts for, on a service with rankings and leagues (online_account.h;
+     * OpenSWOS's matches are all friendlies): the host's choice at OPEN, and for a league or
+     * cup match, or a ranked one once the service has made it, the service's ids for it. */
+    uint16_t mode;                  /* LOBBY_MODE_* */
+    uint32_t matchId, legId;        /* 0: none (yet) */
 } LobbyRules;
 
 enum { LOBBY_TIE_ET_PEN = 1, LOBBY_TIE_PEN_ONLY = 2 };
+enum { LOBBY_MODE_FRIENDLY = 0, LOBBY_MODE_LEAGUE = 1, LOBBY_MODE_RANKED = 2 };
 
 typedef enum {
     LOBBY_CLOSED,                   /* not begun */
@@ -99,12 +107,26 @@ const char        *NetplayLobby_Notice(void);
 void               NetplayLobby_SetTeam(const TeamFileEx *team);
 void               NetplayLobby_SetTactic(int32_t tactic);
 void               NetplayLobby_SetReady(int32_t ready);
+/* The second leg of a two-legged tie is next (or being played): each player's team stands, and
+ * what the first did to it comes along -- a player sent off, an injury (netplay_lobby.c). */
+int32_t            NetplayLobby_SecondLeg(void);
+/* Whether a side's eleven has a player who cannot play the second leg: SWOS 2020's
+ * checkPlayMatchButtonVisible -- sent off, or injured worse than a knock. */
+int32_t            NetplayLobby_LegBlocked(const TeamFileEx *team);
 void               NetplayLobby_SetActivity(int32_t activity);
 
 /* The host's. Changing the number of legs or the tie-break starts a new tie. A change takes the joiner's ready flag down on the joiner's side, so
  * the joiner agrees to the rules they will play. */
 void               NetplayLobby_SetRules(const LobbyRules *rules);
 int32_t            NetplayLobby_IsHost(void);
+/* FRAME DELAY (SWOS 2020's): never below AUTO -- the delay the link agreed from the ping
+ * (P2PLink_AgreedDelay, Playa's table) -- but either player may add frames, against a stutter.
+ * Both play the same: AUTO plus the larger of the two players' extras, which the host puts in
+ * the START (NetplayLobby_Peer gives it). A change takes both ready flags down. */
+#define LOBBY_EXTRA_DELAY_MAX 4
+void               NetplayLobby_SetExtraDelay(int32_t frames);
+int32_t            NetplayLobby_AutoDelay(void);
+
 /* Both sides ready, on the same rules, and the host has seen the joiner's latest. */
 int32_t            NetplayLobby_CanStart(void);
 /* Host: build the match and offer it. 0 if offered. */
@@ -115,6 +137,7 @@ int32_t            NetplayLobby_Start(void);
  * simulation draw width (P2PLink_AgreedSimWidth). Any pointer may be NULL. */
 void               NetplayLobby_Peer(char *ip, uint32_t ipCap, uint16_t *peerPort,
                                      uint16_t *localPort, int32_t *delay, int32_t *simWidth);
+/* (`delay`: the match's -- the START's once one is agreed, else AUTO plus the larger extra.) */
 
 /* Kick-off: put the agreed setup -- teams, tactics, rules, random seeds -- back in
  * place on this machine, and initialise the teams as the friendly menu does. Call it
@@ -150,6 +173,38 @@ int32_t            NetplayLobby_Rematch(const char *notice);
  * joiner's copy only means a GO pressed before they arrive is not taken down by them.
  * A match that ended early is played again. */
 void               NetplayLobby_MatchPlayed(int32_t completed, int32_t goals1, int32_t goals2);
+
+/* THE CHAT (SWOS 2020's lobby chat). A player's lines go to the other player only --
+ * over this lobby's own link, never through a server -- and the lobby's bot ("JON HARE
+ * (BOT)") adds lines of its own on each machine: who connected, how a match ended, why the
+ * lobby closed. Kept for this lobby, across rematches; a new opponent starts it again. */
+/* A line: up to 100 bytes of UTF-8, small letters and accents kept (match_chat.h
+ * MatchChat_Clean), drawn in the chat font (online_menus.c lobby_chat_overlay). It was 28
+ * capitals, SWOS 2020's field, until 2026-11-07: an older build still takes these lines --
+ * it makes them capitals, '?' for what it cannot draw, and cuts them at 28. */
+#if SWOS_CHAT_DYNAMIC_FONT
+#define LOBBY_CHAT_TEXT  100
+#else
+#define LOBBY_CHAT_TEXT  28         /* (the game's font: chat_style.h) */
+#endif
+#define LOBBY_CHAT_KEEP  64         /* lines kept for scrolling back */
+
+typedef enum { LOBBY_CHAT_ME, LOBBY_CHAT_THEM, LOBBY_CHAT_BOT } LobbyChatWho;
+
+typedef struct {
+    int32_t who;                    /* LobbyChatWho */
+    int32_t cont;                   /* the rest of the line before (a bot line wrapped): no name again */
+    char    text[LOBBY_CHAT_TEXT + 1];
+} LobbyChatLine;
+
+/* Say a line (cleaned as MatchChat_Clean does). It is sent as soon as the link is up
+ * -- after a rematch's reconnect too. 0 if there was something to say. */
+int32_t              NetplayLobby_Say(const char *text);
+/* A bot line, on this machine only. */
+void                 NetplayLobby_ChatNotice(const char *text);
+int32_t              NetplayLobby_ChatCount(void);          /* lines kept, oldest first */
+const LobbyChatLine *NetplayLobby_ChatLine(int32_t i);
+uint32_t             NetplayLobby_ChatSerial(void);         /* goes up with every new line */
 
 #endif /* SWOS_SDL_BUILD */
 #endif /* NETPLAY_LOBBY_H */

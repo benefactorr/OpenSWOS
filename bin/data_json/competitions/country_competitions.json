@@ -1,6 +1,6 @@
 {
   "type": "country_competitions",
-  "count": 78,
+  "count": 76,
   "countries": [
     {
       "number": 0,
@@ -100,17 +100,6 @@
       "cups": [
         "_englishCup",
         "_englishLeagueCup"
-      ]
-    },
-    {
-      "number": 9,
-      "name": "BOSNIA HERZEGOVINA",
-      "table": "_bosniaTable",
-      "leagues": [
-        "_bosnianLeague"
-      ],
-      "cups": [
-        "_bosnianCup"
       ]
     },
     {
@@ -514,17 +503,6 @@
         "_brasilianLeague"
       ],
       "cups": []
-    },
-    {
-      "number": 47,
-      "name": "MACEDONIA",
-      "table": "_macedoniaTable",
-      "leagues": [
-        "_macedonianLeague"
-      ],
-      "cups": [
-        "_macedonianCup"
-      ]
     },
     {
       "number": 48,

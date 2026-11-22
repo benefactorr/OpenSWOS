@@ -1,3 +1,10 @@
+#include "season_switch.h"
+#ifdef SWOS_SDL_BUILD
+#include "career_params.h"
+#include "mod_api.h"
+#include "modern_career_runtime.h"
+#include "tweaks.h"
+#endif
 /*
  * Amiga SWOS RE Project
  * SWOS Amiga C/68000 Reversed by Ben Baker (https://github.com/benbaker76)
@@ -7,7 +14,14 @@
 #include "game_utils.h"
 #include "audio.h"
 #include "menus.h"
+#include "world.h"           /* the football world, before the competition tables */
+#include "world_cups.h"      /* its cups into the country tables */
 #include "display.h"
+#ifdef SWOS_SDL_BUILD
+#include "mod_hooks.h"    /* a mod's true-colour menu backdrop */
+#include "platform_sdl.h" /* Platform_SetMenuBackdrop, MENU_BACKDROP_KEY */
+#endif
+#include <stdio.h>
 #include <string.h>   /* memcpy/memset — used by both the SDL decode and the Amiga overlay re-stride */
 
 /* FrontEndMainLoop */
@@ -67,6 +81,21 @@ void LoadOverlayToFrontbuffer(const uint8_t *path)
             rowDst[px] = idx;
         }
     }
+    {   /* A mod's true-colour backdrop (ModDef menuBackdrop): the menus' backdrop becomes one key
+         * colour everywhere -- the wide margins too -- and the presenter shows the image wherever
+         * the frame has it (Platform_SetMenuBackdrop). Only the menus' own backdrops: the disks,
+         * the credits and the rest stay as they are. */
+        const char *name = strrchr((const char *)path, '/');
+        const uint8_t *rgba = NULL;
+        int32_t w = 0, h = 0;
+        name = name ? name + 1 : (const char *)path;
+        if ((SDL_strncasecmp(name, "menubg", 6) == 0) && ModHooks_MenuBackdrop(&rgba, &w, &h) && rgba) {
+            memset(_frontbufferMaskBuffer, MENU_BACKDROP_KEY, FRONTBUFFER_SIZE_TOTAL_BYTES);
+            Platform_SetMenuBackdrop(rgba, w, h);
+        } else {
+            Platform_SetMenuBackdrop(NULL, 0, 0);
+        }
+    }
 #else
     /* Amiga: load the raw interleaved-bitplane overlay, then RE-STRIDE it into
      * the mask buffer. The overlay FILES are authored at a 44-byte plane row
@@ -108,16 +137,93 @@ void LoadOverlayToFrontbuffer(const uint8_t *path)
 __attribute__((used, externally_visible, noinline))
 void FrontEndPreLoopSetup(void)
 {
+    /* The football world (include/world.h): the Amiga's drawer names it in data/WORLD;
+     * its baked competition records go over 96/97's on both targets, before the JSON. */
+#ifndef SWOS_SDL_BUILD
+    World_ReadFromData();
+#endif
+    World_InstallBaked();
+#ifndef SWOS_SDL_BUILD
+    WorldCups_Install();        /* its cups into the country tables (the SDL: after the JSON's) */
+#endif
 #ifdef SWOS_SDL_BUILD
     /* SWOS_DATA_JSON: rebuild normal-country competition tables from data_json/
        before any menu reads competitionsTable[]. No-op unless the env var is set. */
+    extern void DataJson_FitModTeamFiles(void);
+    DataJson_FitModTeamFiles();         /* (a mod's bigger team file: its country's team numbers) */
     extern void DataJson_InstallCompetitionGraph(void);
     DataJson_InstallCompetitionGraph();
+    WorldCups_Install();
     /* career_params.json: override the compiled career-mode balance knobs (starting
        balance, gate receipts, wages, board expectations) so testers can tune them
        without a rebuild. Absent file -> compiled defaults. */
     extern void DataJson_LoadCareerParams(void);
     DataJson_LoadCareerParams();
+    if (ModernRuntime_Enabled()) {
+        if (ModApi_FindEntry(MODPOINT_BUY_PLAYER, "modernised-search") < 0)
+            ModApi_AddEntry(MODPOINT_BUY_PLAYER, "modernised-search", "WORLD PLAYER SEARCH", ModernSearch_Open);
+        if (ModApi_FindEntry(MODPOINT_TRANSFER_MARKET, "modernised-ai") < 0)
+            ModApi_AddEntry(MODPOINT_TRANSFER_MARKET, "modernised-ai", "AI TRANSFER MARKET", ModernAI_TransfersMenu);
+    } else {
+        extern void WorldPlayerSearch(void);
+        extern void ClassicCareer_RunTransfers(void);
+        if (ModApi_FindEntry(MODPOINT_BUY_PLAYER, "classic-search") < 0)
+            ModApi_AddEntry(MODPOINT_BUY_PLAYER, "classic-search", "WORLD PLAYER SEARCH", WorldPlayerSearch);
+        if (ModApi_FindEntry(MODPOINT_TRANSFER_MARKET, "classic-ai") < 0)
+            ModApi_AddEntry(MODPOINT_TRANSFER_MARKET, "classic-ai", "AI TRANSFER MARKET", ClassicCareer_RunTransfers);
+    }
+    {
+        _careerParams.num_seasons = CAREER_MAX_SEASONS;
+        CareerParams_ApplyModernFinances();
+        Tweaks_SetByMod(TWEAK_CPU_CARDS, 1, "Career+");
+        Tweaks_SetByMod(TWEAK_MORE_FOULS, 1, "Career+");
+        Tweaks_SetByMod(TWEAK_AI_INJURY_SUBS, 1, "Career+");
+        _careerParams.transfer_list_capacity = CAREER_MAX_TRANSFER_LIST;
+        _careerParams.foreign_pool_capacity = CAREER_MAX_FOREIGN_POOL;
+        _careerParams.foreign_listing_capacity = CAREER_MAX_FOREIGN_LISTING;
+        _careerParams.foreign_refill_mult = CAREER_MAX_FOREIGN_LISTING / CAREER_ORIG_FOREIGN_LISTING;
+        if (World_Current() == WORLD_9697)
+            _careerParams.transfer_quota_mode = 1;
+        _careerParams.listed_bid_chance = 36;
+        _careerParams.foreign_bid_chance = 64;
+        _careerParams.domestic_buyer_mode = 1;
+        _careerParams.job_offers_capacity = CAREER_MAX_JOB_OFFERS;
+        _careerParams.job_offer_expiry = 0;
+        _careerParams.job_offer_first_week = 20;
+        _careerParams.job_offer_waves = 1;
+        _careerParams.job_offer_stop_season7 = 0;
+        _careerParams.job_offer_phase_gate = 0;
+        _careerParams.job_offer_own_national = 0;
+        _careerParams.job_offer_pass = 220;
+        _careerParams.job_offer_rep_high_pct = 125;
+        _careerParams.job_offer_rep_low_pct = 55;
+        _careerParams.job_offer_selector_clubs = 96;
+        _careerParams.job_offer_national_chance = 192;
+        _careerParams.job_offer_abroad_chance = 128;
+    }
+    extern void DataJson_LoadNationalTeams(void);
+    DataJson_LoadNationalTeams();       /* (a mod's national teams: include/national_teams.h) */
+    if (World_Current() == WORLD_9697) {
+        extern void ClassicNational_Install(void);
+        ClassicNational_Install();
+    } else if (World_Current() == WORLD_2627) {
+        /* Without data_json/national_teams.json the compiled SWOS table has
+         * only 63 nations. That is insufficient for the modern 32-team
+         * African and 30-team Asian cups, and Oceania has only two entries.
+         * Reuse the 145-record Career+ pool only when the modern JSON has
+         * not provided a complete list. Never replace a complete JSON pool. */
+        extern uint16_t _numNationalTeams;
+        if (_numNationalTeams < 145u) {
+            extern void ClassicNational_Install(void);
+            fprintf(stderr, "[national-pool] modern fallback from %u to 145 records\n",
+                    (unsigned)_numNationalTeams);
+            ClassicNational_Install();
+        }
+    }
+    extern void TeamDb_Apply(void);
+    TeamDb_Apply();                     /* (a team database mod's leagues, cups, codes, season: src/teamdb.c) */
+    extern void TeamDb_ApplyLeagueTweaks(void);
+    TeamDb_ApplyLeagueTweaks();         /* ([tweaks] SWOS 2020's league rules, on by default: 96/97 only) */
     /* SWOS_MENU_JSON: load every menu from bin/data_json/menus/*.json and overwrite
        the compiled static menu bytes IN PLACE (docs/MENUS.md §2d), so editing the
        JSON changes the running game. Bounded by each menu's compiled size; a menu
@@ -184,8 +290,34 @@ void FrontEndMainLoop(void)
      * does (CommonMenuExit). Without it CONTINUE and SAVE came back as two blank, live
      * rows under MULTIPLAYER. */
     extern int32_t OnlineMenus_ShowStartMenu(void);
-    if (OnlineMenus_ShowStartMenu())
-        CommonMenuExit();
+    extern int32_t OnlineMenus_QuitAfterStartMenu(void);
+    /* The game data's or the world's notice (src/assets_check.c), once, before anything:
+     * its UPDATE NOW started OpenSWOS Setup, and the game closes for it. */
+    {
+        extern int32_t AssetsCheck_ShowNotice(void);
+        extern int32_t AssetsCheck_QuitForSetup(void);
+        if (AssetsCheck_ShowNotice()) {
+            if (AssetsCheck_QuitForSetup())
+                _quitToDos = 1;
+            CommonMenuExit();
+        }
+    }
+    if (OnlineMenus_ShowStartMenu()) {
+        if (OnlineMenus_QuitAfterStartMenu())
+            _quitToDos = 1;             /* the online client: leaving the log-in is leaving */
+        else
+            CommonMenuExit();
+    }
+#endif
+
+#ifdef CAREER_PLUS_SEASON_SWITCH
+    if (!_quitToDos && CareerPlus_BootAction == CAREER_PLUS_SETUP) {
+        extern void CareerMenu(void);
+        CareerMenu();
+    } else if (!_quitToDos && CareerPlus_BootAction == CAREER_PLUS_LOAD) {
+        extern void LoadOldCompetitionMenu(void);
+        LoadOldCompetitionMenu();
+    }
 #endif
 
     do

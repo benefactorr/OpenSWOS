@@ -112,7 +112,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 [Run]
 ; Not the game: without the player's data it has nothing to show. The setup has a
 ; Play button for when it is done.
-Filename: "{app}\{#SetupExeName}"; Description: "Set up the game data from your copy of Sensible World of Soccer"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#SetupExeName}"; Description: "Set up the game data from your copy of Sensible World of Soccer"; Flags: nowait postinstall skipifsilent; Check: NeedsGameDataSetup
 
 [UninstallDelete]
 ; The data trees are installed wholesale by one wildcard, so remove them
@@ -128,4 +128,12 @@ Type: filesandordirs; Name: "{app}\grafs_arcade"
 Type: filesandordirs; Name: "{app}\sound"
 Type: filesandordirs; Name: "{app}\sound_dos"
 Type: filesandordirs; Name: "{app}\grafs_jag"
+Type: filesandordirs; Name: "{app}\mods"
 Type: filesandordirs; Name: "{app}\setup"
+Type: filesandordirs; Name: "{app}\portmaster"
+
+[Code]
+function NeedsGameDataSetup(): Boolean;
+begin
+  Result := not DirExists(ExpandConstant('{app}\assets\data'));
+end;

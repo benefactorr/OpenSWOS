@@ -1,0 +1,40 @@
+{
+  "contract": "swc-contract/1",
+  "name": "Sample cup: fixed first-round draw, extra time and penalties, two-legged semi-finals, neutral final",
+  "pack": "packs/sample",
+  "season": 1,
+  "_note": "Results are given per tie and leg as goals per club (not per venue): the semi-finals' first-leg hosts are drawn, and no result here depends on the venue (no away-goals case).",
+  "results": {
+    "smp.cup:ko": {
+      "ties": [
+        {"round": 1, "clubs": ["club:smp.ashby-rovers", "club:smp.northgate"],
+         "legs": [{"goals": [1, 1], "extra_time": [0, 0], "penalties": [4, 3]}]},
+        {"round": 1, "clubs": ["club:smp.fenwick-town", "club:smp.riverside"], "legs": [{"goals": [0, 2]}]},
+        {"round": 1, "clubs": ["club:smp.hillford", "club:smp.westhaven"],
+         "legs": [{"goals": [1, 1], "extra_time": [1, 0]}]},
+        {"round": 1, "clubs": ["club:smp.oakmere", "club:smp.stonebridge"], "legs": [{"goals": [3, 0]}]},
+        {"round": 2, "clubs": ["club:smp.ashby-rovers", "club:smp.riverside"],
+         "legs": [{"goals": [2, 0]}, {"goals": [0, 1]}]},
+        {"round": 2, "clubs": ["club:smp.hillford", "club:smp.oakmere"],
+         "legs": [{"goals": [0, 1]}, {"goals": [0, 2]}]},
+        {"round": 3, "clubs": ["club:smp.ashby-rovers", "club:smp.oakmere"],
+         "legs": [{"goals": [0, 0], "extra_time": [0, 0], "penalties": [5, 4]}]}
+      ]
+    }
+  },
+  "expect": {
+    "ties": {
+      "smp.cup:ko": [
+        {"round": 1, "winner": "club:smp.ashby-rovers", "decided_by": "penalties"},
+        {"round": 1, "winner": "club:smp.riverside", "decided_by": "goals"},
+        {"round": 1, "winner": "club:smp.hillford", "decided_by": "extra_time"},
+        {"round": 1, "winner": "club:smp.oakmere", "decided_by": "goals"},
+        {"round": 2, "pairs": [["club:smp.ashby-rovers", "club:smp.riverside"], ["club:smp.hillford", "club:smp.oakmere"]]},
+        {"round": 2, "winner": "club:smp.ashby-rovers", "decided_by": "aggregate"},
+        {"round": 2, "winner": "club:smp.oakmere", "decided_by": "aggregate"},
+        {"round": 3, "winner": "club:smp.ashby-rovers", "decided_by": "penalties", "neutral": true}
+      ]
+    },
+    "champions": {"smp.cup": "club:smp.ashby-rovers"}
+  }
+}

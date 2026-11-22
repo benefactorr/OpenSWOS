@@ -4,7 +4,7 @@
  * Layout (SWOS.ini):
  *
  *   [video]
- *   renderer=accel        ; software | accel
+ *   renderer=accel        ; software | accel (the GPU presenter, else SDL's) | sdl
  *   vsync=false           ; true | false
  *   subpixel_scroll=true  ; true | false — smooth sub-pixel scrolling
  *   scaling=smooth        ; sharp | smooth — even pixels at a non-integer scale
@@ -33,9 +33,14 @@
  * keys (";resolution=...") and unknown keys are preserved verbatim and in place.
  */
 
+#include "tweaks.h"   /* [tweaks] */
 #include "swos_settings.h"
+#include "project_identity.h"
 #include "swos_io.h"   /* swos_save_commit — Switch save durability */
 #include "ini.h"
+#include "dos_mode.h"   /* GAMEPLAY_*: [gameplay] style */
+#include "touch_controls.h" /* TOUCH_CONTROLS_*: [input] touch_controls */
+#include "pixel_filter.h"   /* [video] pixel_filter (launcher options, agent B) */
 
 #include <ctype.h>
 #include <errno.h>
@@ -68,15 +73,135 @@ static int parse_bool(const char *v, int *out)
     return 0;
 }
 
+/* [chat] quick1 .. quick0: the keys 1..9, 0 (match_chat.h) */
+static const char *const kQuickNames[10] = {
+    "quick1", "quick2", "quick3", "quick4", "quick5", "quick6", "quick7", "quick8", "quick9", "quick0",
+};
+
+/* ---- SWOS 2020's CONTROLS MENU, menu look and MULTIPLAYER SETTINGS (SWOS 2020 port, agent A) ----
+ * Read before the sections below; 1 when it was one of these keys. */
+static int handler_swos2020_controls(PlatformInitOptions *opts, const char *section,
+                                     const char *name, const char *value)
+{
+    int b;
+    if (eqi(section, "input")) {
+        if (eqi(name, "pad1") || eqi(name, "pad2"))
+            snprintf(opts->pad_pref[name[3] - '1'], sizeof opts->pad_pref[0], "%s", value);
+        else if (eqi(name, "auto_detect_pads") && parse_bool(value, &b))
+            opts->auto_detect_pads = b;
+        else if (eqi(name, "pad_config"))
+            snprintf(opts->pad_config, sizeof opts->pad_config, "%s", value);
+        else if (eqi(name, "shoulder_buttons"))
+            opts->shoulder_buttons_off = !(eqi(value, "on") || eqi(value, "true") || eqi(value, "1"));
+        else if (eqi(name, "call_bench"))
+            opts->call_bench = eqi(value, "taps") ? 1 : eqi(value, "button") ? 2 : 0;
+        else
+            return 0;
+        return 1;
+    }
+    if (eqi(section, "video") && eqi(name, "menu_cursor")) {
+        opts->menu_cursor = eqi(value, "steady");
+        return 1;
+    }
+    if (eqi(section, "chat")) {         /* (scale and auto_close: the [chat] branch below) */
+        if (eqi(name, "controller_off") && parse_bool(value, &b))
+            opts->chat_controller_off = b;
+        else
+            return 0;
+        return 1;
+    }
+    if (eqi(section, "netplay") && eqi(name, "esc_presses")) {
+        int n = atoi(value);
+        if (n >= 1 && n <= 3) opts->esc_presses = n;
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- launcher options (agent A): the SWOS United Launcher's options (SWOS 2020's flags) ----
+ * Read before the sections below; 1 when it was one of these keys. docs/SETTINGS.md. */
+static int handler_launcher(PlatformInitOptions *opts, const char *section, const char *name,
+                            const char *value)
+{
+    int b;
+    if (eqi(section, "general")) {
+        if (eqi(name, "skip_intro") && parse_bool(value, &b))
+            opts->skip_intro = b;
+        else if (eqi(name, "skip_image_reels") && parse_bool(value, &b))
+            opts->skip_image_reels = b;
+        else if (eqi(name, "no_load_pause") && parse_bool(value, &b))
+            opts->no_load_pause = b;
+        else
+            return 0;
+        return 1;
+    }
+    if (eqi(section, "video")) {
+        if (eqi(name, "auto_centering") && parse_bool(value, &b))
+            opts->auto_centering = b;
+        else if (eqi(name, "show_fps") && parse_bool(value, &b))
+            opts->show_fps = b;
+        else
+            return 0;
+        return 1;
+    }
+    if (eqi(section, "input") && eqi(name, "mouse_cursor")) {
+        opts->mouse_cursor = eqi(value, "workbench2") ? 1 : eqi(value, "workbench1") ? 2 : 0;
+        return 1;
+    }
+    if (eqi(section, "gameplay") && eqi(name, "cpu_tactics")) {
+        opts->cpu_tactics = eqi(value, "expert");
+        return 1;
+    }
+    return 0;
+}
+
+static const char *small_num_str(int v)
+{
+    static const char *const k[] = { "0", "1", "2", "3", "4", "5", "6" };
+    return v >= 0 && v <= 6 ? k[v] : "0";
+}
+
+
+/* ---- launcher options (agent B): DISPLAY OPTIONS ---- */
+static int handler_launcher_b(PlatformInitOptions *opts, const char *section, const char *name, const char *value)
+{
+    int b;
+    if (!eqi(section, "video"))
+        return 0;
+    if (eqi(name, "menu_opacity")) {
+        int n = atoi(value);
+        if (n >= 0 && n <= 100) opts->menu_opacity = n;
+    } else if (eqi(name, "purple_for_brown") && parse_bool(value, &b)) {
+        opts->purple_for_brown = b;
+    } else if (eqi(name, "improved_pitch_palette") && parse_bool(value, &b)) {
+        opts->improved_pitch_palette = b;
+    } else if (eqi(name, "pixel_filter")) {
+        const int f = PixelFilter_Parse(value);
+        if (f >= 0) opts->pixel_filter = f;
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
 static int handler(void *user, const char *section,
                    const char *name, const char *value)
 {
     PlatformInitOptions *opts = (PlatformInitOptions *)user;
 
+    if (handler_swos2020_controls(opts, section, name, value))
+        return 1;
+    if (handler_launcher(opts, section, name, value))     /* (launcher options, agent A) */
+        return 1;
+    if (handler_launcher_b(opts, section, name, value))
+        return 1;
+
     if (eqi(section, "video")) {
         if (eqi(name, "renderer")) {
             if      (eqi(value, "software")) opts->renderer = PLATFORM_RENDERER_SOFTWARE;
             else if (eqi(value, "accel"))    opts->renderer = PLATFORM_RENDERER_ACCEL;
+            else if (eqi(value, "gpu"))      opts->renderer = PLATFORM_RENDERER_ACCEL;
+            else if (eqi(value, "sdl"))      opts->renderer = PLATFORM_RENDERER_SDL;
         } else if (eqi(name, "vsync")) {
             int b;
             if (parse_bool(value, &b)) opts->vsync = b;
@@ -135,11 +260,24 @@ static int handler(void *user, const char *section,
             if      (eqi(value, "amiga")) opts->sound_style = 0;
             else if (eqi(value, "pc") || eqi(value, "dos")) opts->sound_style = 1;
         }
+        else if (eqi(name, "music_volume") || eqi(name, "chants_volume") || eqi(name, "commentary_volume") ||
+                 eqi(name, "effects_volume")) {
+            int v = atoi(value);
+            v = v < 0 ? 0 : v > 100 ? 100 : v;
+            if (eqi(name, "music_volume")) opts->vol_music = v;
+            else if (eqi(name, "chants_volume")) opts->vol_chants = v;
+            else if (eqi(name, "commentary_volume")) opts->vol_commentary = v;
+            else opts->vol_effects = v;
+        }
         else if (eqi(name, "commentary_dir"))
             snprintf(opts->commentary_dir, sizeof opts->commentary_dir, "%s", value);
         else if (eqi(name, "menu_music")) {
             if      (eqi(value, "midi")) opts->menu_recording = 0;
             else if (eqi(value, "mp3"))  opts->menu_recording = 1;
+        }
+        else if (eqi(name, "title_music")) {
+            if      (eqi(value, "midi")) opts->title_midi = 1;
+            else if (eqi(value, "mp3"))  opts->title_midi = 0;
         }
         else if (eqi(name, "music")) {
             if      (eqi(value, "amiga")) opts->music_style = 0;
@@ -152,17 +290,21 @@ static int handler(void *user, const char *section,
         }
     } else if (eqi(section, "gameplay")) {
         int b;
-        if (eqi(name, "improved_ai") && parse_bool(value, &b))
-            opts->improved_ai = b;
+        if (eqi(name, "improved_ai") && parse_bool(value, &b)) {
+            if (b) opts->tweaks |= Tweaks_Built(TWEAK_IMPROVED_AI);
+            else opts->tweaks &= ~TWEAK_IMPROVED_AI;
+        } else if (eqi(name, "fire_hold_lockout") && parse_bool(value, &b))
+            opts->fire_hold_lockout = b;
         else if (eqi(name, "three_button") && parse_bool(value, &b))
             opts->three_button = b;
-        else if (eqi(name, "fire_hold_lockout") && parse_bool(value, &b))
-            opts->fire_hold_lockout = b;
-        else if (eqi(name, "contest_own_ratings") && parse_bool(value, &b))
-            opts->contest_own_ratings = b;
+        /* ([gameplay] contest_own_ratings: [tweaks] since 2026-11-10 -- an old SWOS.ini's
+         * "false", written by every earlier build whatever the player chose, is not read) */
         else if (eqi(name, "style")) {
-            if      (eqi(value, "amiga")) opts->dos_gameplay = 0;
-            else if (eqi(value, "dos"))   opts->dos_gameplay = 1;
+            if      (eqi(value, "amiga")) opts->dos_gameplay = GAMEPLAY_AMIGA;
+            else if (eqi(value, "dos"))   opts->dos_gameplay = GAMEPLAY_DOS;
+            else if (eqi(value, "xbox"))  opts->dos_gameplay = GAMEPLAY_XBOX;
+            else if (eqi(value, "amiga60")) opts->dos_gameplay = GAMEPLAY_AMIGA60;
+            else if (eqi(value, "moon"))  opts->dos_gameplay = GAMEPLAY_MOON;
         }
         /* `view` is gone (2026-09-29): the view is part of the style, one setting.
          * An old line is ignored rather than honoured -- a view that differs from the
@@ -176,11 +318,14 @@ static int handler(void *user, const char *section,
         } else if (eqi(name, "latch_presses")) {
             int b;
             if (parse_bool(value, &b)) opts->latch_presses = b;
+        } else if (eqi(name, "touch_controls")) {
+            if      (eqi(value, "auto"))   opts->touch_controls = TOUCH_CONTROLS_AUTO;
+            else if (eqi(value, "always")) opts->touch_controls = TOUCH_CONTROLS_ALWAYS;
+            else if (eqi(value, "never"))  opts->touch_controls = TOUCH_CONTROLS_NEVER;
         } else {
-            static const char *const keys[8] = { "key_up", "key_down", "key_left", "key_right", "key_fire",
-                "key_pass", "key_shoot", "key_high_shot" };
-            int i;
-            for (i = 0; i < 8; i++)
+            static const char *const keys[] = { "key_up", "key_down", "key_left", "key_right", "key_fire",
+                                                "key_pass", "key_shoot", "key_high_shot" };
+            for (size_t i = 0; i < sizeof keys / sizeof keys[0]; ++i)
                 if (eqi(name, keys[i]))
                     snprintf(opts->key_bind[i], sizeof opts->key_bind[i], "%s", value);
         }
@@ -188,6 +333,10 @@ static int handler(void *user, const char *section,
         int b;
         if (eqi(name, "auto_save") && parse_bool(value, &b))
             opts->replay_auto_save = b;
+        else if (eqi(name, "frame_overlay") && parse_bool(value, &b))
+            opts->replay_frame_overlay = b;
+        else if (eqi(name, "speed"))
+            opts->replay_half_speed = eqi(value, "half");
     } else if (eqi(section, "netplay")) {
         if (eqi(name, "matchmaker"))
             snprintf(opts->matchmaker, sizeof opts->matchmaker, "%s", value);
@@ -199,18 +348,31 @@ static int handler(void *user, const char *section,
                 opts->netplay_remember = b;
         } else if (eqi(name, "record"))
             snprintf(opts->record, sizeof opts->record, "%s", value);
+        else if (eqi(name, "live_cast")) {
+            int b;
+            if (parse_bool(value, &b))
+                opts->live_cast = b;
+        }
         else if (eqi(name, "reports")) {
             int b;
             if (parse_bool(value, &b))
                 opts->reports = b;
-        } else if (eqi(name, "balance")) {
-            int b;
-            if (parse_bool(value, &b))
-                opts->netplay_balance = b;
         } else if (eqi(name, "prediction")) {
             int b;
             if (parse_bool(value, &b))
                 opts->prediction = b;
+        }
+    } else if (eqi(section, "chat")) {
+        for (int qi = 0; qi < 10; qi++)
+            if (eqi(name, kQuickNames[qi]))
+                snprintf(opts->chat_quick[qi], sizeof opts->chat_quick[qi], "%s", value);
+        /* the chat's window (SWOS 2020 port, agent C) */
+        if (eqi(name, "scale")) {
+            int v = atoi(value);
+            if (v >= 0 && v <= 8) opts->chat_scale = v;
+        } else if (eqi(name, "auto_close")) {
+            int v = atoi(value);
+            if (v >= 1 && v <= 5) opts->chat_auto_close = v;
         }
     } else if (eqi(section, "graphics")) {
         int b;
@@ -233,7 +395,6 @@ static int handler(void *user, const char *section,
             /* "auto" keeps the built-in default, which is the Amiga's on every
              * build (the web one included, since 2026-10-01). */
         }
-        else if (eqi(name, "pitch_maps") && parse_bool(value, &b)) opts->pitch_maps = b;
         else if (eqi(name, "outfit_shading") && parse_bool(value, &b)) opts->outfit_shading = b;
         else if (eqi(name, "shadow_shading") && parse_bool(value, &b)) opts->shadow_shading = b;
         else if (eqi(name, "hair_shading") && parse_bool(value, &b)) opts->hair_shading = b;
@@ -241,6 +402,8 @@ static int handler(void *user, const char *section,
             int v = atoi(value);
             if (v >= 1 && v <= 5) opts->shade_step = v;
         }
+        else if (eqi(name, "clash_kits") && parse_bool(value, &b))   /* (SWOS 2020 port, agent D) */
+            opts->clash_kits = b;
         else if (eqi(name, "kit_art")) {
             if      (eqi(value, "amiga"))  opts->kit_art = 0;
             else if (eqi(value, "jaguar")) opts->kit_art = 1;
@@ -280,6 +443,25 @@ static int handler(void *user, const char *section,
         int b;
         if (eqi(name, "no_injuries_cards") && parse_bool(value, &b))
             opts->no_injuries_cards = b;
+    } else if (eqi(section, "options")) {
+        static const char *const kLength[] = { "3", "5", "7", "10" };
+        static const char *const kPitch[]  = { "seasonal", "random", "frozen", "muddy", "wet",
+                                               "soft", "normal", "dry", "hard" };
+        int b, i;
+        if (eqi(name, "game_length")) {
+            for (i = 0; i < 4; i++)
+                if (value && eqi(value, kLength[i])) opts->opt_game_length = i;
+        } else if (eqi(name, "pitch_type")) {
+            for (i = 0; i < 9; i++)
+                if (value && eqi(value, kPitch[i])) opts->opt_pitch_type = i - 2;
+        } else if (eqi(name, "auto_replays") && parse_bool(value, &b))
+            opts->opt_auto_replays = b;
+        else if (eqi(name, "all_teams_equal") && parse_bool(value, &b))
+            opts->opt_all_teams_equal = b;
+        else if (eqi(name, "auto_save_highlights") && parse_bool(value, &b))
+            opts->opt_auto_save_highlights = b;
+        else if (eqi(name, "menu_music") && parse_bool(value, &b))
+            opts->opt_menu_music = b;
     } else if (eqi(section, "general")) {
         if (eqi(name, "language") && value && value[0])
             snprintf(opts->language, sizeof opts->language, "%s", value);
@@ -287,11 +469,42 @@ static int handler(void *user, const char *section,
             snprintf(opts->currency, sizeof opts->currency, "%s", value);
         else if (eqi(name, "assets_reminder_off"))
             snprintf(opts->assets_reminder_off, sizeof opts->assets_reminder_off, "%s", value ? value : "");
+        else if (eqi(name, "world") && value && value[0])
+            snprintf(opts->world, sizeof opts->world, "%s", value);
+        else if (eqi(name, "file_sort") && value && (eqi(value, "name") || eqi(value, "date")))
+            snprintf(opts->file_sort, sizeof opts->file_sort, "%s", value);
+        else if (eqi(name, "quick_access")) {
+            int on;
+            if (parse_bool(value, &on))
+                opts->quick_access = on;
+        }
+    } else if (eqi(section, "mods")) {
+        if (eqi(name, "enabled"))
+            snprintf(opts->mods, sizeof opts->mods, "%s", value ? value : "");
+        else if (eqi(name, "disabled"))
+            snprintf(opts->mods_disabled, sizeof opts->mods_disabled, "%s", value ? value : "");
     }
+#if SWOS_TWEAKS_ANY   /* (Tweaks_Bit names only the tweaks this build has) */
+    else if (eqi(section, "tweaks")) {
+        const uint32_t bit = Tweaks_Bit(name);
+        int b;
+        if (bit && parse_bool(value, &b))
+            opts->tweaks = b ? (opts->tweaks | bit) : (opts->tweaks & ~bit);
+    }
+#endif
     /* Return nonzero on success, even for ignored keys — we don't want
      * inih to flag unknown sections as parse errors. */
     return 1;
 }
+
+/* What SWOS.ini said when the game read it (Settings_Load): Settings_Save writes only what the
+ * player changed since -- every other setting is left as the file has it NOW, so OpenSWOS Setup's
+ * changes (a mod it turned on, a world it installed) and a hand edit made while the game runs are
+ * not put back by the game's next save. (2026-11-08: the Retro TV mod's [mods] line, put back by
+ * leaving OPTIONS -- the game wrote the list it had started with.) */
+static PlatformInitOptions s_baseline;
+static int                 s_haveBaseline;
+static char                s_baselinePath[1024];   /* (it is that file's: a save to another writes all) */
 
 void Settings_Load(PlatformInitOptions *opts, const char *path)
 {
@@ -305,11 +518,14 @@ void Settings_Load(PlatformInitOptions *opts, const char *path)
         fprintf(stderr, "[settings] %s: parse error at line %d (continuing)\n",
                 path, rc);
     }
+    s_baseline = *opts;
+    s_haveBaseline = 1;
+    snprintf(s_baselinePath, sizeof s_baselinePath, "%s", path);
 }
 
 static const char *renderer_str(PlatformRendererMode m)
 {
-    return (m == PLATFORM_RENDERER_SOFTWARE) ? "software" : "accel";
+    return m == PLATFORM_RENDERER_SOFTWARE ? "software" : m == PLATFORM_RENDERER_SDL ? "sdl" : "accel";
 }
 
 static const char *fullscreen_str(PlatformFullscreenMode m)
@@ -347,7 +563,7 @@ static const char *crt_mask_str(int m)
  * next setting saved -- OPTIONS -> GAMEPLAY first of all -- crashed the macOS build,
  * which checks its stack, and corrupted it quietly everywhere else (2026-10-05). Every
  * append is bounded now (SETTING), and a full table says so. */
-#define SETTINGS_MAX 96
+#define SETTINGS_MAX 192
 #define SETTING(n)  if ((n) < SETTINGS_MAX) items[(n)++]
 
 /* Inline comment appended to a section-header line in a freshly-created file. */
@@ -362,10 +578,12 @@ static const char *section_intro(const char *sec)
 /* Fill `items` with the canonical list and return the count. `vbuf` provides
  * scratch storage for the three non-constant values (resolution, scale,
  * game_seconds) and must outlive any use of `items`. */
-static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char vbuf[8][24])
+/* live: the window's scale and fullscreen as they are now (what a save writes); 0: opts' own (the
+ * file's, for Settings_Save's baseline). */
+static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char vbuf[10][24], int live)
 {
-    int scale_now = Platform_GetWindowScale();
-    PlatformFullscreenMode fs_now = Platform_GetFullscreenMode();
+    int scale_now = live ? Platform_GetWindowScale() : opts->win_scale;
+    PlatformFullscreenMode fs_now = live ? Platform_GetFullscreenMode() : opts->fullscreen;
     if (scale_now < 1 || scale_now > 4) scale_now = opts->win_scale;
 
     if (opts->res_w > 0 && opts->res_h > 0)
@@ -383,7 +601,7 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
      * happily emits a longer line and the READER then reports "parse error at
      * line N" on our own generated file. Cost me one round-trip to notice. */
     int n = 0;
-    SETTING(n) = (IniEntry){ "video",  "renderer",   "; renderer: software | accel  (hardware-accelerated)", renderer_str(opts->renderer) };
+    SETTING(n) = (IniEntry){ "video",  "renderer",   "; renderer: accel (the GPU presenter, else SDL's) | sdl (SDL's renderer) | software", renderer_str(opts->renderer) };
     SETTING(n) = (IniEntry){ "video",  "vsync",      "; vsync: true | false  (accel renderer only)", opts->vsync ? "true" : "false" };
     SETTING(n) = (IniEntry){ "video",  "subpixel_scroll", "; subpixel_scroll: true | false. Smooths scrolling by shifting the frame by the camera's sub-pixel remainder. Never blurs. Off = compare", opts->subpixel_scroll ? "true" : "false" };
     SETTING(n) = (IniEntry){ "video",  "scaling",    "; scaling: sharp | smooth. A fullscreen scale is rarely a whole number (1080/272 = 3.97), so a plain nearest copy makes some pixels bigger than others. smooth evens them", opts->scaling_smooth ? "smooth" : "sharp" };
@@ -404,6 +622,8 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
 
     SETTING(n) = (IniEntry){ "video",  "resolution", "; resolution: WxH (e.g. 2560x1080) drives the render ASPECT, or 'auto' for the desktop.\n; It is not the render SIZE: the picture is always 272 lines tall and 336..672 wide,\n; so a wider shape shows more pitch and a small one (320x200) just clamps to 336x272", vbuf[0] };
     SETTING(n) = (IniEntry){ "video",  "screen",     "; screen: monitor index to open on, 0 = primary. Auto-clamped if out of range; window size auto-fits that screen", vbuf[3] };
+    SETTING(n) = (IniEntry){ "video",  "menu_cursor", "; menu_cursor: flashing | steady. The menus' cursor frame (SWOS 2020's flashing menu cursor)",
+        opts->menu_cursor ? "steady" : "flashing" };   /* (SWOS 2020 port, agent A) */
     SETTING(n) = (IniEntry){ "audio",  "mode",       "; mode: mono | stereo", opts->audio_mono ? "mono" : "stereo" };
     SETTING(n) = (IniEntry){ "audio",  "style",
         "; style: amiga | pc. A match's sounds: the Amiga's, or the PC game's sampled\n"
@@ -426,6 +646,12 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
         "; menu.xmi played live on the emulated card (midi), or a recording of it,\n"
         "; sound_dos/menu.mp3 (mp3).\n",
         opts->menu_recording ? "mp3" : "midi" };
+    SETTING(n) = (IniEntry){ "audio",  "title_music",
+        "; title_music: mp3 | midi. With music = pc, the intro plays the CD's title song,\n"
+        "; sound_dos/title.mp3 (mp3), or sound_dos/title.xmi live on the emulated card\n"
+        "; (midi: SWOS 2020's floppy title song, which a mod brings). Without its file, the\n"
+        "; Amiga's.\n",
+        opts->title_midi ? "midi" : "mp3" };
     SETTING(n) = (IniEntry){ "audio",  "commentary",
         "; commentary: auto | true | false. The PC game's commentary. auto (the\n"
         "; default): with style = pc only. true: always, over the Amiga's sounds too.\n",
@@ -443,6 +669,13 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
         "; still counts as pressed for one frame, so a very short tap is never lost.\n"
         "; false: only what is held at the moment of the read counts, as before.",
         opts->latch_presses ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "input", "touch_controls",
+        "; touch_controls: auto | always | never -- a phone's on-screen stick and buttons.\n"
+        "; auto (the default): hidden while a game controller is played, back on a touch;\n"
+        "; always: always on screen; never: never (a handheld with controls of its own).\n"
+        "; OPTIONS -> CONTROLS sets it. The desktops have none.",
+        opts->touch_controls == TOUCH_CONTROLS_NEVER ? "never"
+        : opts->touch_controls == TOUCH_CONTROLS_ALWAYS ? "always" : "auto" };
     SETTING(n) = (IniEntry){ "input", "key_up",
         "; key_up, key_down, key_left, key_right, key_fire: your own keys, BESIDE the\n"
         "; built-in ones (the cursor keys; either CTRL or ENTER to fire), which keep\n"
@@ -456,12 +689,38 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
     SETTING(n) = (IniEntry){ "input", "key_left",  NULL, opts->key_bind[2] };
     SETTING(n) = (IniEntry){ "input", "key_right", NULL, opts->key_bind[3] };
     SETTING(n) = (IniEntry){ "input", "key_fire",  NULL, opts->key_bind[4] };
-    SETTING(n) = (IniEntry){ "input", "key_pass",
-        "; Career+ THREE BUTTONS: key_pass, key_shoot, key_high_shot. Defaults S, D, A.\n"
-        "; Active in live offline matches only when [gameplay] three_button = true.\n"
-        "; Key names are SDL scancode names. Empty disables that action.", opts->key_bind[5] };
+    SETTING(n) = (IniEntry){ "input", "key_pass", "; Career+ three-button controls, default S, D, A.", opts->key_bind[5] };
     SETTING(n) = (IniEntry){ "input", "key_shoot", NULL, opts->key_bind[6] };
     SETTING(n) = (IniEntry){ "input", "key_high_shot", NULL, opts->key_bind[7] };
+    /* SWOS 2020's CONTROLS MENU and CONTROLLER SETUP (SWOS 2020 port, agent A; src/input_sdl.c) */
+    SETTING(n) = (IniEntry){ "input", "pad1",
+        "; pad1, pad2: whose controller is whose (OPTIONS -> SETTINGS -> CONTROLS). auto: the\n"
+        "; pads as they come, the first player 1's; keyboard (pad1): no pad, the keyboard alone;\n"
+        "; none (pad2): player 2 has no control; or a pad by its GUID (#2 for the second alike).",
+        opts->pad_pref[0][0] ? opts->pad_pref[0] : "auto" };
+    SETTING(n) = (IniEntry){ "input", "pad2", NULL, opts->pad_pref[1][0] ? opts->pad_pref[1] : "auto" };
+    SETTING(n) = (IniEntry){ "input", "auto_detect_pads",
+        "; auto_detect_pads: true | false. A pad plugged in later goes to a free auto player;\n"
+        "; false: it waits until SELECT JOYPAD gives it to one.",
+        opts->auto_detect_pads ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "input", "pad_config",
+        "; pad_config: CONTROLLER SETUP's, per pad GUID: guid:fire:bench:x+:x-:y+:y- separated by ;\n"
+        "; (a button number, -1 the default; a stick cut-off in percent, 0 = stick_deadzone).",
+        opts->pad_config };
+    SETTING(n) = (IniEntry){ "input", "shoulder_buttons",
+        "; shoulder_buttons: off | on. Off (DISABLE SHOULDER BUTTONS): the shoulder buttons and\n"
+        "; stick clicks cannot be a pad's FIRE or BENCH.",
+        opts->shoulder_buttons_off ? "off" : "on" };
+    SETTING(n) = (IniEntry){ "input", "call_bench",
+        "; call_bench: both | taps | button. The PC style's ways to call the bench: the second fire\n"
+        "; button or three taps (both), the taps alone, or the button alone (offline matches; the\n"
+        "; Amiga style has no second button and keeps the taps).",
+        opts->call_bench == 1 ? "taps" : opts->call_bench == 2 ? "button" : "both" };
+    SETTING(n) = (IniEntry){ "gameplay", "improved_ai",
+        "; Career+ match AI: true (default) or false (original decisions). Offline only.",
+        (opts->tweaks & TWEAK_IMPROVED_AI) ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "gameplay", "three_button",
+        "; Use Career+ three-button controls in offline matches.", opts->three_button ? "true" : "false" };
     SETTING(n) = (IniEntry){ "gameplay", "fire_hold_lockout",
         "; fire_hold_lockout: true | false — true restores a BUG IN THE ORIGINAL\n"
         "; AMIGA GAME: an OPPONENT's tackle wipes your held fire button's shot charge,\n"
@@ -470,37 +729,52 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
         "; (fixed). Your OWN tackle still spends the press either way — that half is\n"
         "; deliberate in the original. See team_control.c.",
         opts->fire_hold_lockout ? "true" : "false" };
-    SETTING(n) = (IniEntry){ "gameplay", "contest_own_ratings",
-        "; contest_own_ratings: true | false. When two players contest the ball the game\n"
-        "; rolls a dice weighted by tackling and ball control. The ORIGINAL rates one of the\n"
-        "; two sides by a team-mate (the player with the opponent's line-up number), in both\n"
-        "; the Amiga and PC releases. true rates each side by the man actually at the ball.\n"
-        "; Default false: the original. OFFLINE matches only -- an online match always\n"
-        "; plays the original's. See docs/BALL_CONTEST.md.",
-        opts->contest_own_ratings ? "true" : "false" };
 
 
-    SETTING(n) = (IniEntry){ "gameplay", "improved_ai",
-        "; improved_ai: true (default) | false (original SWOS AI).",
-        opts->improved_ai ? "true" : "false" };
-    SETTING(n) = (IniEntry){ "gameplay", "three_button",
-        "; three_button: false (default, classic) | true (A high, S fire, D shoot).",
-        opts->three_button ? "true" : "false" };
     SETTING(n) = (IniEntry){ "gameplay", "style",
-        "; style: amiga | dos. The Amiga release is the definitive one and what this\n"
-        "; port is reverse engineered from; dos is the PC release's 70 FPS physics,\n"
+        "; style: amiga | dos | xbox | amiga60 | moon. The Amiga release is the definitive one and what\n"
+        "; this port is reverse engineered from; dos is the PC release's 70 FPS physics,\n"
         "; timers and formations, and its 320x200 view -- the view is part of how it\n"
         "; plays (what is on screen decides which players the game picks), so the\n"
-        "; style sets both. Online, the game plays the HOST's style.\n",
-        opts->dos_gameplay ? "dos" : "amiga" };
+        "; style sets both; xbox is SWOS 2020's XBOX style: 60 FPS, the Amiga's ball\n"
+        "; physics and view, the DOS goalkeepers; amiga60 is SWOS 2020's AMIGA (60FPS): the\n"
+        "; Amiga's game at 60 FPS; moon is its MOON SOCCER: the Amiga's, with a moon's\n"
+        "; gravity. Online, the game plays the HOST's style.\n",
+        opts->dos_gameplay == GAMEPLAY_DOS ? "dos" : opts->dos_gameplay == GAMEPLAY_XBOX ? "xbox"
+        : opts->dos_gameplay == GAMEPLAY_AMIGA60 ? "amiga60" : opts->dos_gameplay == GAMEPLAY_MOON ? "moon"
+        : "amiga" };
     SETTING(n) = (IniEntry){ "replays", "auto_save",
         "; auto_save: true | false — every match is recorded to LATEST.SRP in the save\n"
         "; folder and can be watched from HIGHLIGHTS -> LOAD. true also keeps a dated\n"
         "; copy of each (MMDDHHMM.SRP), so a match is not overwritten by the next one.",
         opts->replay_auto_save ? "true" : "false" };
+    {
+        static char vols[4][8];
+        snprintf(vols[0], sizeof vols[0], "%d", opts->vol_music);
+        snprintf(vols[1], sizeof vols[1], "%d", opts->vol_chants);
+        snprintf(vols[2], sizeof vols[2], "%d", opts->vol_commentary);
+        snprintf(vols[3], sizeof vols[3], "%d", opts->vol_effects);
+        SETTING(n) = (IniEntry){ "audio", "music_volume",
+            "; music_volume, chants_volume, commentary_volume, effects_volume: 0..100 (SWOS 2020's\n"
+            "; AUDIO OPTIONS) -- the menus' music, the crowd chants, the commentary, the ball and\n"
+            "; the whistle (with the Amiga's sounds, its crowd too). In a match Shift+1 / Shift+2\n"
+            "; turn the chants down / up, Shift+3 / 4 the commentary, Shift+5 / 6 the effects.", vols[0] };
+        SETTING(n) = (IniEntry){ "audio", "chants_volume", NULL, vols[1] };
+        SETTING(n) = (IniEntry){ "audio", "commentary_volume", NULL, vols[2] };
+        SETTING(n) = (IniEntry){ "audio", "effects_volume", NULL, vols[3] };
+    }
+    SETTING(n) = (IniEntry){ "replays", "frame_overlay",
+        "; frame_overlay: true | false — the box at the bottom left of a recording being\n"
+        "; watched (its speed, paused or not, the frame and a bar); I shows or hides it.\n"
+        "; The keys: P pause, Up / Down speed, Left / Right backwards / forwards (paused: a\n"
+        "; frame), Home / End the first / last frame, PgDn / PgUp a tenth back / on.",
+        opts->replay_frame_overlay ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "replays", "speed",
+        "; speed: normal | half — the speed a recording starts at in the viewer.",
+        opts->replay_half_speed ? "half" : "normal" };
     SETTING(n) = (IniEntry){ "netplay", "matchmaker",
         "; matchmaker: the server MULTIPLAYER logs in to, as \"host\" or \"host:port\"\n"
-        "; (default port 19602). Empty means the public server, online.openswos.net. You can type it\n"
+        "; (default port 19602). Empty means the public server, " PROJECT_MM_HOST ". You can type it\n"
         "; on the login screen instead -- it is saved back here.",
         opts->matchmaker };
     SETTING(n) = (IniEntry){ "netplay", "name",
@@ -516,23 +790,49 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
         "; above, for the matches it arranges), a recorder of your own as \"host\" or\n"
         "; \"host:port\" (every match), or \"off\". Empty means the default.",
         opts->record };
+    SETTING(n) = (IniEntry){ "netplay", "live_cast",
+        "; live_cast: true | false -- let LIVE CAST's viewers watch your online matches on the\n"
+        "; recorder (false keeps them off its list; recording for desync checks goes on).",
+        opts->live_cast ? "true" : "false" };
     SETTING(n) = (IniEntry){ "netplay", "reports",
         "; reports: true | false -- after an online match, send both players' SWOS.log and\n"
         "; HOW WAS THE MATCH? to the other player and the server, zipped (a copy is kept in\n"
         "; save/netplay either way). false: nothing leaves this machine.",
         opts->reports ? "true" : "false" };
-    SETTING(n) = (IniEntry){ "netplay", "balance",
-        "; balance: true | false -- online, when one player is predicting the other's input two\n"
-        "; frames or more deeper than the other is, that player waits a little. Timing only,\n"
-        "; never the match. It works only when BOTH players have it on\n"
-        "; (docs/NETPLAY_BALANCE.md).\n",
-        opts->netplay_balance ? "true" : "false" };
     SETTING(n) = (IniEntry){ "netplay", "prediction",
         "; prediction: true | false -- keep what each player SAW of an online match in its\n"
         "; replay: how many of the other player's inputs were guesses on each frame, the\n"
         "; rollbacks, and where players were drawn against where they really were. The\n"
         "; playback page shows it (docs/PLAYBACK.md). A replay plays the same without it.",
         opts->prediction ? "true" : "false" };
+    /* (SWOS 2020's MULTIPLAYER SETTINGS, agent A) */
+    SETTING(n) = (IniEntry){ "netplay", "esc_presses",
+        "; esc_presses: 1-3. ESC PRESSING TO QUIT: how many ESC presses, each within two seconds,\n"
+        "; leave an online match.",
+        small_num_str(opts->esc_presses) };
+    for (int qi = 0; qi < 10; qi++)
+        SETTING(n) = (IniEntry){ "chat", kQuickNames[qi], qi ? NULL :
+            "; quick1 .. quick0: in an online match, the keys 1 .. 0 send these lines to the other\n"
+            "; player (TAB types one of your own, F3 hides the chat). Empty: that key sends nothing.",
+            opts->chat_quick[qi] };
+    {   /* the chat's window (SWOS 2020 port, agent C) */
+        static char scale[4], close[4];
+        snprintf(scale, sizeof scale, "%d", opts->chat_scale);
+        snprintf(close, sizeof close, "%d", opts->chat_auto_close);
+        SETTING(n) = (IniEntry){ "chat", "scale",
+            "; scale: 0 .. 8, the chat box 1x, 1.5x .. 5x (SWOS 2020's CHAT WINDOW SCALE). In an\n"
+            "; online match Page Up / Page Down change it, and it is kept here.",
+            scale };
+        SETTING(n) = (IniEntry){ "chat", "auto_close",
+            "; auto_close: 1 .. 5, the seconds the chat box stays after the newest line, then it\n"
+            "; fades (SWOS 2020's AUTO CLOSE CHATBOX).",
+            close };
+    }
+    /* SWOS 2020's MULTIPLAYER SETTINGS (SWOS 2020 port, agent A; src/match_chat.c) */
+    SETTING(n) = (IniEntry){ "chat", "controller_off",
+        "; controller_off: true | false. DISABLE CONTROLLER IN CHAT: while you type a line your\n"
+        "; pad steers nobody.",
+        opts->chat_controller_off ? "true" : "false" };
 
 
     SETTING(n) = (IniEntry){ "graphics", "style",
@@ -548,12 +848,6 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
         opts->jag_graphics ? "jaguar" : "amiga" };
 
 
-    SETTING(n) = (IniEntry){ "graphics", "pitch_maps",
-        "; pitch_maps: true | false. With style = dos, draw a pitch from its Tile Agent\n"
-        "; map (grafs_dos/pitch<N>.tmj) where there is one, and from the game's own files\n"
-        "; where there is not (docs/PITCH_MAPS.md). Only the picture: the match itself,\n"
-        "; online and in replays, is the same either way.\n",
-        opts->pitch_maps ? "true" : "false" };
 
     SETTING(n) = (IniEntry){ "graphics", "outfit_shading",
         "; outfit_shading: true | false. Shade the kit into four tones per colour, the\n"
@@ -575,8 +869,8 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
         opts->hair_shading ? "true" : "false" };
 
     {
-        static char stepBuf[8];
-        snprintf(stepBuf, sizeof stepBuf, "%d", opts->shade_step);
+        char *stepBuf = vbuf[8];        /* (not static: Settings_Save builds two tables at once) */
+        snprintf(stepBuf, 24, "%d", opts->shade_step);
         SETTING(n) = (IniEntry){ "graphics", "shade_step",
             "; shade_step: 1..5. How far apart the four kit shades are, in sixteenths:\n"
             "; 16, 16-N, 16-2N, 16-3N. The Jaguar's own artwork used about 3, which takes\n"
@@ -584,6 +878,11 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
             "; Hair shading uses it too: black hair's highlight is lifted by 3 x N.\n",
             stepBuf };
     }
+    SETTING(n) = (IniEntry){ "graphics", "clash_kits",     /* (SWOS 2020 port, agent D) */
+        "; clash_kits: true | false -- SWOS 2020's GK/REF CLASH KITS: when either team wears a dark\n"
+        "; kit (black, blue, burgundy), both keepers change to green (grey if a team wears green)\n"
+        "; and the referee to yellow (light blue if a team wears yellow). Only how they look.",
+        opts->clash_kits ? "true" : "false" };
     SETTING(n) = (IniEntry){ "graphics", "kit_art",
         "; kit_art: amiga | jaguar. The shirts, shorts and socks drawn on the UNIFORM\n"
         "; screen: the Amiga's flat drawings, or the Atari Jaguar's shaded ones (shaded by\n"
@@ -616,8 +915,166 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
     SETTING(n) = (IniEntry){ "general","currency",   "; currency: pound | dollar | euro", opts->currency[0] ? opts->currency : "pound" };
     SETTING(n) = (IniEntry){ "general","assets_reminder_off",
         "; assets_reminder_off: set by \"Don't remind me\" on the reminder that your game data was made by\n"
-        "; an older OpenSWOS Setup -- the data versions it was about. Empty: remind (src/assets_check.c).",
+        "; an older " PROJECT_SETUP_NAME " -- the data versions it was about. Empty: remind (src/assets_check.c).",
         opts->assets_reminder_off };
+    SETTING(n) = (IniEntry){ "general","world",
+        "; world: 9697 | 2627 -- the football world: its countries, clubs and competitions\n"
+        "; (docs/WORLD_2026_27.md): SWOS 96/97, or World 2026-27 once " PROJECT_SETUP_NAME " has\n"
+        "; imported its data. A save is played in the world it was made in.",
+        opts->world[0] ? opts->world : "9697" };
+    SETTING(n) = (IniEntry){ "general","file_sort",
+        "; file_sort: name | date -- the order of the LOAD and SAVE screens' files (SWOS 2020's SORT\n"
+        "; OPTION; their SORTED BY button switches it): by name, as the game always had them, or the\n"
+        "; newest first.",
+        opts->file_sort[0] ? opts->file_sort : "name" };
+    SETTING(n) = (IniEntry){ "general","quick_access",
+        "; quick_access: true | false -- SWOS 2020's QUICK ACCESS after a friendly: SAVE HIGHLIGHTS,\n"
+        "; FULL MATCH REPLAYS (the match just played) or CONTINUE.",
+        opts->quick_access ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "mods",   "enabled",
+        "; enabled: the mods to play with, by their folder's name in the mods folder beside this file,\n"
+        "; in that order: a file two of them have comes from the first, e.g. enabled = classics, hall.\n"
+        "; Empty: none (docs/MODS.md). A downloaded (DLC) mod that is not cosmetic keeps the game off line.",
+        opts->mods };
+    SETTING(n) = (IniEntry){ "mods",   "disabled",
+        "; disabled: the game's own (canonical) mods to turn off, by name; they are on by default.",
+        opts->mods_disabled };
+    /* ---- launcher options (agent B) ---- */
+    {
+        static char opacity[8];
+        snprintf(opacity, sizeof opacity, "%d", opts->menu_opacity);
+        SETTING(n) = (IniEntry){ "video", "menu_opacity",
+            "; menu_opacity: 0-100 -- the menus' buttons over the backdrop (SWOS 2020's alpha-blended\n"
+            "; menus): 100 solid, less lets the backdrop or the background picture show through them.\n"
+            "; Their text and frames stay solid. Menus only, never a match.", opacity };
+    }
+    SETTING(n) = (IniEntry){ "video", "purple_for_brown",
+        "; purple_for_brown: true | false -- every maroon (brown) kit drawn purple, in the menus and\n"
+        "; in a match (the SWOS 2020 launcher's \"Purple instead of Brown\"). Drawing only.",
+        opts->purple_for_brown ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "video", "improved_pitch_palette",
+        "; improved_pitch_palette: true | false -- SWOS 2020's: the wet and soft pitches' stripes show\n"
+        "; (their second grass colour a little lighter). Drawing only.",
+        opts->improved_pitch_palette ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "video", "pixel_filter",
+        "; pixel_filter: none | simple2x | scale2x | scale3x -- SWOS 2020's filters: the picture made 2 or\n"
+        "; 3 times bigger by the filter before it is scaled to the window. The GPU renderer only, and not\n"
+        "; with a RetroArch shader preset (the retrotv mod), which is a filter of its own.",
+        PixelFilter_Name(opts->pixel_filter) };
+#if SWOS_TWEAKS   /* (PROJECT_TWEAKS 0: no [tweaks] but the stronger keepers, with PROJECT_TWEAK_STRONGER_GK) */
+    SETTING(n) = (IniEntry){ "tweaks", "cpu_cards",
+        "; [tweaks]: small changes to the original's behaviour, each off by default and only off line\n"
+        "; (online, and in the test rigs, the original plays): docs/MODS.md.\n"
+        "; cpu_cards: true | false -- the computer's players are booked and sent off too\n"
+        "; (the original cards only a side a human controls).",
+        (opts->tweaks & TWEAK_CPU_CARDS) ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "tweaks", "no_teammate_tackles",
+        "; no_teammate_tackles: true | false -- a team-mate leaves your player on the ball alone\n"
+        "; (in the original the nearest team-mate runs onto the ball and can slide or take it off you).",
+        (opts->tweaks & TWEAK_NO_TEAMMATE_TACKLES) ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "tweaks", "tackle_controlled_player",
+        "; tackle_controlled_player: true | false -- fire slides the player you control\n"
+        "; (in the original a nearer team-mate may slide instead).",
+        (opts->tweaks & TWEAK_TACKLE_CONTROLLED_PLAYER) ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "tweaks", "more_fouls",
+        "; more_fouls: true | false -- one borderline tackle in 16, from the side, is a foul\n"
+        "; (the original gives a foul only from behind; benefactorr's Career+).",
+        (opts->tweaks & TWEAK_MORE_FOULS) ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "tweaks", "ai_injury_subs",
+        "; ai_injury_subs: true | false -- the computer replaces an injured player at a stoppage\n"
+        "; (the original's computer never substitutes; benefactorr's Career+).",
+        (opts->tweaks & TWEAK_AI_INJURY_SUBS) ? "true" : "false" };
+#endif
+#if SWOS_TWEAK_STRONGER_GK   /* (also alone, in a fork without the others: PROJECT_TWEAK_STRONGER_GK) */
+    /* ---- SWOS 2020 port (agent D) ---- */
+    SETTING(n) = (IniEntry){ "tweaks", "stronger_goalkeeper_ai",
+        "; stronger_goalkeeper_ai: true | false -- SWOS 2020's stronger goalkeeper AI: in the\n"
+        "; gameplay styles with the Amiga's keepers (amiga, amiga60, moon) they reach one step\n"
+        "; further for a shot (dos and xbox keep theirs). Off line only; GAMEPLAY OPTIONS' STRONGER KEEPERS.",
+        (opts->tweaks & TWEAK_STRONGER_GOALKEEPER_AI) ? "true" : "false" };
+#endif
+#if SWOS_TWEAKS
+    SETTING(n) = (IniEntry){ "tweaks", "unlimited_transfers",
+        "; unlimited_transfers: true | false -- SWOS 2020's UNLIMITED TRANSFERS: in a career,\n"
+        "; BUY PLAYER is not held to the season's transfer quota (\"the club is unwilling to\n"
+        "; purchase players\"), only to the room left in the career's player pool.",
+        (opts->tweaks & TWEAK_UNLIMITED_TRANSFERS) ? "true" : "false" };
+#endif
+#if SWOS_TWEAK_FIXES   /* (ON by default -- TWEAKS_DEFAULT_ON; also alone: PROJECT_TWEAK_FIXES) */
+    SETTING(n) = (IniEntry){ "tweaks", "contest_own_ratings",
+        "; The tweaks below are ON by default (RULES OPTIONS); off line only, like every tweak.\n"
+        "; contest_own_ratings: true | false -- when two players contest the ball, each side is\n"
+        "; rated by the man at it. Both originals rate one side by a team-mate (the player with\n"
+        "; the opponent's line-up number): docs/BALL_CONTEST.md.",
+        (opts->tweaks & TWEAK_CONTEST_OWN_RATINGS) ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "tweaks", "league_crash_fixes",
+        "; league_crash_fixes: true | false -- SWOS 2020's career fixes 1-3: a division sized by the\n"
+        "; teams in its file, and when one grew a longer season and fewer meetings. They change\n"
+        "; nothing in 96/97's own leagues; they guard against a database whose leagues differ.",
+        (opts->tweaks & TWEAK_LEAGUE_CRASH_FIXES) ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "tweaks", "league_rules_2020",
+        "; league_rules_2020: true | false -- SWOS 2020's career fixes 4-7 in 96/97: Greece's season\n"
+        "; from October (its cup September to June), Israel plays each other twice (not three times),\n"
+        "; Italy relegates and promotes 3 (not 4), Scotland plays each other three times (not four).",
+        (opts->tweaks & TWEAK_LEAGUE_RULES_2020) ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "tweaks", "three_points_for_a_win",
+        "; three_points_for_a_win: true | false -- every 96/97 league gives 3 points for a win\n"
+        "; (SWOS 2020's --always-points-per-win-3).",
+        (opts->tweaks & TWEAK_THREE_POINTS) ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "tweaks", "five_substitutes",
+        "; five_substitutes: true | false -- every 96/97 league and cup: 5 substitutes from a bench\n"
+        "; of 5 (SWOS 2020's, with its 3 points). These four apply to a career started with them:\n"
+        "; a saved career keeps the rules it was started with.",
+        (opts->tweaks & TWEAK_FIVE_SUBSTITUTES) ? "true" : "false" };
+#endif
+    /* ---- launcher options (agent A) ---- */
+    SETTING(n) = (IniEntry){ "general", "skip_intro",
+        "; skip_intro: true | false -- straight to the menus, no intro (SWOS 2020's --no-intro;\n"
+        "; GAMEPLAY OPTIONS' SKIP INTRO).",
+        opts->skip_intro ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "general", "skip_image_reels",
+        "; skip_image_reels: true | false -- the intro is its title picture and tune alone, without\n"
+        "; the pictures before and after it (SWOS 2020's --no-image-reels).",
+        opts->skip_image_reels ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "general", "no_load_pause",
+        "; no_load_pause: true | false -- the stadium screen before a match goes at once instead of\n"
+        "; after its 3 seconds (SWOS 2020's --no-load-pause). Off line only.",
+        opts->no_load_pause ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "video", "auto_centering",
+        "; auto_centering: true | false -- a window resized or moved goes back to the middle of its\n"
+        "; display (SWOS 2020's --auto-centering). Windowed only.",
+        opts->auto_centering ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "video", "show_fps",
+        "; show_fps: true | false -- the frames shown a second, in the window's top right corner.",
+        opts->show_fps ? "true" : "false" };
+    SETTING(n) = (IniEntry){ "input", "mouse_cursor",
+        "; mouse_cursor: system | workbench2 | workbench1 -- the mouse pointer: the system's, or\n"
+        "; SWOS 2020's Amiga Workbench 2.04 or 1.x pointer (--mouse-cursor=0|1|2).",
+        opts->mouse_cursor == 1 ? "workbench2" : opts->mouse_cursor == 2 ? "workbench1" : "system" };
+    SETTING(n) = (IniEntry){ "gameplay", "cpu_tactics",
+        "; cpu_tactics: normal | expert -- expert plays SWOS 2020's improved formations (its\n"
+        "; --improved-cpu-tactics: every team's 4-4-2 to DEFEND, named 4132, 5131, ...). Off line only.",
+        opts->cpu_tactics ? "expert" : "normal" };
+    {   /* [options]: unset = the game's defaults (SetDefaultOptions) */
+        static const char *const kLength[] = { "3", "5", "7", "10" };
+        static const char *const kPitch[]  = { "seasonal", "random", "frozen", "muddy", "wet",
+                                               "soft", "normal", "dry", "hard" };
+        int len = opts->opt_game_length, pitch = opts->opt_pitch_type;
+#define OPT_BOOL(v, def) ((v) == OPTION_UNSET ? (def) : (v)) ? "true" : "false"
+        SETTING(n) = (IniEntry){ "options", "game_length",
+            "; The OPTIONS screen, as it was left (a loaded career plays its own).\n"
+            "; game_length: 3 | 5 | 7 | 10 (minutes)",
+            kLength[len >= 0 && len < 4 ? len : 0] };
+        SETTING(n) = (IniEntry){ "options", "pitch_type",
+            "; pitch_type: seasonal | random | frozen | muddy | wet | soft | normal | dry | hard",
+            kPitch[pitch >= -2 && pitch <= 6 ? pitch + 2 : 0] };
+        SETTING(n) = (IniEntry){ "options", "auto_replays", "; auto_replays, all_teams_equal, auto_save_highlights, menu_music: true | false",
+            OPT_BOOL(opts->opt_auto_replays, 1) };
+        SETTING(n) = (IniEntry){ "options", "all_teams_equal", NULL, OPT_BOOL(opts->opt_all_teams_equal, 0) };
+        SETTING(n) = (IniEntry){ "options", "auto_save_highlights", NULL, OPT_BOOL(opts->opt_auto_save_highlights, 1) };
+        SETTING(n) = (IniEntry){ "options", "menu_music", NULL, OPT_BOOL(opts->opt_menu_music, 1) };
+#undef OPT_BOOL
+    }
     if (n >= SETTINGS_MAX)
         fprintf(stderr, "[settings] the settings table is full (%d): raise SETTINGS_MAX\n", n);
     return n;
@@ -627,8 +1084,8 @@ static int settings_build(const PlatformInitOptions *opts, IniEntry *items, char
 static void settings_write_full(const PlatformInitOptions *opts, const char *path)
 {
     IniEntry items[SETTINGS_MAX];
-    char vbuf[8][24];
-    int n = settings_build(opts, items, vbuf);
+    char vbuf[10][24];
+    int n = settings_build(opts, items, vbuf, 1);
 
     FILE *f = fopen(path, "w");
     if (!f) {
@@ -640,14 +1097,21 @@ static void settings_write_full(const PlatformInitOptions *opts, const char *pat
         "; Hand-edit freely: SWOS only updates values you change and adds missing\n"
         "; keys; your comments, blank lines and commented-out keys are preserved.\n"
         "; Booleans accept true/false, on/off, yes/no, 1/0 (case-insensitive).\n");
-    const char *cur = NULL;
+    /* Each section once, in the order the table first names it, with every key of it in the
+     * table's order: a block of keys added later in another section's place (the launcher
+     * options') joins its own section instead of opening it again. */
+    uint8_t done[SETTINGS_MAX] = { 0 };
     for (int i = 0; i < n; i++) {
-        if (!cur || !eqi(cur, items[i].section)) {
-            cur = items[i].section;
-            fprintf(f, "\n[%s]%s\n", cur, section_intro(cur));
+        if (done[i])
+            continue;
+        fprintf(f, "\n[%s]%s\n", items[i].section, section_intro(items[i].section));
+        for (int j = i; j < n; j++) {
+            if (done[j] || !eqi(items[j].section, items[i].section))
+                continue;
+            done[j] = 1;
+            if (items[j].comment) fprintf(f, "%s\n", items[j].comment);
+            fprintf(f, "%s=%s\n", items[j].key, items[j].value);
         }
-        if (items[i].comment) fprintf(f, "%s\n", items[i].comment);
-        fprintf(f, "%s=%s\n", items[i].key, items[i].value);
     }
     fclose(f);
     swos_save_commit();   /* as Settings_Save does -- a fresh ini must survive the launch */
@@ -694,8 +1158,21 @@ void Settings_Save(const PlatformInitOptions *opts, const char *path)
     if (!opts || !path) return;
 
     IniEntry items[SETTINGS_MAX];
-    char vbuf[8][24];
-    int n = settings_build(opts, items, vbuf);
+    char vbuf[10][24];
+    int n = settings_build(opts, items, vbuf, 1);
+
+    /* The settings the player has NOT changed since the file was read: the file's value stands
+     * (s_baseline). Built from the same table, so entry k is the same key in both. */
+    unsigned char keep[SETTINGS_MAX];
+    memset(keep, 0, sizeof keep);
+    if (s_haveBaseline && strcmp(s_baselinePath, path) == 0) {
+        IniEntry was[SETTINGS_MAX];
+        char wbuf[10][24];
+        const int nw = settings_build(&s_baseline, was, wbuf, 0);
+        for (int k = 0; k < n && k < nw; k++)
+            keep[k] = eqi(was[k].section, items[k].section) && eqi(was[k].key, items[k].key) &&
+                      strcmp(was[k].value, items[k].value) == 0;
+    }
 
     /* Slurp the existing file. */
     static char lines[400][256];
@@ -741,7 +1218,7 @@ void Settings_Save(const PlatformInitOptions *opts, const char *path)
                     seen[k] = 1;
                     char fileval[300];
                     copy_value(eq + 1, fileval, sizeof fileval);
-                    if (strcmp(fileval, items[k].value) != 0) dirty = 1;
+                    if (!keep[k] && strcmp(fileval, items[k].value) != 0) dirty = 1;
                     break;
                 }
             }
@@ -799,8 +1276,8 @@ void Settings_Save(const PlatformInitOptions *opts, const char *path)
         seen[idx] = 1;
         char fileval[300];
         copy_value(eq + 1, fileval, sizeof fileval);
-        if (strcmp(fileval, items[idx].value) == 0) {
-            fputs(ln, out);                                /* unchanged -> verbatim */
+        if (keep[idx] || strcmp(fileval, items[idx].value) == 0) {
+            fputs(ln, out);                                /* unchanged (or not ours) -> verbatim */
         } else {
             size_t prefix = (size_t)(eq - ln) + 1;         /* keep "key=" verbatim */
             fwrite(ln, 1, prefix, out);
@@ -840,4 +1317,125 @@ void Settings_Save(const PlatformInitOptions *opts, const char *path)
 void Settings_AppendMissing(const PlatformInitOptions *opts, const char *path)
 {
     Settings_Save(opts, path);
+}
+
+/* --game-options-selftest: every value OpenSWOS Setup may write (include/game_options.h) read
+ * by this file's reader and written back by its writer, unchanged. Fails when the game renames
+ * a key or a value the setup still writes. 0 when every one comes back. */
+#include "game_options.h"
+int Settings_GameOptionsSelfTest(void)
+{
+    char in[512], out[512], line[512];
+    const char *tmp = getenv("TMPDIR");
+    int32_t i, k, bad = 0, checked = 0;
+
+    snprintf(in, sizeof in, "%s/swos-game-options-in.ini", tmp && *tmp ? tmp : "/tmp");
+    snprintf(out, sizeof out, "%s/swos-game-options-out.ini", tmp && *tmp ? tmp : "/tmp");
+    for (i = 0; i < GAME_OPTION_COUNT(kGameOptions); i++) {
+        const GameOption *o = &kGameOptions[i];
+        for (k = 0; k < o->count; k++) {
+            PlatformInitOptions opts;
+            FILE *f = fopen(in, "w");
+            char got[64] = "";
+            int32_t inSection = 0;
+            if (!f) { fprintf(stderr, "game-options: cannot write %s\n", in); return 1; }
+            fprintf(f, "[%s]\n%s=%s\n", o->section, o->key, o->values[k].value);
+            fclose(f);
+            memset(&opts, 0, sizeof opts);
+            Settings_Load(&opts, in);
+            if (!strcmp(o->section, "video") && !strcmp(o->key, "fullscreen")) {
+                /* (written from the window's own state, not the setting: read it as loaded) */
+                snprintf(got, sizeof got, "%s", opts.fullscreen == PLATFORM_FULLSCREEN_DESKTOP ? "desktop"
+                                                : opts.fullscreen == PLATFORM_FULLSCREEN_EXCLUSIVE ? "exclusive" : "off");
+            } else {
+                Settings_Save(&opts, out);
+                if (!(f = fopen(out, "r"))) { fprintf(stderr, "game-options: cannot read %s\n", out); return 1; }
+                while (fgets(line, sizeof line, f)) {
+                    size_t n = strlen(o->key);
+                    if (line[0] == '[')
+                        inSection = !strncmp(line + 1, o->section, strlen(o->section)) && line[1 + strlen(o->section)] == ']';
+                    else if (inSection && !strncmp(line, o->key, n) && line[n] == '=') {
+                        sscanf(line + n + 1, "%63[^ \t\r\n;]", got);
+                        break;
+                    }
+                }
+                fclose(f);
+            }
+            checked++;
+            if (strcmp(got, o->values[k].value)) {
+                fprintf(stderr, "game-options: [%s] %s=%s came back as '%s'\n", o->section, o->key,
+                        o->values[k].value, got);
+                bad++;
+            }
+        }
+    }
+    remove(in);
+    remove(out);
+    printf("game-options self-test: %d of %d values come back%s\n", (int)(checked - bad), (int)checked,
+           bad ? " -- FAILED" : "");
+    return bad ? 1 : 0;
+}
+
+/* ---- launcher options (agent A) ----
+ * SWOS_LAUNCHER_SETTINGS_TEST=1: every value of the launcher options' keys read and written back
+ * as it was (and stronger_goalkeeper_ai, when the build has it). PASS / FAIL on stdout. */
+int Settings_LauncherSelfTest(void)
+{
+    static const struct { const char *section, *key, *values[3]; } k[] = {
+        { "general",  "skip_intro",       { "true", "false" } },
+        { "general",  "skip_image_reels", { "true", "false" } },
+        { "general",  "no_load_pause",    { "true", "false" } },
+        { "video",    "auto_centering",   { "true", "false" } },
+        { "video",    "show_fps",         { "true", "false" } },
+        { "video",    "resolution",       { "2560x1080", "auto" } },
+        { "input",    "mouse_cursor",     { "system", "workbench2", "workbench1" } },
+        { "gameplay", "cpu_tactics",      { "normal", "expert" } },
+        { "graphics", "style",            { "amiga", "dos", "2020" } },
+#if SWOS_TWEAK_STRONGER_GK
+        { "tweaks",   "stronger_goalkeeper_ai", { "true", "false" } },
+#endif
+    };
+    char in[512], out[512], line[512];
+    const char *tmp = getenv("TMPDIR");
+    int32_t bad = 0, checked = 0;
+    snprintf(in, sizeof in, "%s/swos-launcher-in.ini", tmp && *tmp ? tmp : "/tmp");
+    snprintf(out, sizeof out, "%s/swos-launcher-out.ini", tmp && *tmp ? tmp : "/tmp");
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
+        for (int32_t v = 0; v < 3 && k[i].values[v]; v++) {
+            PlatformInitOptions opts;
+            char got[64] = "";
+            int32_t inSection = 0;
+            FILE *f = fopen(in, "w");
+            if (!f) { printf("[launcher-settings-test] FAIL: cannot write %s\n", in); return 1; }
+            fprintf(f, "[%s]\n%s=%s\n", k[i].section, k[i].key, k[i].values[v]);
+            fclose(f);
+            memset(&opts, 0, sizeof opts);
+            Settings_Load(&opts, in);
+            remove(out);
+            Settings_Save(&opts, out);
+            if (!(f = fopen(out, "r"))) { printf("[launcher-settings-test] FAIL: cannot read %s\n", out); return 1; }
+            while (fgets(line, sizeof line, f)) {
+                const size_t n = strlen(k[i].key);
+                if (line[0] == '[')
+                    inSection = !strncmp(line + 1, k[i].section, strlen(k[i].section)) &&
+                                line[1 + strlen(k[i].section)] == ']';
+                else if (inSection && !strncmp(line, k[i].key, n) && line[n] == '=') {
+                    sscanf(line + n + 1, "%63[^ \t\r\n;]", got);
+                    break;
+                }
+            }
+            fclose(f);
+            checked++;
+            if (strcmp(got, k[i].values[v])) {
+                printf("[launcher-settings-test] [%s] %s=%s came back as '%s'\n", k[i].section, k[i].key,
+                       k[i].values[v], got);
+                bad++;
+            }
+        }
+    remove(in);
+    if (strcmp(getenv("SWOS_LAUNCHER_SETTINGS_TEST") ? getenv("SWOS_LAUNCHER_SETTINGS_TEST") : "", "keep") != 0)
+        remove(out);                    /* (=keep: the last file written, to read) */
+    printf("[launcher-settings-test] %s (%d of %d values come back)\n", bad ? "FAIL" : "PASS",
+           (int)(checked - bad), (int)checked);
+    return bad ? 1 : 0;
 }

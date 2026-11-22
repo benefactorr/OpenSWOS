@@ -43,6 +43,8 @@ int16_t SaveJson_LoadPreset (uint8_t *filename, const uint8_t *src, uint32_t src
 
 int16_t SaveJson_WriteDIY   (uint8_t *filename);
 int16_t SaveJson_LoadDIY    (uint8_t *filename, const uint8_t *src, uint32_t src_size);
+/* A .DIY's JSON text already in memory (NUL-terminated), in any world. */
+int16_t SaveJson_LoadDIYData(const uint8_t *src, uint32_t src_size);
 
 int16_t SaveJson_WriteHighlights(uint8_t *filename);
 int16_t SaveJson_LoadHighlights (uint8_t *filename, const uint8_t *src, uint32_t src_size);
@@ -62,6 +64,7 @@ uint8_t SaveJson_GetLoadedPrimaryCountryCode(void);
 struct TeamFileEx;
 int DataJson_LoadTeamArray(const char *json, int len, struct TeamFileEx *out, int max);
 #ifdef SWOS_SDL_BUILD
+int SaveJson_RebindModernCareerSquad(void);
 /* SWOS_DATA_JSON wire-in: load a country's teams from data_json/ into the
    teamFileBuf (2-byte host-native count + TeamFileEx records). Returns the team
    count (>0), or -1 to fall back to the binary TEAM.NNN. See LoadTeamFile. */

@@ -255,11 +255,15 @@ static void waitVBlankSync(uint32_t xorMagic, uint32_t expected)
  * the paused frame stays on screen. */
 #ifdef SWOS_SDL_BUILD
 extern int Platform_VBlank(void);
+extern void Platform_KeepFrameFresh(void);
 #endif
 
 static void pauseSpinWaitOneTick(void)
 {
 #ifdef SWOS_SDL_BUILD
+    /* The paused frame keeps its HUD and sub-pixel scroll, which otherwise expire
+     * when nothing draws (report 0043: the clock and names vanished on P). */
+    Platform_KeepFrameFresh();
     Platform_VBlank();
 #else
     uint16_t d0;
@@ -401,6 +405,18 @@ MainKeysCheck(uint16_t key)
             return;
         if (_playGame == 0)
             goto stop_highlight_playback;
+#ifdef SWOS_SDL_BUILD
+        /* Asked first: QUIT THE MATCH? RESUME / QUIT (src/esc_confirm.c) -- a handheld's
+         * trigger is ESC, and easily pressed. Offline only, never under a rig. */
+        {
+            extern int EscConfirm_Wanted(void);
+            extern int EscConfirm_Ask(void);
+            const int ends = _gameStatePl == ST_GAME_IN_PROGRESS ||
+                             (_gameState != ST_PLAYERS_GOING_TO_SHOWER && _gameState != ST_RESULT_AFTER_THE_GAME);
+            if (ends && EscConfirm_Wanted() && !EscConfirm_Ask())
+                return;
+        }
+#endif
 
         _playGame = 0;
         _overlayActiveFlag = 0;
@@ -636,6 +652,9 @@ int32_t _gFrameStepInput = 0;
 GameFrameResult GameLoop_Frame(void)
 {
     ReadTimerDelta();
+#ifdef SWOS_SDL_BUILD
+    { extern void MenuMouse_InMatch(void); MenuMouse_InMatch(); }   /* no cursor over the pitch (UI only) */
+#endif
 
     /* Pause spin loop */
     while (_paused != 0) {
@@ -727,6 +746,7 @@ GameFrameResult GameLoop_Frame(void)
     _cameraCoordinatesValid = (uint16_t)(_cameraX.s.i == _oldCameraX && _cameraY.s.i == _oldCameraY);
 #else
     ScrollToCurrent();
+    { extern void ModHooks_PitchDrawn(void); ModHooks_PitchDrawn(); }  /* (under the sprites: the mud) */
 #endif
     /* Record the camera in the SAME space the per-sprite coordinates are written
      * in. Those come off the draw path (sprites.c), which measures from
@@ -766,6 +786,7 @@ GameFrameResult GameLoop_Frame(void)
      * penalties. No-op unless _gArcadeMode (checked inside). */
     { extern void Arcade_MatchTick(void); Arcade_MatchTick(); }
 #endif
+    { extern void ModMatch_Frame(void); ModMatch_Frame(); }   /* (the mods: include/mod_api.h) */
     /* nullsub_8 — no-op */
     RASTER(RASTER_SIM);
     UpdateAndApplyTeamControls();
@@ -809,6 +830,10 @@ GameFrameResult GameLoop_Frame(void)
     DrawBenchAndSubsMenu();
     BenchCheckControls();
     UpdateAndDrawStatistics();
+#ifdef SWOS_SDL_BUILD
+    { extern void ModHooks_MatchDrawn(void); ModHooks_MatchDrawn(); }  /* (a mod's drawing over the match) */
+    { extern void Platform_DrawVolumes(void); Platform_DrawVolumes(); } /* (the volume keys' readout) */
+#endif
 
     /* The window was closed. Not out of a LIVE match from here: this frame may be one
      * GGPO is re-simulating, and "a re-simulated frame left the match loop" was an
@@ -897,8 +922,31 @@ static GameFrameResult runFrame(void)
 /* ====================================================================
  * GameLoop — main per-frame game loop
  * ==================================================================== */
+static void game_loop_body(void);
+static int32_t s_gameLoopDepth;
+
+/* A match (or a replay) is on screen: the menus it shows keep the view it has
+ * (Video_ApplyDisplayChange waits for the menus after it). */
+int32_t GameLoop_Active(void) { return s_gameLoopDepth > 0; }
+
+/* ...and its frames are still running: not once it is over, when the same loop shows the
+ * REPLAY / EXIT screen and the mods' AFTER THE MATCH entries (ModApi_InMatch: a mod drawing
+ * over the match -- the weather's rain -- stops there). A REPLAY's own GameLoop runs again. */
+static int32_t s_matchOver;
+int32_t GameLoop_MatchRunning(void) { return s_gameLoopDepth > 0 && !s_matchOver; }
+
 void __attribute__((used, externally_visible))
 GameLoop(void)
+{
+    const int32_t wasOver = s_matchOver;
+    s_matchOver = 0;
+    s_gameLoopDepth++;
+    game_loop_body();
+    s_gameLoopDepth--;
+    s_matchOver = wasOver;
+}
+
+static void game_loop_body(void)
 {
     int16_t d1, d2;
 
@@ -928,6 +976,12 @@ GameLoop(void)
             d2 = SIM_CAMERA_MAX_Y;   /* bottom end: 592 at 272 lines */
         else
             d2 = 16;                 /* top end: the same in both */
+        {   /* a mod's match that starts at the top goal (SWOS 2020's shoot-out: its GameLoop_130
+             * sets D0 = 0 after the Rand, which is still drawn) */
+            extern int32_t ModMatch_CameraTop(void);
+            if (ModMatch_CameraTop())
+                d2 = 16;
+        }
         d1 = SIM_CAMERA_CENTRE_X;    /* 168 at 336 wide */
     }
 
@@ -955,6 +1009,8 @@ end_of_match_flow:
 #ifdef SWOS_SDL_BUILD
     { extern void ReplayRec_MatchEnd(void); ReplayRec_MatchEnd(); }
 #endif
+    { extern void ModMatch_Ended(void); ModMatch_Ended(); }   /* the mods are told, before any menu */
+    s_matchOver = 1;                                           /* (ModApi_InMatch: its frames are over) */
     FadeOutToBlack();
     /* nullsub_3 — no-op */
     SetHilFileHeader();
@@ -975,6 +1031,8 @@ end_of_match_flow:
             arcadeNoReplayMenu = 1;
     }
 #endif
+    /* A mod's match that asked for none (include/mod_api.h ModMatchSetup.replayMenu). */
+    { extern int32_t ModMatch_SkipReplayMenu(void); if (ModMatch_SkipReplayMenu()) arcadeNoReplayMenu = 1; }
     if (_isGameFriendly != 0 && _trainingGame == 0 && !arcadeNoReplayMenu) {
         ReplayExitMenuAfterFriendly();
         if (_replaySelected != 0) {
@@ -988,10 +1046,29 @@ end_of_match_flow:
             return;
         }
     }
+    /* A friendly the player played (not a mod's, the cabinet's or an online one): the mods'
+     * AFTER THE MATCH entries, when one has any (include/mod_api.h, src/mod_entries.c). */
+    {
+        extern void ModEntries_AfterMatch(void);
+        extern int32_t ModMatch_Active(void);
+        if (_isGameFriendly != 0 && _trainingGame == 0 && !arcadeNoReplayMenu && !ModMatch_Active()) {
+#ifdef SWOS_SDL_BUILD
+            extern void QuickAccess_AfterMatch(void);
+            QuickAccess_AfterMatch();       /* SWOS 2020's QUICK ACCESS ([general] quick_access) */
+#endif
+            ModEntries_AfterMatch();
+        }
+    }
 
 cleanup_and_return:
 #ifdef SWOS_SDL_BUILD
     { extern void ReplayRec_MatchEnd(void); ReplayRec_MatchEnd(); }   /* quit mid-match: keep it */
+#endif
+    { extern void ModMatch_Ended(void); ModMatch_Ended(); }           /* (a quit: told here, once) */
+#ifdef SWOS_SDL_BUILD
+    /* (purple's maroon art put back, team_colors.c: here, the match left -- a REPLAY plays it
+     *  again with the art as it was coloured, and ends through here itself) */
+    { extern void TeamColors_MatchArtEnd(void); TeamColors_MatchArtEnd(); }
 #endif
     StopAudioAndClearFlags();
     return;
@@ -1064,6 +1141,9 @@ StartMatchSequence(TeamGame *topTeam, TeamGame *bottomTeam)
      * screen is black here, so the change is invisible -- the same rule the
      * palette learned on this exact transition. */
     MatchViewEnter();
+#ifdef SWOS_SDL_BUILD
+    { extern void TacticsExpert_MatchBegin(void); TacticsExpert_MatchBegin(); }  /* (online: the game's own) */
+#endif
     /* NO palette push here.
      *
      * InitGameSaveTeams has just faded the screen to black, and nothing has
@@ -1094,6 +1174,9 @@ StartMatchSequence(TeamGame *topTeam, TeamGame *bottomTeam)
     ClearFrontbuffers();
     GameLoop();
     MatchViewLeave();
+#ifdef SWOS_SDL_BUILD
+    { extern void TacticsExpert_MatchEnd(void); TacticsExpert_MatchEnd(); }
+#endif
 }
 
 /* ====================================================================

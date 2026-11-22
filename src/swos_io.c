@@ -5,6 +5,7 @@
  */
 /* swos_io.c — portable I/O + heap shim. See swos_io.h. */
 #include "swos_io.h"
+#include "project_identity.h"   /* PROJECT_USER_DIR: the player\'s folder */
 #if defined(SWOS_SDL_BUILD) && !defined(_WIN32)
 /* SDL_GetPrefPath / SDL_free — the Switch mounts save:/ through them, and
  * macOS uses SDL_GetPrefPath when a .app launch leaves HOME unset. On the
@@ -14,6 +15,8 @@
 #endif
 #include <stdarg.h>
 #include <string.h>
+#include "world.h"
+#include "mods.h"
 
 /* ============================================================
  * Minimal libc fallbacks for Amiga.
@@ -160,23 +163,23 @@ void swos_io_free(void *p)
  * reader (resolve_save_path here) and the writer (resolve_path in resload.c)
  * consult it, so load and save always agree.
  *
- * Saves go to the platform's per-user data location — never inside the app
- * bundle / install dir (read-only under Gatekeeper, /Applications, Program
- * Files, etc.). See docs/SAVE.md.
- *   Windows: %USERPROFILE%\Documents\SWOS\save
+ * Desktop Career+ on Windows keeps settings and saves alongside SWOS.exe.
+ * The installation directory must be writable (avoid Program Files).
+ * Non-Windows platforms retain their platform-specific per-user locations.
+ *   Windows: <exe directory>/save
  *   macOS:   ~/Library/Application Support/SWOS/save
  *   Linux:   ~/.swos/save
  *   WASM:    "save" (→ the IndexedDB-backed /save mount from wasm/pre.js)
  * If the location can't be determined or created, we fall back to the relative
  * "save" default so a dev/CLI run still works from the game dir. */
 static char s_save_dir[1024] = "save";
-/* The user's game folder — the PARENT of the save dir. SWOS.ini lives here (a
- * sibling of save/), so config and saves share one per-user location. Default "."
- * (= the exe's cwd) so a dev/CLI run and the WASM build keep the old relative
- * "./SWOS.ini". swos_save_dir_init() overwrites it with the real per-user dir. */
+/* SWOS.ini is beside save/. On Windows this is the executable directory.
+ * On other platforms the established per-user location is preserved. */
 static char s_user_dir[1024] = ".";
 /* Where the data setup put the original game's files (swos_assets_dir()). */
 static char s_assets_dir[1024] = "";
+/* Migration fallback: existing installations may still have their assets in Documents. */
+static char s_legacy_assets_dir[1024] = "";
 #ifdef SWOS_SWITCH_BUILD
 /* The read-only content root, from SDL_GetBasePath() — which also mounts it.
  * "rom:" until resolved so a read before init fails visibly rather than
@@ -187,6 +190,11 @@ static char s_data_dir[256] = "rom:";
 const char *swos_save_dir(void)
 {
     return s_save_dir;
+}
+
+void swos_set_save_dir(const char *dir)
+{
+    snprintf(s_save_dir, sizeof s_save_dir, "%s", dir);
 }
 
 const char *swos_user_dir(void)
@@ -206,11 +214,12 @@ const char *swos_ini_path(void)
 
 #ifndef SWOS_WASM_BUILD
 #include <errno.h>
+#include <sys/stat.h>
 #if defined(_WIN32) && !defined(__CYGWIN__)
 #include <direct.h>
+#include <windows.h>
 #define SWOS_MKDIR(p) _mkdir(p)
 #else
-#include <sys/stat.h>
 #define SWOS_MKDIR(p) mkdir((p), 0777)
 #endif
 
@@ -249,6 +258,103 @@ static int swos_make_dirs(const char *path)
 }
 #endif  /* !SWOS_WASM_BUILD */
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+/* First-run migration from Documents/SWOS. Keep the originals as a backup.
+ * Files already present in the portable folder are never overwritten. This
+ * includes modern career sidecars (.r04 and .link), classic saves, and the
+ * separate career-plus world directories. Windows file APIs are used here
+ * only; the non-Windows save implementation is unchanged. */
+static int swos_portable_copy_tree(const char *old_dir, const char *new_dir,
+                                  int depth)
+{
+    WIN32_FIND_DATAA item;
+    HANDLE h;
+    char pattern[1024];
+    int ok = 1;
+    if (depth > 12) return 0;
+    if (snprintf(pattern, sizeof pattern, "%s/*", old_dir) >= (int)sizeof pattern)
+        return 0;
+    h = FindFirstFileA(pattern, &item);
+    if (h == INVALID_HANDLE_VALUE) return 1;
+    do {
+        char src[1024], dst[1024];
+        if (!strcmp(item.cFileName, ".") || !strcmp(item.cFileName, ".."))
+            continue;
+        /* Do not follow junctions or symlinks outside the legacy save tree. */
+        if (item.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+            continue;
+        if (snprintf(src, sizeof src, "%s/%s", old_dir, item.cFileName) >= (int)sizeof src ||
+            snprintf(dst, sizeof dst, "%s/%s", new_dir, item.cFileName) >= (int)sizeof dst) {
+            ok = 0;
+            continue;
+        }
+        if (item.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (swos_make_dirs(dst) != 0 ||
+                !swos_portable_copy_tree(src, dst, depth + 1))
+                ok = 0;
+        } else if (!CopyFileA(src, dst, TRUE)) {
+            DWORD err = GetLastError();
+            if (err != ERROR_FILE_EXISTS && err != ERROR_ALREADY_EXISTS) {
+                ok = 0;
+                fprintf(stderr, "[portable] unable to copy %s (error %lu)\n",
+                        src, (unsigned long)err);
+            }
+        }
+    } while (FindNextFileA(h, &item));
+    FindClose(h);
+    return ok;
+}
+
+static void swos_portable_migrate(const char *legacy, const char *portable)
+{
+    char src[1024], dst[1024], marker[1024];
+    FILE *f;
+    int ok = 1;
+    if (!legacy || !*legacy || !strcmp(legacy, portable)) return;
+    if (snprintf(marker, sizeof marker, "%s/.career-plus-portable-v1", portable) >=
+        (int)sizeof marker) return;
+    f = fopen(marker, "rb");
+    if (f) { fclose(f); return; }  /* don't resurrect deleted portable saves */
+    if (snprintf(src, sizeof src, "%s/SWOS.ini", legacy) < (int)sizeof src &&
+        snprintf(dst, sizeof dst, "%s/SWOS.ini", portable) < (int)sizeof dst) {
+        if (!CopyFileA(src, dst, TRUE)) {
+            DWORD err = GetLastError();
+            if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND &&
+                err != ERROR_FILE_EXISTS && err != ERROR_ALREADY_EXISTS)
+                ok = 0;
+        }
+    } else ok = 0;
+    if (snprintf(src, sizeof src, "%s/save", legacy) < (int)sizeof src &&
+        snprintf(dst, sizeof dst, "%s/save", portable) < (int)sizeof dst)
+        ok = swos_portable_copy_tree(src, dst, 0) && ok;
+    else ok = 0;
+    if (ok) {
+        f = fopen(marker, "wb");
+        if (f) {
+            fputs("Career+ portable settings and save migration completed.\n", f);
+            fclose(f);
+        }
+    } else {
+        fprintf(stderr, "[portable] legacy migration incomplete; will retry on next start\n");
+    }
+}
+#endif
+
+int swos_select_world_save_dir(const char *tag)
+{
+#if defined(SWOS_WASM_BUILD) || defined(SWOS_SWITCH_BUILD)
+    (void)tag;
+    return 1;
+#else
+    char save[1024];
+    int n = snprintf(save, sizeof save, "%s/save/career-plus-%s", s_user_dir, tag);
+    if (n < 0 || (size_t)n >= sizeof save || swos_make_dirs(save) != 0)
+        return 0;
+    swos_set_save_dir(save);
+    return 1;
+#endif
+}
+
 void swos_save_dir_init(void)
 {
 #if defined(SWOS_SWITCH_BUILD)
@@ -279,7 +385,7 @@ void swos_save_dir_init(void)
      * The mount is flat and small, so unlike the desktops there is no separate
      * user/ and user/save split: SWOS.ini and the .CAR files share it. */
     {
-        char *pref = SDL_GetPrefPath(NULL, "SWOS");
+        char *pref = SDL_GetPrefPath(NULL, PROJECT_USER_DIR);
         if (pref && *pref) {
             size_t n = strlen(pref);
             /* SDL returns a trailing separator; the rest of this file composes
@@ -307,15 +413,61 @@ void swos_save_dir_init(void)
      * truncation (a home path this long can't happen in practice). */
     char user[512];
 
-# if defined(_WIN32) || defined(__CYGWIN__)
-    /* Windows: %USERPROFILE%\Documents\SWOS. Forward slashes are accepted by
-     * both the native CRT and Cygwin's path layer. */
-    const char *profile = getenv("USERPROFILE");
-    if (!profile || !*profile)
-        return;                                  /* fall back to "save" / "." */
-    snprintf(user, sizeof user, "%s/Documents/SWOS", profile);
+# if defined(SWOS_ANDROID_BUILD)
+    /* Android: the app's own folder on shared storage, Android/data/<app id>/files -- a PC
+     * reaches it over USB, so it is where the player copies the assets folder OpenSWOS Setup
+     * made (docs/MOBILE.md), and finds SWOS.ini, SWOS.log and save/. No permission is needed
+     * for an app's own folder. Without shared storage (none mounted): the internal one. */
+    const char *base = SDL_AndroidGetExternalStoragePath();
+    if (!base || !*base)
+        base = SDL_AndroidGetInternalStoragePath();
+    if (!base || !*base) {
+        fprintf(stderr, "[settings] no storage for the app (%s) -- SWOS.ini and saves fall back "
+                        "to the CWD\n", SDL_GetError());
+        return;
+    }
+    snprintf(user, sizeof user, "%s", base);
+# elif defined(SWOS_IOS_BUILD)
+    /* iOS: the app's Documents, which the Files app shows (UIFileSharingEnabled): the player
+     * copies the assets folder OpenSWOS Setup made into it (docs/MOBILE.md), and finds SWOS.ini,
+     * SWOS.log and save/ there. HOME is the app's sandbox. */
+    const char *home = getenv("HOME");
+    if (!home || !*home)
+        return;
+    snprintf(user, sizeof user, "%s/Documents", home);
+# elif defined(_WIN32) || defined(__CYGWIN__)
+    /* Portable Career+: keep SWOS.ini and save/ beside SWOS.exe. CWD was
+     * anchored to the executable folder by main.c, but resolve the executable
+     * directly too so shortcuts and nonstandard launches remain reliable. */
+#  if defined(_WIN32) && !defined(__CYGWIN__)
+    {
+        DWORD length = GetModuleFileNameA(NULL, user, (DWORD)sizeof user);
+        if (!length || length >= sizeof user) {
+            snprintf(user, sizeof user, ".");
+        } else {
+            char *slash = strrchr(user, '\\');
+            char *forward = strrchr(user, '/');
+            if (forward && (!slash || forward > slash)) slash = forward;
+            if (slash) *slash = '\0';
+            else snprintf(user, sizeof user, ".");
+        }
+    }
+#  else
+    snprintf(user, sizeof user, ".");
+#  endif
     for (char *p = user; *p; p++)
         if (*p == '\\') *p = '/';
+    /* The assets resolver must retain the ORIGINAL Documents path. It must
+     * not derive its fallback from the new portable s_user_dir. */
+    {
+        const char *profile = getenv("USERPROFILE");
+        if (profile && *profile) {
+            snprintf(s_legacy_assets_dir, sizeof s_legacy_assets_dir,
+                     "%s/Documents/" PROJECT_USER_DIR "/assets", profile);
+            for (char *p = s_legacy_assets_dir; *p; p++)
+                if (*p == '\\') *p = '/';
+        }
+    }
 # elif defined(__APPLE__)
     /* ~/Library/Application Support/SWOS, but NOT via $HOME alone.
      *
@@ -331,9 +483,9 @@ void swos_save_dir_init(void)
      * tried first: it is what the docs say and what a terminal launch uses. */
     const char *home = getenv("HOME");
     if (home && *home) {
-        snprintf(user, sizeof user, "%s/Library/Application Support/SWOS", home);
+        snprintf(user, sizeof user, "%s/Library/Application Support/" PROJECT_USER_DIR, home);
     } else {
-        char *pref = SDL_GetPrefPath(NULL, "SWOS");
+        char *pref = SDL_GetPrefPath(NULL, PROJECT_USER_DIR);
         if (!pref || !*pref) {
             fprintf(stderr, "[settings] no HOME and SDL_GetPrefPath failed (%s) "
                             "— SWOS.ini and saves fall back to the CWD\n",
@@ -356,9 +508,9 @@ void swos_save_dir_init(void)
      * silent "." fallback is the worst of the options. */
     const char *home = getenv("HOME");
     if (home && *home) {
-        snprintf(user, sizeof user, "%s/.swos", home);
+        snprintf(user, sizeof user, "%s/" PROJECT_USER_DOT_DIR, home);
     } else {
-        char *pref = SDL_GetPrefPath(NULL, "SWOS");
+        char *pref = SDL_GetPrefPath(NULL, PROJECT_USER_DIR);
         if (!pref || !*pref) {
             fprintf(stderr, "[settings] no HOME and SDL_GetPrefPath failed (%s) "
                             "— SWOS.ini and saves fall back to the CWD\n",
@@ -389,29 +541,62 @@ void swos_save_dir_init(void)
                         "fall back to the CWD\n", save, strerror(errno));
         return;
     }
+# if defined(_WIN32) && !defined(__CYGWIN__)
+    /* Copy pre-existing settings and career saves before Settings_Load() and
+     * before the first save enumeration. Never modify the legacy originals. */
+    {
+        const char *profile = getenv("USERPROFILE");
+        if (profile && *profile) {
+            char legacy[1024];
+            if (snprintf(legacy, sizeof legacy, "%s/Documents/" PROJECT_USER_DIR,
+                         profile) < (int)sizeof legacy) {
+                for (char *p = legacy; *p; p++)
+                    if (*p == '\\') *p = '/';
+                swos_portable_migrate(legacy, user);
+            }
+        }
+    }
+# endif
     snprintf(s_user_dir, sizeof s_user_dir, "%s", user);
     snprintf(s_save_dir, sizeof s_save_dir, "%s", save);
 #endif  /* !SWOS_WASM_BUILD */
 }
 
 #if !defined(SWOS_WASM_BUILD) && !defined(SWOS_SWITCH_BUILD)
-/* SWOS_ASSETS, else <user dir>/assets. Read here rather than in
- * swos_save_dir_init so it is right even when that returned early (no HOME):
- * then the user dir is "." and the assets folder "./assets". */
+/* Career+ desktop asset search order:
+ *   1. SWOS_ASSETS (explicit developer override, when set)
+ *   2. assets/ beside SWOS.exe (the portable installation)
+ *   3. Documents/SWOS/assets (legacy Windows installation)
+ * The first available directory is exposed through swos_assets_dir().
+ * swos_data_path_base() also checks the legacy directory per file, so partial
+ * migrations do not hide missing legacy data. Saves/INI use the portable root.
+ */
 static void assets_dir_init(void)
 {
     static int s_done;
     if (s_done) return;
     s_done = 1;
+    if (!s_legacy_assets_dir[0])
+        snprintf(s_legacy_assets_dir, sizeof s_legacy_assets_dir,
+                 "%s/assets", s_user_dir);
     const char *env = getenv("SWOS_ASSETS");
-    if (env && *env)
+    if (env && *env) {
         snprintf(s_assets_dir, sizeof s_assets_dir, "%s", env);
-    else
-        snprintf(s_assets_dir, sizeof s_assets_dir, "%s/assets", s_user_dir);
+    } else {
+        struct stat st;
+        if (stat("assets", &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR)
+            snprintf(s_assets_dir, sizeof s_assets_dir, "assets");
+        else
+            snprintf(s_assets_dir, sizeof s_assets_dir, "%s", s_legacy_assets_dir);
+    }
     size_t n = strlen(s_assets_dir);
     while (n > 1 && (s_assets_dir[n - 1] == '/' || s_assets_dir[n - 1] == '\\'))
         s_assets_dir[--n] = '\0';
+    n = strlen(s_legacy_assets_dir);
+    while (n > 1 && (s_legacy_assets_dir[n - 1] == '/' || s_legacy_assets_dir[n - 1] == '\\'))
+        s_legacy_assets_dir[--n] = '\0';
 }
+
 #endif
 
 static void resolve_save_path(const uint8_t *name, char *out, uint32_t out_sz)
@@ -422,11 +607,8 @@ static void resolve_save_path(const uint8_t *name, char *out, uint32_t out_sz)
     snprintf(out, out_sz, "%s/%s", swos_save_dir(), src);
 }
 
-int swos_io_load_alloc(const uint8_t *name, uint8_t **out_buf, uint32_t *out_size)
+static int load_alloc_path(const char *path, uint8_t **out_buf, uint32_t *out_size)
 {
-    char path[1280];   /* s_save_dir (up to 1023) + "/" + filename */
-    resolve_save_path(name, path, sizeof(path));
-
     FILE *f = fopen(path, "rb");
     if (!f) return 1;
 
@@ -445,6 +627,19 @@ int swos_io_load_alloc(const uint8_t *name, uint8_t **out_buf, uint32_t *out_siz
     *out_buf = buf;
     *out_size = (uint32_t)n;
     return 0;
+}
+
+int swos_io_load_alloc(const uint8_t *name, uint8_t **out_buf, uint32_t *out_size)
+{
+    char path[1280];   /* s_save_dir (up to 1023) + "/" + filename */
+    resolve_save_path(name, path, sizeof(path));
+    return load_alloc_path(path, out_buf, out_size);
+}
+
+int swos_io_load_data_alloc(const char *name, uint8_t **out_buf, uint32_t *out_size)
+{
+    char path[1280];
+    return load_alloc_path(swos_data_path(name, path, sizeof(path)), out_buf, out_size);
 }
 
 int swos_io_save(const uint8_t *name, const uint8_t *buf, uint32_t size)
@@ -507,6 +702,19 @@ static int find_nocase(const char *root, const char *rel, char *out, uint32_t ca
 
 const char *swos_data_path(const char *rel, char *buf, uint32_t buf_sz)
 {
+#if !defined(SWOS_SWITCH_BUILD) && !defined(SWOS_WASM_BUILD)
+    /* The enabled mods first, in their order (include/mods.h): a file a mod has is read
+     * from it. Writes go through swos_data_path_base, which never looks there. */
+    if (rel && buf && buf_sz && rel[0] != '/' && rel[0] != '\\' && !strchr(rel, ':'))
+        for (int32_t i = 0; i < Mods_Count(); i++)
+            if (find_nocase(Mods_Dir(i), rel, buf, buf_sz) == 0)
+                return buf;
+#endif
+    return swos_data_path_base(rel, buf, buf_sz);
+}
+
+const char *swos_data_path_base(const char *rel, char *buf, uint32_t buf_sz)
+{
 #ifdef SWOS_SWITCH_BUILD
     /* The content is mounted read-only at rom:/ and there is no chdir, so the
      * relative paths the rest of the game uses have to be anchored here. */
@@ -520,8 +728,27 @@ const char *swos_data_path(const char *rel, char *buf, uint32_t buf_sz)
 #else
     if (!rel || !buf || buf_sz == 0) return rel;
     if (rel[0] == '/' || rel[0] == '\\' || strchr(rel, ':')) return rel;   /* already anchored */
+    if ((!strncmp(rel, "data_json/worlds/2627/", 22) ||
+         !strcmp(rel, "data_json/career_params.json")) &&
+        find_nocase(".", rel, buf, buf_sz) == 0)
+        return buf;
+    if (World_Current() == WORLD_9697 &&
+        (!strcasecmp(rel, "data/team.009") || !strcasecmp(rel, "data/team.041") ||
+         !strcasecmp(rel, "data/team.047") ||
+         !strcasecmp(rel, "data/player_ages_by_name.csv") ||
+         !strcasecmp(rel, "data/national_fake_names.csv")) &&
+        find_nocase(".", rel, buf, buf_sz) == 0)
+        return buf;
     assets_dir_init();
+    /* The game's own data and JSON beside the executable must never be
+     * shadowed by outdated copies in an older assets installation. */
+    if (find_nocase(".", rel, buf, buf_sz) == 0)
+        return buf;
     if (s_assets_dir[0] && find_nocase(s_assets_dir, rel, buf, buf_sz) == 0)
+        return buf;
+    if (s_legacy_assets_dir[0] &&
+        strcmp(s_legacy_assets_dir, s_assets_dir) != 0 &&
+        find_nocase(s_legacy_assets_dir, rel, buf, buf_sz) == 0)
         return buf;
     return rel;
 #endif
@@ -529,8 +756,11 @@ const char *swos_data_path(const char *rel, char *buf, uint32_t buf_sz)
 
 const char *swos_data_relative(const char *path)
 {
-    const char *roots[2] = { swos_data_root(), swos_assets_dir() };
-    for (int i = 0; i < 2; i++) {
+    const char *roots[2 + MODS_MAX] = { swos_data_root(), swos_assets_dir() };
+    int count = 2;
+    for (int32_t m = 0; m < Mods_Count() && count < 2 + MODS_MAX; m++)
+        roots[count++] = Mods_Dir(m);       /* (a path swos_data_path found in a mod) */
+    for (int i = 0; i < count; i++) {
         size_t n = strlen(roots[i]);
         if (n && strncmp(path, roots[i], n) == 0 && (path[n] == '/' || path[n] == '\\')) {
             path += n;
@@ -615,6 +845,13 @@ int swos_io_load_alloc(const uint8_t *name, uint8_t **out_buf, uint32_t *out_siz
     *out_buf = buf;
     *out_size = sz;
     return 0;
+}
+
+/* The game runs from its own directory, and resload leaves a name with a folder in it
+ * (a mod's competitions/x.DIY, say) alone rather than sending it to save/. */
+int swos_io_load_data_alloc(const char *name, uint8_t **out_buf, uint32_t *out_size)
+{
+    return swos_io_load_alloc((const uint8_t *)name, out_buf, out_size);
 }
 
 /* Amiga: the game runs from its own directory and resload owns the save
