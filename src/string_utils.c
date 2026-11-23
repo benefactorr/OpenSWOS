@@ -216,6 +216,9 @@ unsigned CareerMoneyScale(void)
     return 1;
 }
 
+/* Compact display only: values are stored in thousands of pounds.
+ * For million-pound values show at most two decimal places (nearest 10K),
+ * without changing the underlying transfer value or financial calculations. */
 void FormatCompactMoney(uint32_t thousands, uint8_t *dst)
 {
     if (thousands < 1000) {
@@ -223,15 +226,17 @@ void FormatCompactMoney(uint32_t thousands, uint8_t *dst)
         dst += GetStringLength(dst);
         *dst++ = 'K';
     } else {
-        Int2Ascii((uint16_t)(thousands / 1000), dst);
+        /* Round to hundredths of a million before splitting: 1.999M -> 2M. */
+        uint32_t hundredths = thousands / 10u + (thousands % 10u >= 5u);
+        uint32_t millions = hundredths / 100u;
+        unsigned fraction = (unsigned)(hundredths % 100u);
+        Int2Ascii((uint16_t)millions, dst);
         dst += GetStringLength(dst);
-        unsigned remainder = thousands % 1000;
-        if (remainder) {
+        if (fraction) {
             *dst++ = '.';
-            for (unsigned place = 100; place && remainder; place /= 10) {
-                *dst++ = '0' + remainder / place;
-                remainder %= place;
-            }
+            *dst++ = (uint8_t)('0' + fraction / 10u);
+            if (fraction % 10u)
+                *dst++ = (uint8_t)('0' + fraction % 10u);
         }
         *dst++ = 'M';
     }

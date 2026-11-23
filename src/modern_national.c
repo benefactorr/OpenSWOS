@@ -2,6 +2,7 @@
 #include "modern_career_runtime.h"
 #include "endian_helpers.h"
 #include "teams.h"
+#include "career_management_eligibility.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -185,13 +186,28 @@ static const NationalTeamRecord nationRecords[][49] = {
     },
 };
 
+/* Additional 2026/27 UEFA members. These occupy unused TEAM.080 ordinals,
+ * leaving the original 0..48 national-team identities unchanged. */
+static const NationalTeamRecord kModernEuropeAdditional[] = {
+    { 80, 49, 158, 47, 0 }, /* ANDORRA */
+    { 80, 50, 42,  54, 0 }, /* BOSNIA AND HERZEGOVINA */
+    { 80, 51, 159, 63, 0 }, /* GIBRALTAR */
+    { 80, 52, 160, 86, 0 }, /* KAZAKHSTAN */
+    { 80, 53, 157, 88, 0 }, /* KOSOVO */
+    { 80, 54, 156, 94, 0 }, /* MONTENEGRO */
+};
+
 int ModernNational_StartPicker;
 
 const NationalTeamRecord *ModernNational_Record(uint16_t team)
 {
     unsigned file = team >> 8;
     unsigned ordinal = team & 255;
-    if (file < 80 || file > 85 || ordinal >= 49 || !ModernRuntime_Enabled())
+    if (file < 80 || file > 85 || !ModernRuntime_Enabled())
+        return NULL;
+    if (file == 80 && ordinal >= 49 && ordinal < 55)
+        return &kModernEuropeAdditional[ordinal - 49];
+    if (ordinal >= 49)
         return NULL;
     const NationalTeamRecord *record = &nationRecords[file - 80][ordinal];
     return record->countryNumber == file ? record : NULL;
@@ -291,9 +307,16 @@ unsigned ModernNational_SeedingStrength(const NationalTeamRecord *record)
 
 int ModernNational_CanManage(uint16_t team)
 {
+    if (!Career_ManagementTeamAllowed(team))
+        return 0;
     const NationalTeamRecord *record = ModernNational_Record(team);
     if (!record)
         return 0;
+    /* The six newly registered nations can use generated national squad cover
+     * where their modern club database has fewer than 16 eligible players.
+     * ModernNational_ProjectTeam already creates those temporary call-ups. */
+    if ((team >> 8) == 80 && (team & 255) >= 49 && (team & 255) < 55)
+        return candidates != NULL;
     unsigned nat = record->nationalityCode;
     unsigned keepers = 0, outfield = 0;
     for (size_t i = nationStart[nat]; i < nationStart[nat + 1]; ++i) {

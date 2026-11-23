@@ -3,8 +3,8 @@
 #ifndef SWOS_BUILD_H
 #define SWOS_BUILD_H
 
-#define SWOS_BUILD_ID      "unknown"
-#define SWOS_BUILD_ID_UC   "UNKNOWN"
-#define SWOS_BUILD_DATE    "2026-11-21"
+#define SWOS_BUILD_ID      "f4fc01bd-dirty"
+#define SWOS_BUILD_ID_UC   "F4FC01BD-DIRTY"
+#define SWOS_BUILD_DATE    "2026-11-22"
 
 #endif /* SWOS_BUILD_H */

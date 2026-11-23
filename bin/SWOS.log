@@ -1,4 +1,4 @@
-[build] OpenSWOS unknown (2026-11-21, windows x86, tester build)
+[build] OpenSWOS f4fc01bd-dirty (2026-11-22, windows x86, tester build)
 [mods] on: autoplay (Autoplay 1.0, modes, canonical 0b0505e6-f36b-57b2-b7ab-0a69af05eb51) from mods/autoplay
 [mods] on: backgrounds (Menu backgrounds 1.0, cosmetic, canonical 1eecf5bb-1c99-5158-ad4a-11e586fcca59) from mods/backgrounds
 [mods] on: challenges (Challenges 1.0, modes, canonical ca0cb256-e65f-5b14-90f0-d1c3dac245cb) from mods/challenges
@@ -45,3 +45,139 @@
 [menu-json] install: 46/47 menus loaded from JSON in place (0 edited vs compiled, 0 too-large-skipped, 0 error)
 [tactics-json] SWOS_TACTICS_JSON — installing formations from data_json/tactics/*.json (relative to the binary dir)
 [tactics-json] install: 12/12 formations loaded from JSON in place (0 edited vs compiled, 0 error)
+[data-json] TEAM LOADING ACTIVE — country 20 <- data_json/teams/ITALY.json (256 teams)
+[verify-fill] InitFromTableEntrySpec(spec=02497bb4, idx=0): spec[1]=0 spec[2]=20 spec[7]=0 spec[13]=20 entryOff=0 spec[13+entryOff]=20 expectedCount=20
+[bug20-record] #1 ENTER compId=0x0000 minSubs=2 playEachTeam=2 matchPairsPerRound=1 totalMatchesInRound=20 sectionMatchesProgress=0 halfGroupsCounter=0 matchesPerHalf=10 leagueCurrentSlot=0 leagueMatchProgress=0 totalMatchesPerSectionLive=190 subRoundCounter=0 numTeams=20 leagueTotalMatches=38
+[bug20-getfx] #1 subRound=0 matchesInRound=20 sectionProg=0 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=00 01 posA=0 posB=1 gridA=14 gridB=3 swap=0
+[bug20-fixture] #1 compId=0x0000 subRound=0 sectionProgress=1 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0xfc team2Off=0x36 t1=0x140E ctrl1=1 t2=0x1403 ctrl2=1 resultPtrOff=0x0
+[bug20-getfx] #2 subRound=0 matchesInRound=20 sectionProg=1 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=02 03 posA=2 posB=3 gridA=0 gridB=5 swap=0
+[bug20-fixture] #2 compId=0x0000 subRound=0 sectionProgress=2 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x0 team2Off=0x5a t1=0x1400 ctrl1=1 t2=0x1405 ctrl2=1 resultPtrOff=0x0
+[bug20-getfx] #3 subRound=0 matchesInRound=20 sectionProg=2 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=04 05 posA=4 posB=5 gridA=18 gridB=4 swap=0
+[bug20-fixture] #3 compId=0x0000 subRound=0 sectionProgress=3 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x144 team2Off=0x48 t1=0x1412 ctrl1=1 t2=0x1404 ctrl2=3 resultPtrOff=0x0
+[bug20-getfx] #4 subRound=0 matchesInRound=20 sectionProg=3 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=06 07 posA=6 posB=7 gridA=19 gridB=16 swap=0
+[bug20-fixture] #4 compId=0x0000 subRound=0 sectionProgress=4 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x156 team2Off=0x120 t1=0x1413 ctrl1=1 t2=0x1410 ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #5 subRound=0 matchesInRound=20 sectionProg=4 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=08 09 posA=8 posB=9 gridA=6 gridB=17 swap=0
+[bug20-fixture] #5 compId=0x0000 subRound=0 sectionProgress=5 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x6c team2Off=0x132 t1=0x1406 ctrl1=1 t2=0x1411 ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #6 subRound=0 matchesInRound=20 sectionProg=5 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=0A 0B posA=10 posB=11 gridA=7 gridB=10 swap=0
+[bug20-fixture] #6 compId=0x0000 subRound=0 sectionProgress=6 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x7e team2Off=0xb4 t1=0x1407 ctrl1=1 t2=0x140A ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #7 subRound=0 matchesInRound=20 sectionProg=6 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=0C 0D posA=12 posB=13 gridA=15 gridB=13 swap=0
+[bug20-fixture] #7 compId=0x0000 subRound=0 sectionProgress=7 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x10e team2Off=0xea t1=0x140F ctrl1=1 t2=0x140D ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #8 subRound=0 matchesInRound=20 sectionProg=7 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=0E 0F posA=14 posB=15 gridA=11 gridB=9 swap=0
+[bug20-fixture] #8 compId=0x0000 subRound=0 sectionProgress=8 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0xc6 team2Off=0xa2 t1=0x140B ctrl1=1 t2=0x1409 ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #9 subRound=0 matchesInRound=20 sectionProg=8 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=10 11 posA=16 posB=17 gridA=2 gridB=1 swap=0
+[bug20-fixture] #9 compId=0x0000 subRound=0 sectionProgress=9 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x24 team2Off=0x12 t1=0x1402 ctrl1=1 t2=0x1401 ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #10 subRound=0 matchesInRound=20 sectionProg=9 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=12 13 posA=18 posB=19 gridA=12 gridB=8 swap=0
+[bug20-fixture] #10 compId=0x0000 subRound=0 sectionProgress=10 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0xd8 team2Off=0x90 t1=0x140C ctrl1=1 t2=0x1408 ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #11 subRound=0 matchesInRound=20 sectionProg=10 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=00 02 posA=0 posB=2 gridA=14 gridB=0 swap=0
+[bug20-fixture] #11 compId=0x0000 subRound=0 sectionProgress=11 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0xfc team2Off=0x0 t1=0x140E ctrl1=1 t2=0x1400 ctrl2=1 resultPtrOff=0x0
+[bug20-getfx] #12 subRound=0 matchesInRound=20 sectionProg=11 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=01 03 posA=1 posB=3 gridA=3 gridB=5 swap=0
+[bug20-fixture] #12 compId=0x0000 subRound=0 sectionProgress=12 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x36 team2Off=0x5a t1=0x1403 ctrl1=1 t2=0x1405 ctrl2=1 resultPtrOff=0x0
+[bug20-getfx] #13 subRound=0 matchesInRound=20 sectionProg=12 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=04 06 posA=4 posB=6 gridA=18 gridB=19 swap=0
+[bug20-fixture] #13 compId=0x0000 subRound=0 sectionProgress=13 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x144 team2Off=0x156 t1=0x1412 ctrl1=1 t2=0x1413 ctrl2=1 resultPtrOff=0x0
+[bug20-getfx] #14 subRound=0 matchesInRound=20 sectionProg=13 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=05 07 posA=5 posB=7 gridA=4 gridB=16 swap=0
+[bug20-fixture] #14 compId=0x0000 subRound=0 sectionProgress=14 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x48 team2Off=0x120 t1=0x1404 ctrl1=3 t2=0x1410 ctrl2=1 resultPtrOff=0x0
+[bug20-getfx] #15 subRound=0 matchesInRound=20 sectionProg=14 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=08 0A posA=8 posB=10 gridA=6 gridB=7 swap=0
+[bug20-fixture] #15 compId=0x0000 subRound=0 sectionProgress=15 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x6c team2Off=0x7e t1=0x1406 ctrl1=1 t2=0x1407 ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #16 subRound=0 matchesInRound=20 sectionProg=15 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=09 0B posA=9 posB=11 gridA=17 gridB=10 swap=0
+[bug20-fixture] #16 compId=0x0000 subRound=0 sectionProgress=16 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x132 team2Off=0xb4 t1=0x1411 ctrl1=1 t2=0x140A ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #17 subRound=0 matchesInRound=20 sectionProg=16 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=0C 0E posA=12 posB=14 gridA=15 gridB=11 swap=0
+[bug20-fixture] #17 compId=0x0000 subRound=0 sectionProgress=17 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x10e team2Off=0xc6 t1=0x140F ctrl1=1 t2=0x140B ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #18 subRound=0 matchesInRound=20 sectionProg=17 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=0D 0F posA=13 posB=15 gridA=13 gridB=9 swap=0
+[bug20-fixture] #18 compId=0x0000 subRound=0 sectionProgress=18 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0xea team2Off=0xa2 t1=0x140D ctrl1=1 t2=0x1409 ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #19 subRound=0 matchesInRound=20 sectionProg=18 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=10 12 posA=16 posB=18 gridA=2 gridB=12 swap=0
+[bug20-fixture] #19 compId=0x0000 subRound=0 sectionProgress=19 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x24 team2Off=0xd8 t1=0x1402 ctrl1=1 t2=0x140C ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #20 subRound=0 matchesInRound=20 sectionProg=19 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=11 13 posA=17 posB=19 gridA=1 gridB=8 swap=0
+[bug20-fixture] #20 compId=0x0000 subRound=0 sectionProgress=20 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x12 team2Off=0x90 t1=0x1401 ctrl1=1 t2=0x1408 ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #21 subRound=0 matchesInRound=20 sectionProg=20 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=03 00 posA=3 posB=0 gridA=5 gridB=14 swap=0
+[bug20-fixture] #21 compId=0x0000 subRound=0 sectionProgress=21 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x5a team2Off=0xfc t1=0x1405 ctrl1=1 t2=0x140E ctrl2=1 resultPtrOff=0x0
+[bug20-getfx] #22 subRound=0 matchesInRound=20 sectionProg=21 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=01 02 posA=1 posB=2 gridA=3 gridB=0 swap=0
+[bug20-fixture] #22 compId=0x0000 subRound=0 sectionProgress=22 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x36 team2Off=0x0 t1=0x1403 ctrl1=1 t2=0x1400 ctrl2=1 resultPtrOff=0x0
+[bug20-getfx] #23 subRound=0 matchesInRound=20 sectionProg=22 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=07 04 posA=7 posB=4 gridA=16 gridB=18 swap=0
+[bug20-fixture] #23 compId=0x0000 subRound=0 sectionProgress=23 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x120 team2Off=0x144 t1=0x1410 ctrl1=1 t2=0x1412 ctrl2=1 resultPtrOff=0x0
+[bug20-getfx] #24 subRound=0 matchesInRound=20 sectionProg=23 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=05 06 posA=5 posB=6 gridA=4 gridB=19 swap=0
+[bug20-fixture] #24 compId=0x0000 subRound=0 sectionProgress=24 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x48 team2Off=0x156 t1=0x1404 ctrl1=3 t2=0x1413 ctrl2=1 resultPtrOff=0x0
+[bug20-getfx] #25 subRound=0 matchesInRound=20 sectionProg=24 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=0B 08 posA=11 posB=8 gridA=10 gridB=6 swap=0
+[bug20-fixture] #25 compId=0x0000 subRound=0 sectionProgress=25 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0xb4 team2Off=0x6c t1=0x140A ctrl1=1 t2=0x1406 ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #26 subRound=0 matchesInRound=20 sectionProg=25 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=09 0A posA=9 posB=10 gridA=17 gridB=7 swap=0
+[bug20-fixture] #26 compId=0x0000 subRound=0 sectionProgress=26 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x132 team2Off=0x7e t1=0x1411 ctrl1=1 t2=0x1407 ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #27 subRound=0 matchesInRound=20 sectionProg=26 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=0F 0C posA=15 posB=12 gridA=9 gridB=15 swap=0
+[bug20-fixture] #27 compId=0x0000 subRound=0 sectionProgress=27 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0xa2 team2Off=0x10e t1=0x1409 ctrl1=1 t2=0x140F ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #28 subRound=0 matchesInRound=20 sectionProg=27 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=0D 0E posA=13 posB=14 gridA=13 gridB=11 swap=0
+[bug20-fixture] #28 compId=0x0000 subRound=0 sectionProgress=28 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0xea team2Off=0xc6 t1=0x140D ctrl1=1 t2=0x140B ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #29 subRound=0 matchesInRound=20 sectionProg=28 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=13 10 posA=19 posB=16 gridA=8 gridB=2 swap=0
+[bug20-fixture] #29 compId=0x0000 subRound=0 sectionProgress=29 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x90 team2Off=0x24 t1=0x1408 ctrl1=1 t2=0x1402 ctrl2=1 resultPtrOff=0xc
+[bug20-getfx] #30 subRound=0 matchesInRound=20 sectionProg=29 d5(grid stride)=0 fxPositionsOff=0xee schedule[0..1]=11 12 posA=17 posB=18 gridA=1 gridB=12 swap=0
+[bug20-fixture] #30 compId=0x0000 subRound=0 sectionProgress=30 totalMatchesInRound=20 matchPairsPerRound=1 team1Off=0x12 team2Off=0xd8 t1=0x1401 ctrl1=1 t2=0x140C ctrl2=1 resultPtrOff=0xc
+[world-cup] 132's clubs (season 0): 7 20 5 10 2 34 3 33 0 15 6 9 4 19 1 14
+[bug20-record] #2 ENTER compId=0x0003 minSubs=1 playEachTeam=1 matchPairsPerRound=2 totalMatchesInRound=18 sectionMatchesProgress=0 halfGroupsCounter=0 matchesPerHalf=18 leagueCurrentSlot=0 leagueMatchProgress=0 totalMatchesPerSectionLive=72 subRoundCounter=0 numTeams=36 leagueTotalMatches=8
+[cglm-dump] d0=0 cacheCount=60 cacheBase=01889d80
+[cglm-dump]   slot[0] @+0 stride=22 hdr=01 38 16 00 00 01 01 00 00 0C  fx0=01 00 14 04 14 13
+[cglm-dump]   slot[1] @+22 stride=22 hdr=00 40 16 00 00 01 01 00 00 00  fx0=02 00 14 12 14 04
+[cglm-dump]   slot[2] @+44 stride=22 hdr=03 40 16 00 00 01 01 00 00 00  fx0=01 00 14 04 0D 03
+[cglm-dump]   slot[3] @+66 stride=22 hdr=00 41 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 10
+[cglm-dump]   slot[4] @+88 stride=22 hdr=00 43 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 13
+[cglm-dump]   slot[5] @+110 stride=22 hdr=03 44 16 00 00 01 01 00 00 00  fx0=01 00 14 04 01 02
+[cglm-dump]   slot[6] @+132 stride=22 hdr=00 45 16 00 00 01 01 00 00 00  fx0=02 00 14 03 14 04
+[cglm-dump]   slot[7] @+154 stride=22 hdr=00 46 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 0E
+[cglm-dump]   slot[8] @+176 stride=22 hdr=00 48 16 00 00 01 01 00 00 00  fx0=02 00 14 05 14 04
+[cglm-dump]   slot[9] @+198 stride=22 hdr=03 48 16 00 00 01 01 00 00 00  fx0=02 00 08 06 14 04
+[cglm-dump]   slot[10] @+220 stride=22 hdr=00 4A 16 00 00 01 01 00 00 00  fx0=02 00 14 00 14 04
+[cglm-dump]   slot[11] @+242 stride=22 hdr=01 4A 16 00 00 00 00 01 00 06  fx0=01 00 14 04 14 0D
+[cglm-dump]   slot[12] @+264 stride=22 hdr=00 4C 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 0D
+[cglm-dump]   slot[13] @+286 stride=22 hdr=03 4C 16 00 00 01 01 00 00 00  fx0=02 00 10 01 14 04
+[cglm-dump]   slot[14] @+308 stride=22 hdr=00 4D 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 0F
+[cglm-dump]   slot[15] @+330 stride=22 hdr=00 4F 16 00 00 01 01 00 00 00  fx0=02 00 14 09 14 04
+[cglm-dump]   slot[16] @+352 stride=22 hdr=03 50 16 00 00 01 01 00 00 00  fx0=02 00 0F 01 14 04
+[cglm-dump]   slot[17] @+374 stride=22 hdr=00 51 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 0B
+[cglm-dump]   slot[18] @+396 stride=22 hdr=00 53 16 00 00 01 01 00 00 00  fx0=02 00 14 01 14 04
+[cglm-dump]   slot[19] @+418 stride=22 hdr=00 54 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 02
+[cglm-dump]   slot[20] @+440 stride=22 hdr=03 54 16 00 00 01 01 00 00 00  fx0=02 00 19 02 14 04
+[cglm-dump]   slot[21] @+462 stride=22 hdr=00 56 16 00 00 01 01 00 00 00  fx0=02 00 14 08 14 04
+[cglm-dump]   slot[22] @+484 stride=22 hdr=00 58 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 0C
+[cglm-dump]   slot[23] @+506 stride=22 hdr=03 58 16 00 00 01 01 00 00 00  fx0=01 00 14 04 1B 0D
+[cglm-dump]   slot[24] @+528 stride=22 hdr=00 59 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 11
+[cglm-dump]   slot[25] @+550 stride=22 hdr=00 5B 16 00 00 01 01 00 00 00  fx0=02 00 14 06 14 04
+[cglm-dump]   slot[26] @+572 stride=22 hdr=01 5C 16 00 00 00 00 02 01 07  fx0=02 00 14 0A 14 04
+[cglm-dump]   slot[27] @+594 stride=22 hdr=03 5C 16 00 00 01 01 00 00 00  fx0=01 00 14 04 06 02
+[cglm-dump]   slot[28] @+616 stride=22 hdr=00 5D 16 00 00 01 01 00 00 00  fx0=02 00 14 0A 14 04
+[cglm-dump]   slot[29] @+638 stride=22 hdr=00 5F 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 07
+[cglm-dump]   slot[30] @+660 stride=22 hdr=00 60 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 12
+[cglm-dump]   slot[31] @+682 stride=22 hdr=03 60 16 00 00 00 00 01 01 01  fx0=02 00 14 10 14 04
+[cglm-dump]   slot[32] @+704 stride=22 hdr=00 62 16 00 00 01 01 00 00 00  fx0=02 00 14 10 14 04
+[cglm-dump]   slot[33] @+726 stride=22 hdr=00 64 16 00 00 01 01 00 00 00  fx0=02 00 14 13 14 04
+[cglm-dump]   slot[34] @+748 stride=22 hdr=03 64 16 00 00 00 00 01 02 01  fx0=01 00 14 04 14 03
+[cglm-dump]   slot[35] @+770 stride=22 hdr=00 66 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 03
+[cglm-dump]   slot[36] @+792 stride=22 hdr=00 67 16 00 00 01 01 00 00 00  fx0=02 00 14 0E 14 04
+[cglm-dump]   slot[37] @+814 stride=22 hdr=03 68 16 00 00 00 00 02 01 02  fx0=01 00 14 04 14 05
+[cglm-dump]   slot[38] @+836 stride=22 hdr=00 69 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 05
+[cglm-dump]   slot[39] @+858 stride=22 hdr=00 6B 16 00 00 01 01 00 00 00  fx0=01 00 14 04 14 00
+[cglm-dump]   gameListArray[0] contest=+0 game=+0  bytes=01 38 16 00 00 01 01 00 00 0C 01 00
+[cglm-dump]   gameListArray[1] contest=+22 game=+22  bytes=00 40 16 00 00 01 01 00 00 00 02 00
+[cglm-dump]   gameListArray[2] contest=+44 game=+44  bytes=03 40 16 00 00 01 01 00 00 00 01 00
+[cglm-dump]   gameListArray[3] contest=+66 game=+66  bytes=00 41 16 00 00 01 01 00 00 00 01 00
+[cglm-dump]   gameListArray[4] contest=+88 game=+88  bytes=00 43 16 00 00 01 01 00 00 00 01 00
+[cglm-dump]   gameListArray[5] contest=+110 game=+110  bytes=03 44 16 00 00 01 01 00 00 00 01 00
+[cglm-dump]   gameListArray[6] contest=+132 game=+132  bytes=00 45 16 00 00 01 01 00 00 00 02 00
+[cglm-dump]   gameListArray[7] contest=+154 game=+154  bytes=00 46 16 00 00 01 01 00 00 00 01 00
+[cglm-dump]   gameListArray[8] contest=+176 game=+176  bytes=00 48 16 00 00 01 01 00 00 00 02 00
+[cglm-dump]   gameListArray[9] contest=+198 game=+198  bytes=03 48 16 00 00 01 01 00 00 00 02 00
+[cglm-dump]   gameListArray[10] contest=+220 game=+220  bytes=00 4A 16 00 00 01 01 00 00 00 02 00
+[cglm-dump]   gameListArray[11] contest=+242 game=+242  bytes=01 4A 16 00 00 00 00 01 00 06 01 00
+[cglm-dump]   gameListArray[12] contest=+264 game=+264  bytes=00 4C 16 00 00 01 01 00 00 00 01 00
+[cglm-dump]   gameListArray[13] contest=+286 game=+286  bytes=03 4C 16 00 00 01 01 00 00 00 02 00
+[career-row] d0=0 listIdx=0 contest=+0 game=+0 numGames=1 top=0x1404 bot=0x1413
+[career-row] d0=1 listIdx=0 contest=+22 game=+22 numGames=1 top=0x1412 bot=0x1404
+[career-row] d0=2 listIdx=0 contest=+44 game=+44 numGames=1 top=0x1404 bot=0x0D03
+[career-row] d0=3 listIdx=0 contest=+66 game=+66 numGames=1 top=0x1404 bot=0x1410
+[career-row] d0=4 listIdx=0 contest=+88 game=+88 numGames=1 top=0x1404 bot=0x1413
+[career-row] d0=5 listIdx=0 contest=+110 game=+110 numGames=1 top=0x1404 bot=0x0102
+[career-row] d0=6 listIdx=0 contest=+132 game=+132 numGames=1 top=0x1403 bot=0x1404
+[career-row] d0=7 listIdx=0 contest=+154 game=+154 numGames=1 top=0x1404 bot=0x140E
+[career-row] d0=0 listIdx=0 contest=+0 game=+0 numGames=1 top=0x1404 bot=0x1413
+[career-row] d0=1 listIdx=0 contest=+22 game=+22 numGames=1 top=0x1412 bot=0x1404
+[career-row] d0=2 listIdx=0 contest=+44 game=+44 numGames=1 top=0x1404 bot=0x0D03
+[career-row] d0=3 listIdx=0 contest=+66 game=+66 numGames=1 top=0x1404 bot=0x1410
+[career-row] d0=4 listIdx=0 contest=+88 game=+88 numGames=1 top=0x1404 bot=0x1413
+[career-row] d0=5 listIdx=0 contest=+110 game=+110 numGames=1 top=0x1404 bot=0x0102
+[career-row] d0=6 listIdx=0 contest=+132 game=+132 numGames=1 top=0x1403 bot=0x1404
+[career-row] d0=7 listIdx=0 contest=+154 game=+154 numGames=1 top=0x1404 bot=0x140E

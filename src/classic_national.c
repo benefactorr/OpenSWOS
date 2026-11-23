@@ -4,6 +4,7 @@
 #include "swos_io.h"
 #include "rnc.h"
 #include "world.h"
+#include "career_management_eligibility.h"
 #include "swos_national_trace.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -591,6 +592,8 @@ int ClassicNational_ProjectTeam(TeamFileEx *team, int fresh)
 
 int ClassicNational_CanManage(uint16_t teamId)
 {
+    if (!Career_ManagementTeamAllowed(teamId))
+        return 0;
     uint8_t nationality;
     if (!v3_nationality_for(teamId, &nationality))
         return 0;

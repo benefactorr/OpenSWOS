@@ -25,6 +25,7 @@
 #include "random.h"
 #include "string_utils.h"
 #include "world.h"
+#include "career_management_eligibility.h"
 
 /* Prevent GCC from converting byte loops to memcpy/memset (no libc) */
 #pragma GCC optimize("no-tree-loop-distribute-patterns")
@@ -200,6 +201,8 @@ JobOffer *GetJobOfferPtr(uint16_t index)
 __attribute__((used, externally_visible, optimize("no-tree-loop-distribute-patterns")))
 void AddJobOffer(uint16_t teamNumber, uint32_t initialFunds)
 {
+    if (!Career_ManagementTeamAllowed(teamNumber))
+        return;
     if (_numNewJobOffers + _numJobOffers >= _careerParams.job_offers_capacity)
         return;
 
@@ -633,6 +636,16 @@ void AcceptJobOffer(void) {
         offer = GetNewJobOfferPtr((uint16_t)_jobOfferOrdinal);
     } else {
         offer = GetJobOfferPtr((uint16_t)_oldJobOfferOrdinal);
+    }
+    /* A pre-update save may retain a now-restricted offer. Do not accept it. */
+    if (!Career_ManagementTeamAllowed(offer->teamNo)) {
+        uint16_t disallowed = offer->teamNo;
+        if (_jobOfferOrdinal >= 0)
+            RemoveJobOffer(disallowed);
+        else
+            JobOffers_RemoveOffer(disallowed);
+        SetExitMenuFlag();
+        return;
     }
     _teamNoOfferAccepted = offer->teamNo;
     _teamFundsAccepted = offer->amountOffered;
@@ -1070,7 +1083,9 @@ static uint16_t modern_club_job_candidate(unsigned low, unsigned high, int abroa
     for (size_t i = 0; i < world->count; ++i) {
         const ModernRoster *roster = &world->clubs[i];
         uint16_t team;
-        if (Team_IsOutsideLeague(&roster->header) ||
+        if (!Career_ManagementTeamAllowed(PACK_BE_U16(roster->header.countryNumber,
+                                                       roster->header.teamOrdinal)) ||
+            Team_IsOutsideLeague(&roster->header) ||
             !ModernRuntime_ActiveClub(roster, &team) || team == _selTeamNumber ||
             (abroad && !_isNationalSelector && World_FileCountry(team >> 8) == country) ||
             !IsNewJobOffer(team) || !IsOldJobOffer(team)) continue;
@@ -1396,6 +1411,9 @@ searchDomestic:
             TeamFile *a0tf = (TeamFile *)a0;
             if (Team_IsOutsideLeague(a0tf))     /* was league == 4 */
                 continue;
+            if (!Career_ManagementTeamAllowed(PACK_BE_U16(a0tf->countryNumber,
+                                                          a0tf->teamOrdinal)))
+                continue;
 
             /* Must be same division (country). selTeamNumber MSB = country.
              * Pre-fix `*(uint8_t *)&selTeamNumber` read LE byte[0] = ordinal,
@@ -1473,6 +1491,9 @@ searchForeign:
             TeamFile *a0tf = (TeamFile *)a0;
             if (Team_IsOutsideLeague(a0tf))     /* was league == 4 */
                 continue;
+            if (!Career_ManagementTeamAllowed(PACK_BE_U16(a0tf->countryNumber,
+                                                          a0tf->teamOrdinal)))
+                continue;
             /* Foreign job-offer search — skip teams from the user's own
              * country. MSB of selTeamNumber is the country byte; the LE
              * byte-read pre-fix used the ordinal, so the skip rarely
@@ -1520,7 +1541,7 @@ searchNational:
 
                 if (skill < repLow || skill > repHigh)
                     continue;
-                if (teamId == _selTeamNumber)
+                if (teamId == _selTeamNumber || !Career_ManagementTeamAllowed(teamId))
                     continue;
                 if (teamId == _lastNationalityCall)
                     continue;

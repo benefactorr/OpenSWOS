@@ -9,6 +9,7 @@
 #include "modern_career_runtime.h"
 #endif
 #include "world.h"
+#include "career_management_eligibility.h"
 #include "career_season.h"
 #include "career_teams.h"
 #include "comp_identity.h"
@@ -45,6 +46,21 @@
 
 /* ---- External functions ---- */
 extern void SetExitMenuFlag(void);
+
+/* The classic 3x16 team selector has only 48 visible entries. National teams
+ * in modern Europe exceed that count, so we page rather than truncate. */
+extern uint16_t _chooseTeamsFriendly_numTeamsInLeagueList;
+static unsigned s_modernNationalPickerPage;
+static int s_modernNationalPageAdvance;
+/* Career management country picker: private compact list. Never edit the
+ * underlying world/qualifying country arrays used by fixtures and AI. */
+static uint8_t s_careerManageCountries[256];
+void ModernNationalPicker_ResetPage(void)
+{
+    s_modernNationalPickerPage = 0;
+    s_modernNationalPageAdvance = 0;
+}
+
 
 /* ---- External globals (all live in SWOS2.s) ---- */
 extern uint16_t _teamsLoaded;
@@ -407,6 +423,51 @@ static void EnsureBosniaNationalTeamRecord(void)
     *(uint16_t *)_teamFileBuffer = (uint16_t)(count + 1u);
 }
 
+/* Modern national-team additions must exist as real team records, not just
+ * entries in the national eligibility registry. The TEAM.080 picker enumerates
+ * physical team records, so insert the six missing nations before building its
+ * team-pointer table. Always retain original 0..48 identities. */
+static void EnsureModernEuropeNationalTeamRecords(void)
+{
+    static const struct { uint8_t ordinal, nationality; const char *name; } extra[] = {
+        { 49, 158, "ANDORRA" }, { 50, 42, "BOSNIA" },
+        { 51, 159, "GIBRALTAR" }, { 52, 160, "KAZAKHSTAN" },
+        { 53, 157, "KOSOVO" }, { 54, 156, "MONTENEGRO" }
+    };
+    uint16_t count = *(uint16_t *)_teamFileBuffer;
+    if (count == 0 || count > TEAM_FILE_MAX_TEAMS) return;
+    TeamFileEx *teams = (TeamFileEx *)(_teamFileBuffer + 2);
+    uint16_t donor = 0;
+    for (uint16_t i = 0; i < count; ++i)
+        if (teams[i].team.countryNumber == CN_EUROPE) { donor = i; break; }
+    for (unsigned n = 0; n < sizeof(extra) / sizeof(extra[0]); ++n) {
+        int found = -1;
+        for (uint16_t i = 0; i < count; ++i)
+            if (teams[i].team.countryNumber == CN_EUROPE &&
+                teams[i].team.teamOrdinal == extra[n].ordinal) {
+                found = i;
+                break;
+            }
+        if (found < 0) {
+            if (count >= TEAM_FILE_MAX_TEAMS) break;
+            found = count++;
+            teams[found] = teams[donor];
+        }
+        TeamFileEx *team = &teams[found];
+        team->team.countryNumber = CN_EUROPE;
+        team->team.teamOrdinal = extra[n].ordinal;
+        team->team.league = 0;
+        memset(team->team.teamName, 0, sizeof(team->team.teamName));
+        strncpy(team->team.teamName, extra[n].name,
+                sizeof(team->team.teamName) - 1);
+        team->team.tactics = 0;
+        for (unsigned i = 0; i < 16; ++i) {
+            team->players[i].nationality = (int8_t)extra[n].nationality;
+            memset(team->players[i].playerName, 0, sizeof(team->players[i].playerName));
+        }
+    }
+    *(uint16_t *)_teamFileBuffer = count;
+}
 #endif
 
 __attribute__((used, externally_visible))
@@ -500,6 +561,8 @@ int16_t LoadTeamFile(uint16_t extNumber)
 #ifdef SWOS_SDL_BUILD
         if (World_Current() == WORLD_9697 && ext8 == CN_EUROPE)
             EnsureBosniaNationalTeamRecord();
+        else if (World_Current() == WORLD_2627 && ext8 == CN_EUROPE)
+            EnsureModernEuropeNationalTeamRecords();
 #endif
         /* Shared post-load processing (binary OR json source). */
         setLoadedTeamsGlobalNumbers();
@@ -1223,7 +1286,7 @@ int16_t GetNationalTeamNumber(uint16_t nationality)
 #ifdef SWOS_SDL_BUILD
     if (ModernNational_Record(0x5000)) {
         for (uint16_t file = 80; file <= 85; ++file)
-            for (uint16_t slot = 0; slot < 49; ++slot) {
+            for (uint16_t slot = 0; slot < (file == 80 ? 55 : 49); ++slot) {
                 uint16_t id = PACK_BE_U16(file, slot);
                 const NationalTeamRecord *record = ModernNational_Record(id);
                 if (record && record->nationalityCode == nationality)
@@ -1261,7 +1324,7 @@ int16_t GetNationalTeamNumberFromTeamFileId(uint16_t teamFileId)
         if (teamFileId == 255)
             return -1;
         for (uint16_t file = 80; file <= 85; ++file)
-            for (uint16_t slot = 0; slot < 49; ++slot) {
+            for (uint16_t slot = 0; slot < (file == 80 ? 55 : 49); ++slot) {
                 uint16_t id = PACK_BE_U16(file, slot);
                 const NationalTeamRecord *record = ModernNational_Record(id);
                 if (record && record->teamFileId == teamFileId)
@@ -1807,6 +1870,20 @@ void ChooseTeamsFriendlyOnSelect76(void)
 __attribute__((used, externally_visible))
 void ViewSelected(void)
 {
+#ifdef SWOS_SDL_BUILD
+    if (ModernNational_StartPicker && ModernRuntime_Enabled() &&
+        _lastLoadedExtNumber == CN_EUROPE &&
+        _chooseTeamsFriendly_numTeamsInLeagueList > 48) {
+        unsigned pages = (_chooseTeamsFriendly_numTeamsInLeagueList + 47) / 48;
+        s_modernNationalPickerPage = (s_modernNationalPickerPage + 1) % pages;
+        s_modernNationalPageAdvance = 1;
+        _viewSelectedTeams = 0;
+        _abortSelectTeams = 0;
+        _chooseTeamsResult = 0;
+        SetExitMenuFlag();
+        return;
+    }
+#endif
     _viewSelectedTeams = 1;
     _chooseTeamsResult = 0;
     _changeTeams = 0;
@@ -2387,6 +2464,12 @@ void ChooseTeamsFriendlyCommon2(MenuEntry *entry)
         d0 += _chooseTeamsFriendly_leftListNumEntries;
     }
 
+#ifdef SWOS_SDL_BUILD
+    if (ModernNational_StartPicker && ModernRuntime_Enabled() &&
+        _lastLoadedExtNumber == CN_EUROPE &&
+        _chooseTeamsFriendly_numTeamsInLeagueList > 48)
+        d0 += (uint16_t)(s_modernNationalPickerPage * 48);
+#endif
     int8_t idx = (int8_t)_teamsIndex[d0];
     int16_t idx16 = (int16_t)idx;
     TeamFileEx *team = (TeamFileEx *)_teamsPtrTable[(uint16_t)idx16];
@@ -2737,6 +2820,9 @@ void ChooseTeamsFriendlyInitFinish(void)
 #endif
         if (teamRecord->team.league == league && count < 100
 #ifdef SWOS_SDL_BUILD
+            && !((_gameType == GAME_TYPE_CAREER || ModernNational_StartPicker) &&
+                 !Career_ManagementTeamAllowed(PACK_BE_U16(teamRecord->team.countryNumber,
+                                                          teamRecord->team.teamOrdinal)))
             && !(ModernNational_StartPicker && _teamsType == 0 &&
                  !(ModernRuntime_Enabled() ?
                      ModernNational_CanManage(BE_READ_U16(teamRecord)) :
@@ -2817,18 +2903,32 @@ void ChooseTeamsFriendlyInitFinish(void)
         }
     }
 
+    /* Calculate visible column counts for the active 48-team page. */
+    uint16_t visibleTeamCount = _chooseTeamsFriendly_numTeamsInLeagueList;
+#ifdef SWOS_SDL_BUILD
+    if (ModernNational_StartPicker && ModernRuntime_Enabled() &&
+        _lastLoadedExtNumber == CN_EUROPE && visibleTeamCount > 48) {
+        unsigned pageStart = s_modernNationalPickerPage * 48;
+        if (pageStart >= visibleTeamCount) {
+            s_modernNationalPickerPage = 0;
+            pageStart = 0;
+        }
+        visibleTeamCount -= (uint16_t)pageStart;
+    }
+#endif
+    if (visibleTeamCount > 48) visibleTeamCount = 48;
     /* Calculate column counts */
-    if (_chooseTeamsFriendly_numTeamsInLeagueList >= 48) {
+    if (visibleTeamCount >= 48) {
         _chooseTeamsFriendly_leftListNumEntries = 16;
         _chooseTeamsFriendly_middleListNumEntries = 16;
         _chooseTeamsFriendly_rightListNumEntries = 16;
-    } else if (_chooseTeamsFriendly_numTeamsInLeagueList <= 8) {
+    } else if (visibleTeamCount <= 8) {
         _chooseTeamsFriendly_leftListNumEntries = 0;
-        _chooseTeamsFriendly_middleListNumEntries = _chooseTeamsFriendly_numTeamsInLeagueList;
+        _chooseTeamsFriendly_middleListNumEntries = visibleTeamCount;
         _chooseTeamsFriendly_rightListNumEntries = 0;
     } else {
-        uint16_t base = _chooseTeamsFriendly_numTeamsInLeagueList / 3;
-        uint16_t rem = _chooseTeamsFriendly_numTeamsInLeagueList % 3;
+        uint16_t base = visibleTeamCount / 3;
+        uint16_t rem = visibleTeamCount % 3;
         _chooseTeamsFriendly_leftListNumEntries = base;
         _chooseTeamsFriendly_middleListNumEntries = base;
         _chooseTeamsFriendly_rightListNumEntries = base;
@@ -2843,6 +2943,16 @@ void ChooseTeamsFriendlyInitFinish(void)
     ChooseTeamsFriendly_UpdateMenuEntryYLayout();
     ChooseTeamsSetHeader();
     CheckNumTeamsAllowed();
+#ifdef SWOS_SDL_BUILD
+    if (ModernNational_StartPicker && ModernRuntime_Enabled() &&
+        _lastLoadedExtNumber == CN_EUROPE &&
+        _chooseTeamsFriendly_numTeamsInLeagueList > 48) {
+        /* VIEW SELECTED is unavailable in a single-team career picker. Its
+         * original callback now pages the nation list in that context only. */
+        _menuEntries[55].isInvisible = 0;
+        _menuEntries[55].fg = (uintptr_t)"MORE TEAMS >>";
+    }
+#endif
     /* bra.w *+4 = NOP (fall through) */
 
     /* Build menu entries from teamsIndex/teamsPtrTable */
@@ -2881,7 +2991,14 @@ outer:
     uint16_t defaultColor = _selectTeamsNoLimit ? 5 : 9;
     e->isInvisible = 0;
 
-    int8_t tidx = (int8_t)_teamsIndex[d5];
+    unsigned sortedIndex = d5;
+#ifdef SWOS_SDL_BUILD
+    if (ModernNational_StartPicker && ModernRuntime_Enabled() &&
+        _lastLoadedExtNumber == CN_EUROPE &&
+        _chooseTeamsFriendly_numTeamsInLeagueList > 48)
+        sortedIndex += s_modernNationalPickerPage * 48;
+#endif
+    int8_t tidx = (int8_t)_teamsIndex[sortedIndex];
     TeamFileEx *team = (TeamFileEx *)_teamsPtrTable[(uint16_t)(int16_t)tidx];
     e->fg = (uintptr_t)team->team.teamName;
 
@@ -2904,7 +3021,7 @@ outer:
             return;
         e->isInvisible = 1;
         d6++;
-        if (d6 < _chooseTeamsFriendly_numTeamsInLeagueList) {
+        if (d6 < visibleTeamCount) {
             d5++;
             goto outer;
         }
@@ -3247,6 +3364,21 @@ extern const char *ModComps_RowLabel(void);     /* (src/mod_comps.c) */
 extern int32_t     ModComps_Choose(void);
 static uint8_t     k_modCompsMarker;
 
+/* The first career team picker can run before the game type has settled on
+ * GAME_TYPE_CAREER. Recognise its explicit selection title as well, so both
+ * the competition-row list and the separate country-name list agree. */
+extern uint8_t _aSelectTeamToMa[];
+static int CareerManageCountryHidden(uint8_t country)
+{
+    uint8_t base = World_FileCountry(country);
+    if (base != 31 && base != 76)
+        return 0;
+    if (CareerViewWorld_Active)
+        return 0;
+    return _gameType == GAME_TYPE_CAREER ||
+           _chooseTeamsHeader1stPart == (uintptr_t)_aSelectTeamToMa;
+}
+
 __attribute__((used, externally_visible))
 void SelectTeamsFinalMenu(uint16_t mode)
 {
@@ -3495,8 +3627,15 @@ skip_continental_check:
 
     /* loc_13E1F6: entry type dispatch */
     if ((uintptr_t)compEntry < 256) {
-        /* Country entry: get country name from countriesTable */
+        /* Country entries also appear in the main competition/league list.
+         * Filtering only the secondary _countryNames[] list leaves these
+         * selectable, which is why Russia and Belarus still appeared in the
+         * club-country picker after the earlier fix. Do not alter the original
+         * competition table: skip only these menu rows in career management.
+         * Keep the View World and other game-mode country lists untouched. */
         countryIdx = (uint16_t)(uintptr_t)compEntry;
+        if (CareerManageCountryHidden((uint8_t)countryIdx))
+            goto loc_E086;
         ctEntry = (uint8_t *)_countriesTable[countryIdx];
         *teamNamesPtr++ = (void *)(ctEntry + 1);
         *leaguesPtrOut++ = compEntry;
@@ -3601,6 +3740,22 @@ loc_E2D0:
         if (d7 != 254 && World_ContinentCountries((uint8_t)d7))    /* (a world's, its new countries in) */
             a5 = (void **)World_ContinentCountries((uint8_t)d7);
         cPtr = (uint8_t *)a5;
+        /* Filter unavailable countries at the COUNTRY level, not merely after
+         * entering their empty club lists. The menu selection below indexes
+         * a5[] by the visible row, so point a5 at the same compact list as
+         * the names. This does not affect View World or competition data. */
+        if (_gameType == GAME_TYPE_CAREER ||
+            _chooseTeamsHeader1stPart == (uintptr_t)_aSelectTeamToMa) {
+            uint8_t *out = s_careerManageCountries;
+            while (*cPtr != 255) {
+                cByte = *cPtr++;
+                if (!CareerManageCountryHidden(cByte))
+                    *out++ = cByte;
+            }
+            *out = 255;
+            a5 = (void **)s_careerManageCountries;
+            cPtr = s_careerManageCountries;
+        }
         for (;;) {
             cByte = *cPtr++;
             if (cByte == 255)
@@ -3849,6 +4004,12 @@ loc_E6F6:
     /* Show friendly menu */
     _entryText2 = _selectedTeamText;
     ShowMenu(_chooseTeamsFriendlyMenu);
+#ifdef SWOS_SDL_BUILD
+    if (s_modernNationalPageAdvance) {
+        s_modernNationalPageAdvance = 0;
+        goto loc_E6F6; /* Same TEAM.080, next visible page. */
+    }
+#endif
 
     if (_viewSelectedTeams != 0)
         goto loc_E73A;

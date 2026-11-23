@@ -6987,6 +6987,8 @@ void SelectTeamToManage(void)
     int showNational = 0;
 #ifdef SWOS_SDL_BUILD
     showNational = 1;
+    extern void ModernNationalPicker_ResetPage(void);
+    ModernNationalPicker_ResetPage();
     ModernNational_StartPicker = showNational;
 #endif
     ChooseTeamsDialog(1, (uint16_t)showNational, 0, _aSelectTeamToMa, (void *)0);
